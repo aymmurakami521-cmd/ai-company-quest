@@ -48,7 +48,16 @@
       </dl>
     </header>
 
-    <p class="banner" id="banner" role="status" aria-live="polite" hidden></p>
+    <!--
+      The single live region on the page. `selectBanner` always fills it, so the
+      status is announced exactly once per change and the header stats above stay
+      plain (non-live) text saying the same thing.
+    -->
+    <p class="banner" id="banner" role="status" aria-live="polite">
+      <span class="banner__symbol" aria-hidden="true"></span>
+      <span class="banner__code"></span>
+      <span class="banner__message"></span>
+    </p>
 
     <main class="office" id="office">
       <h2 class="visually-hidden">オフィス</h2>
@@ -69,7 +78,8 @@
           </canvas>
         </div>
         <div class="office__floor">
-          <ul class="desks" id="desks"></ul>
+          <!-- The complete list of actors, canvas overflow or not. -->
+          <ul class="desks" id="desks" aria-label="AI社員一覧"></ul>
           <p class="office__empty" id="empty-state">
             まだ席に誰もいません。sanitized eventが届くとAI社員が着席します。
           </p>
@@ -83,8 +93,15 @@
     </section>
 
     <section class="panel">
-      <h2>アクティビティログ<span class="panel__note">（直近のみ・上限あり）</span></h2>
-      <ol class="log" id="log"></ol>
+      <h2 id="log-heading">アクティビティログ<span class="panel__note">（直近のみ・上限あり）</span></h2>
+      <!--
+        The log scrolls, so the scroll container is focusable and named: a
+        keyboard-only reader can tab to it and page through the entries. The
+        <ol> keeps its list semantics inside.
+      -->
+      <div class="log__scroll" tabindex="0" role="group" aria-labelledby="log-heading">
+        <ol class="log" id="log"></ol>
+      </div>
       <p class="office__empty" id="log-empty">まだイベントはありません。</p>
     </section>
 

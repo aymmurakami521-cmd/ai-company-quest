@@ -50,17 +50,41 @@ curl -s http://127.0.0.1:4317/health
 curl -N  http://127.0.0.1:4317/events/live
 ```
 
-LIVE入力を用意せずMVPを確認する場合:
-
-```bash
-npm run demo                            # DEMO storeにfixtureを投入して起動
-open http://127.0.0.1:4317/#demo
-```
-
-`npm run demo` は `QUEST_INPUT_PATH` を指定しなければ `/dev/null` を使うため、
-credentialもlocal sessionも不要です（既存の値があればそれを優先します）。
 `npm run live` で `QUEST_INPUT_PATH` が未設定の場合、LIVEは起動せず
 exit code 1で終了します（fail closed）。
+
+**停止方法**: 起動したterminalで `Ctrl-C`。SIGINT / SIGTERMのどちらでも、collectorの
+tailを止めてからserverを閉じます（`src/live.ts` のshutdown handler）。残るprocessも
+一時fileもありません。
+
+## DEMO（最短手順）
+
+LIVE入力もcredentialも外部networkも使わず、画面の全機能を確認できます。
+
+```bash
+npm run demo                            # 1. DEMO storeにfixtureを投入して起動
+open http://127.0.0.1:4317/#demo        # 2. ブラウザで開く
+# 3. 止めるときは起動したterminalで Ctrl-C（SIGINT / SIGTERMどちらでも停止します）
+```
+
+`npm run demo` は `QUEST_DEMO=1` を渡し、`QUEST_INPUT_PATH` が未設定なら `/dev/null` を
+使います（既存の値があればそれを優先）。したがってlocal session・credential・network接続は
+不要です。DEMO storeへ投入されるのは `src/demo/fixtures.ts` の**固定13 event**だけで、
+timerも乱数も外部I/Oも使いません。何度起動しても同じ画面になります。
+
+**このDEMOで確認できること**
+
+| 見えるもの | 内容 |
+|---|---|
+| 5つのactor状態 | 待機中 `IDLE` / 作業中 `WORKING` / 承認待ち `APPROVAL` / 完了 `ENDED` / エラー `ERROR` が同時に1画面へ並びます |
+| 2つのsession | 進行中のsessionと、`session_end` 済みの完了sessionの両方 |
+| 接続状態 | `LOADING` → `CONNECTED` の遷移。「再接続」ボタンで `LOADING` からやり直せます |
+| LIVE/DEMO分離 | LIVEボタンへ切り替えると席・log・bannerが全て空になります（DEMOのstateは混ざりません） |
+| Canvasとの整合 | canvasは装飾層で、DOMの社員一覧・凡例・logが正本です |
+
+DEMOは**読み取り専用**です。画面から任意commandを実行する導線も、DEMO stateを書き換える
+導線もありません。DEMO eventがLIVE store / LIVE stream / LIVE stateへ入ることは
+構造的に不可能です（`seedDemoStore` はLIVE storeを渡されるとthrowします）。
 
 ## 設定（環境変数）
 
@@ -160,6 +184,27 @@ ingestがhaltしている場合の `取り込み停止 (fail-closed)` を表示�
 `fail_closed` frameで即座に伝わり、既知のreasonのみ日本語labelとしてbannerに添えます。
 `stream_gap` は黙って埋めず、明示bannerを出してから後続の `snapshot` で復旧します。
 
+#### status banner（閉じた語彙）
+
+画面上部のbannerは `selectBanner()`（`quest-view.js` の純粋関数）が決めます。
+**常にちょうど1つ**のcodeが出ており、「何も出ていない状態」はありません。
+優先順は上から下で、colorに加えて記号とcodeをtextで併記します。
+
+| code | 記号 | 意味 |
+|------|------|------|
+| `FAIL_CLOSED` | `✖` | ingestがhalt。表示中のstateは停止時点のまま凍結 |
+| `DISCONNECTED` | `✖` | 接続が切れた。「再接続」で復帰 |
+| `RECONNECTING` | `◍` | 再接続中。Last-Event-IDから続きを取得 |
+| `STREAM_GAP` | `‼` | streamに欠落。後続の `snapshot` で復旧 |
+| `REPLAYING` | `◌` | 取りこぼし分をreplay中 |
+| `LOADING` | `◌` | streamへ接続中（初回表示・mode切替直後） |
+| `EMPTY` | `⋯` | 接続済みだが在席0 |
+| `CONNECTED` | `●` | 接続済み・N席のstateを表示中 |
+
+halt reason（`unsupported_schema` / `state_limit`）とgap reason（`invalid_last_event_id` /
+`unknown_event_id` / `evicted`）はどちらも**閉じた語彙**です。既知のtokenだけが日本語labelへ
+変換され、未知の文字列はbannerへ出しません（wireの自由記述をそのまま表示しません）。
+
 ### Canvas描画（`World → draw(World)`）
 
 DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオフィスとしても描画します。
@@ -210,6 +255,28 @@ DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオ�
 `src/ui/assets.ts` のasset table 2行、`index.html` の `#office-canvas-frame` block、
 `quest.css` の `.office__canvas*`、`quest-app.js` のcanvas layer block（2つのimportと
 `renderCanvas` 呼び出しを含む）を戻すだけです。SSE・client fold・DOM描画には触れていません。
+
+### アクセシビリティ
+
+**DOMが正本、canvasは装飾層**です。canvasは `aria-hidden` で、そこに描かれる事実
+（誰が・どの状態か）は必ずDOMの社員一覧・凡例・アクティビティログ・HUDにもあります。
+canvasが上限で描き切れない席があっても、DOMの一覧は**常に全actor**を表示します。
+
+| 項目 | 実装 |
+|------|------|
+| キーボード操作 | 操作はすべてnativeの `<button>` / `<a>`。LIVE/DEMO切替・再接続・skip linkはTabとEnter/Spaceだけで完結します。独自key handlerもcustom widgetもありません |
+| tab順 | `tabindex` は `0` のみ。正の値も `-1` も使わず、scriptがfocusを奪うこともありません |
+| scroll領域 | 独自scrollbarを持つのはアクティビティログだけで、その容器が `tabindex="0"` + `aria-labelledby` の名前付きfocus stopです（keyboardだけでscrollできます） |
+| focus可視化 | `:focus-visible` のoutlineを1箇所で宣言し、どこでも `outline: none` しません |
+| accessible name | 社員一覧・mode group・log領域に名前があります。記号（`✖` `▶` など）はすべて `aria-hidden` の装飾で、隣に必ずtext labelがあります |
+| 現在選択 | LIVE/DEMOは `aria-pressed` で状態を公開します（色だけに依存しません） |
+| 通知 | live regionは**status bannerの1つだけ**（`role="status"` + `aria-live="polite"`）。接続・再接続・gap・fail-closed・emptyはすべてここへ1回だけ出ます。HUDの数値は同じ事実の静的な再掲なのでlive regionにしていません（二重読み上げ回避） |
+| 色以外での識別 | 全状態が「記号 + code + label」を持ちます。bannerの `data-tone` は色だけで、意味はcode/記号側にあります |
+| reduced motion | animation / transition は `@media (prefers-reduced-motion: no-preference)` の中だけ。canvasはtimerもanimation frameも使わない完全な静止画です |
+| 200% zoom / 狭い画面 | breakpointは1024 / 720 / 480pxの3段。固定幅containerも `min-width` による下限もないため、320 CSS px（＝640px画面の200% zoom）まで横scrollなしで1カラムへreflowします。`user-scalable=no` も `maximum-scale` も指定していません |
+| 過剰ARIA回避 | nativeのroleを言い直す `role=` を書きません。live regionは1つだけです |
+
+これらは `test/ui-a11y.test.ts` が配信assetそのものに対して検証しています。
 
 ### 画面側の分離と境界
 
@@ -330,6 +397,12 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   （DEMOを止めないため）。fail-closed表示自体はtestで検証しています。
 - 画面のレンダリングを検証する自動testはDOM contract（要素・selector・状態style・
   reduced-motion）と純粋関数までで、実ブラウザでのpixel比較は行っていません。
+- **アクセシビリティのtestは配信assetに対する契約検証まで**です（`test/ui-a11y.test.ts`）。
+  実ブラウザでのfocus順、実screen readerでの読み上げ、contrast比の実測、
+  実際の200% zoom描画は自動化していません。手動確認が必要です。
+- 画面の文言は日本語のみです（`<html lang="ja">`）。i18nはMVPの対象外です。
+- DEMOは自動進行しません。fixtureは1回投入されて固定で、時間経過で状態が変わることも、
+  UIからDEMO stateを変更することもできません。
 - Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界・backing store上限（0/1/40/95/96/97/
   4096席 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
   までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。

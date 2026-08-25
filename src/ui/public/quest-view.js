@@ -110,6 +110,19 @@ const HALT_LABELS = Object.freeze({
   state_limit: 'stateの上限に到達しました',
 });
 
+/**
+ * Stream-gap reasons, as a closed vocabulary too.
+ *
+ * `server.ts` emits exactly these three tokens on the replay path. Anything else
+ * is reported as an unlabelled gap: the screen says a gap happened and how it
+ * recovers, but it never echoes an arbitrary string off the wire.
+ */
+const GAP_LABELS = Object.freeze({
+  invalid_last_event_id: 'Last-Event-IDの形式が不正でした',
+  unknown_event_id: '再接続時のLast-Event-IDがreplay bufferにありませんでした',
+  evicted: 'replay bufferから溢れた分があります',
+});
+
 /** A new prototype-less map: a `session_id` of `__proto__` is just a key. */
 function emptyMap() {
   return Object.create(null);
@@ -192,6 +205,18 @@ export function normalizeHaltReason(value) {
 export function haltLabel(reason) {
   const token = normalizeHaltReason(reason);
   return token === null ? null : HALT_LABELS[token];
+}
+
+/** Reduces a stream-gap reason to a known token, or null for an unlabelled gap. */
+export function normalizeGapReason(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return ownProp(GAP_LABELS, value) === undefined ? null : value;
+}
+
+/** Readable text for a stream-gap reason, or null when the token is unknown. */
+export function gapLabel(reason) {
+  const token = normalizeGapReason(reason);
+  return token === null ? null : GAP_LABELS[token];
 }
 
 /** Connection banner. A halted (fail-closed) namespace outranks every phase. */
@@ -582,6 +607,91 @@ export function selectHeader(state) {
     last_frame_at_ms: state.connection.last_frame_at_ms,
     by_state: byState,
   };
+}
+
+/**
+ * Every situation the status banner reports, in the order it resolves them.
+ *
+ * This is the screen's closed status vocabulary: exactly one of these codes is
+ * showing at any moment, in LIVE and in DEMO alike, and there is no state of the
+ * screen that shows none of them. Order is priority - a halted namespace matters
+ * more than a lost socket, which matters more than a gap, and so on down to the
+ * ordinary connected office.
+ */
+export const BANNER_CODES = Object.freeze([
+  'FAIL_CLOSED',
+  'DISCONNECTED',
+  'RECONNECTING',
+  'STREAM_GAP',
+  'REPLAYING',
+  'LOADING',
+  'EMPTY',
+  'CONNECTED',
+]);
+
+const BANNER_VISUALS = Object.freeze({
+  FAIL_CLOSED: Object.freeze({ tone: 'error', symbol: '✖' }),
+  DISCONNECTED: Object.freeze({ tone: 'error', symbol: '✖' }),
+  RECONNECTING: Object.freeze({ tone: 'warn', symbol: '◍' }),
+  STREAM_GAP: Object.freeze({ tone: 'warn', symbol: '‼' }),
+  REPLAYING: Object.freeze({ tone: 'info', symbol: '◌' }),
+  LOADING: Object.freeze({ tone: 'info', symbol: '◌' }),
+  EMPTY: Object.freeze({ tone: 'info', symbol: '⋯' }),
+  CONNECTED: Object.freeze({ tone: 'ok', symbol: '●' }),
+});
+
+function bannerMessage(code, header) {
+  switch (code) {
+    case 'FAIL_CLOSED': {
+      const reason = haltLabel(header.halt_reason);
+      return (
+        '取り込みが停止しています (fail-closed)。表示中のstateは停止時点のままです。' +
+        (reason === null ? '' : `理由: ${reason}。`)
+      );
+    }
+    case 'DISCONNECTED':
+      return '接続が切れました。「再接続」を押すか、collectorが動いているか確認してください。';
+    case 'RECONNECTING':
+      return '再接続中です。Last-Event-IDから続きを取得します。';
+    case 'STREAM_GAP': {
+      const reason = gapLabel(header.gap === null ? null : header.gap.reason);
+      return (
+        'ストリームに欠落がありました。snapshotから復旧します。' + (reason === null ? '' : `理由: ${reason}。`)
+      );
+    }
+    case 'REPLAYING':
+      return '取りこぼし分をreplay中です。';
+    case 'LOADING':
+      return 'ストリームに接続しています。';
+    case 'EMPTY':
+      return `${header.mode}に接続済みです。まだ在席しているAI社員はいません。`;
+    default:
+      return `${header.mode}に接続済みです。${header.desk_count}席のstateを表示しています。`;
+  }
+}
+
+function bannerCode(header) {
+  if (header.halted) return 'FAIL_CLOSED';
+  const phase = header.connection.state;
+  if (phase === 'error') return 'DISCONNECTED';
+  if (phase === 'reconnecting') return 'RECONNECTING';
+  if (header.gap !== null) return 'STREAM_GAP';
+  if (header.replaying) return 'REPLAYING';
+  if (phase === 'offline' || phase === 'connecting') return 'LOADING';
+  return header.empty ? 'EMPTY' : 'CONNECTED';
+}
+
+/**
+ * The status banner for a header.
+ *
+ * Always returns a banner: the screen has no silent state. `code` and `symbol`
+ * carry the meaning on their own, so `tone` is only ever the colour of something
+ * the reader could already have read as text.
+ */
+export function selectBanner(header) {
+  const code = bannerCode(header);
+  const visual = ownProp(BANNER_VISUALS, code) ?? BANNER_VISUALS.CONNECTED;
+  return { code, tone: visual.tone, symbol: visual.symbol, message: bannerMessage(code, header) };
 }
 
 /**
