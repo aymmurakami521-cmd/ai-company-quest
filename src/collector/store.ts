@@ -28,6 +28,15 @@ import { BoundedIdSet, ReplayBuffer } from './replayBuffer.ts';
 /** Why ingestion stopped for good. Details are sanitized, never stream content. */
 export type HaltReason = 'unsupported_schema' | 'state_limit';
 
+/**
+ * What a halt tells subscribers.
+ *
+ * `reason` is a closed vocabulary and `detail` is the same sanitized fragment
+ * `/health` already publishes (`schema_version:<n>` or `<limit>:<max>`): a
+ * bounded fact about the boundary that was crossed, never stream content.
+ */
+export type HaltNotice = { namespace: Namespace; reason: HaltReason; detail: string };
+
 export type IngestOutcome =
   | { status: 'accepted'; wire: WireEvent; ingested: IngestedEvent }
   | { status: 'duplicate'; event_id: string }
@@ -70,6 +79,7 @@ export const DEFAULT_REPLAY_CAPACITY = 500;
 export const DEFAULT_DEDUPE_CAPACITY = 100_000;
 
 export type WireListener = (wire: WireEvent) => void;
+export type HaltListener = (notice: HaltNotice) => void;
 
 export class NamespaceStore {
   readonly namespace: Namespace;
@@ -84,6 +94,12 @@ export class NamespaceStore {
   stats: IngestStats;
   nextIngestSeq: number;
   listeners: Set<WireListener>;
+  haltListeners: Set<HaltListener>;
+  /**
+   * The halt that stopped this store, kept so a client that was not connected
+   * when it happened can still be told the same fact on the same frame shape.
+   */
+  haltNotice: HaltNotice | null;
 
   constructor(options: StoreOptions) {
     this.namespace = options.namespace;
@@ -96,6 +112,8 @@ export class NamespaceStore {
     this.state = createInitialState(options.namespace, options.player, this.stateLimits);
     this.nextIngestSeq = 1;
     this.listeners = new Set();
+    this.haltListeners = new Set();
+    this.haltNotice = null;
     this.stats = {
       lines_seen: 0,
       accepted: 0,
@@ -123,14 +141,39 @@ export class NamespaceStore {
     };
   }
 
+  /**
+   * Subscribes to the halt itself. A halt produces no wire event, so without
+   * this a client that is already connected would keep seeing a healthy stream
+   * (heartbeats, no error) after ingestion stopped for good.
+   */
+  subscribeHalt(listener: HaltListener): () => void {
+    this.haltListeners.add(listener);
+    return () => {
+      this.haltListeners.delete(listener);
+    };
+  }
+
   countRejection(reason: string): void {
     this.stats.rejected += 1;
     this.stats.rejected_by_reason[reason] = (ownProperty(this.stats.rejected_by_reason, reason) ?? 0) + 1;
   }
 
+  /**
+   * Stops ingestion for good and tells every current subscriber, once. The
+   * notification is emitted only on the transition into the halted state, so a
+   * second halt attempt cannot replay it.
+   *
+   * The notice is also retained, because subscribers present at the transition
+   * are not the only ones who need it: a client that was disconnected when the
+   * halt happened reads it back when it reconnects.
+   */
   halt(reason: HaltReason, detail: string): IngestOutcome {
+    if (this.stats.halted) return { status: 'halt', reason, detail };
     this.stats.halted = true;
     this.stats.halt_reason = `${reason}:${detail}`;
+    const notice: HaltNotice = { namespace: this.namespace, reason, detail };
+    this.haltNotice = notice;
+    for (const listener of this.haltListeners) listener(notice);
     return { status: 'halt', reason, detail };
   }
 

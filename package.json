@@ -2,14 +2,14 @@
   "name": "ai-company-quest",
   "version": "0.1.0",
   "private": true,
-  "description": "Collector / SSE / shared reducer core for AI Company Quest (local-only, read-only).",
+  "description": "Collector / SSE / shared reducer core and retro office UI for AI Company Quest (local-only, read-only).",
   "type": "module",
   "engines": {
     "node": ">=22.18.0"
   },
   "scripts": {
     "live": "node src/live.ts",
-    "demo": "QUEST_DEMO=1 node src/live.ts",
+    "demo": "QUEST_DEMO=1 QUEST_INPUT_PATH=${QUEST_INPUT_PATH:-/dev/null} node src/live.ts",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>AI Company Quest — レトロオフィス</title>
+    <!-- No inline script and no inline style: the served CSP forbids both. -->
+    <link rel="stylesheet" href="/ui/quest.css" />
+    <script type="module" src="/ui/quest-app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#office">オフィスへ移動</a>
+
+    <header class="hud">
+      <div class="hud__title">
+        <span class="hud__logo" aria-hidden="true">▚▞</span>
+        <h1>AI COMPANY QUEST</h1>
+      </div>
+
+      <div class="hud__modes" role="group" aria-label="接続モード">
+        <button type="button" class="mode-button" data-mode="live" aria-pressed="false">LIVE</button>
+        <button type="button" class="mode-button" data-mode="demo" aria-pressed="false">DEMO</button>
+        <button type="button" class="mode-button mode-button--ghost" data-action="reconnect">再接続</button>
+      </div>
+
+      <dl class="hud__stats">
+        <div class="stat">
+          <dt>モード</dt>
+          <dd id="stat-mode">—</dd>
+        </div>
+        <div class="stat">
+          <dt>接続状態</dt>
+          <dd id="stat-connection">—</dd>
+        </div>
+        <div class="stat">
+          <dt>最終更新</dt>
+          <dd id="stat-freshness">未受信</dd>
+        </div>
+        <div class="stat">
+          <dt>最新 ingest_seq</dt>
+          <dd id="stat-seq">0</dd>
+        </div>
+        <div class="stat">
+          <dt>在席</dt>
+          <dd id="stat-desks">0</dd>
+        </div>
+      </dl>
+    </header>
+
+    <p class="banner" id="banner" role="status" aria-live="polite" hidden></p>
+
+    <main class="office" id="office">
+      <h2 class="visually-hidden">オフィス</h2>
+      <div class="office__room">
+        <div class="office__wall" aria-hidden="true">
+          <div class="wall-window"><span class="wall-window__sun"></span></div>
+          <div class="wall-clock"><span class="wall-clock__hand"></span></div>
+          <div class="wall-poster">AI<br />CO.</div>
+          <div class="wall-window"><span class="wall-window__sun"></span></div>
+        </div>
+        <div class="office__floor">
+          <ul class="desks" id="desks"></ul>
+          <p class="office__empty" id="empty-state">
+            まだ席に誰もいません。sanitized eventが届くとAI社員が着席します。
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <section class="panel">
+      <h2>状態の凡例</h2>
+      <ul class="legend" id="legend"></ul>
+    </section>
+
+    <section class="panel">
+      <h2>アクティビティログ<span class="panel__note">（直近のみ・上限あり）</span></h2>
+      <ol class="log" id="log"></ol>
+      <p class="office__empty" id="log-empty">まだイベントはありません。</p>
+    </section>
+
+    <footer class="footer">
+      <p>
+        127.0.0.1限定・read-only。表示しているのはsanitized eventのwhitelist fieldだけです。
+        raw prompt / command / 絶対path / credential は配信も表示もされません。
+      </p>
+    </footer>
+
+    <template id="desk-template">
+      <li class="desk">
+        <article class="desk__card">
+          <div class="desk__sprite" aria-hidden="true">
+            <span class="sprite sprite--head"></span>
+            <span class="sprite sprite--body"></span>
+            <span class="sprite sprite--chair"></span>
+            <span class="sprite sprite--monitor"><span class="sprite__screen"></span></span>
+            <span class="sprite sprite--table"></span>
+          </div>
+          <div class="desk__info">
+            <h3 class="desk__name">
+              <span class="desk__seat"></span>
+              <span class="desk__agent"></span>
+              <span class="desk__badge" hidden>MAIN</span>
+            </h3>
+            <p class="desk__status">
+              <span class="desk__symbol" aria-hidden="true"></span>
+              <span class="desk__state-label"></span>
+            </p>
+            <dl class="desk__meta">
+              <div><dt>role</dt><dd class="desk__role"></dd></div>
+              <div><dt>status</dt><dd class="desk__raw-status"></dd></div>
+              <div><dt>last tool</dt><dd class="desk__tool"></dd></div>
+              <div><dt>session</dt><dd class="desk__session"></dd></div>
+              <div><dt>last event</dt><dd class="desk__ts"></dd></div>
+            </dl>
+          </div>
+        </article>
+      </li>
+    </template>
+
+    <template id="log-template">
+      <li class="log__row">
+        <span class="log__symbol" aria-hidden="true"></span>
+        <span class="log__seq"></span>
+        <span class="log__ts"></span>
+        <span class="log__actor"></span>
+        <span class="log__type"></span>
+        <span class="log__detail"></span>
+      </li>
+    </template>
+
+    <template id="legend-template">
+      <li class="legend__row">
+        <span class="legend__swatch" aria-hidden="true"></span>
+        <span class="legend__symbol" aria-hidden="true"></span>
+        <span class="legend__label"></span>
+        <span class="legend__code"></span>
+      </li>
+    </template>
+  </body>
+</html>

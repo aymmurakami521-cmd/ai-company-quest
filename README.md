@@ -2,9 +2,10 @@
 
 AI Companyの稼働状況をレトロゲーム風UIで可視化するアプリケーション。
 
-このrepositoryは現在 **Collector / SSE / 共有Reducer のcoreのみ** を実装しています。
-**UI（レトロオフィス画面・キャラクター描画）はまだ存在しません。** `npm run live`
-はCollectorとSSE endpointだけを起動します。画面が出ないのは仕様です。
+このrepositoryは **Collector / SSE / 共有Reducer のcore** と、その上に載る
+**レトロオフィス画面のMVP** を実装しています。`npm run live` でCollector・SSE・画面が
+同時に起動し、`http://127.0.0.1:4317/` をブラウザで開くとAI社員の状態が1画面で見えます。
+画面はbrowser-nativeなHTML/CSS/ES moduleだけで書かれており、依存パッケージはゼロのままです。
 
 ---
 
@@ -22,8 +23,9 @@ sanitized JSONL file
                        └─ SSE (127.0.0.1 only, id: = event_id)
 ```
 
-将来のReact/Canvas UIは、`src/domain/reducer.ts` の **同じreducer** を読み込んで
-live streamと録画replayの両方を再生できます。
+画面はこのstreamの **snapshotを正本** とし、後続のeventを同じ規則で畳み込みます
+（`src/ui/public/quest-view.js`）。そのfoldが `src/domain/reducer.ts` と一致することは
+testで突き合わせているため、live streamとreplayが食い違うことはありません。
 
 ## 必要環境
 
@@ -36,22 +38,29 @@ live streamと録画replayの両方を再生できます。
 # 1. 入力となるsanitized JSONLのpathを指定する（絶対pathはcommitしない）
 export QUEST_INPUT_PATH="$HOME/path/to/your/sanitized-events.jsonl"
 
-# 2. Collector + SSEを起動
+# 2. Collector + SSE + 画面を起動
 npm run live
 
-# 3. 動作確認
+# 3. ブラウザで開く
+open http://127.0.0.1:4317/            # LIVE
+open http://127.0.0.1:4317/#demo       # DEMO
+
+# 4. HTTPで直接確認したい場合
 curl -s http://127.0.0.1:4317/health
 curl -N  http://127.0.0.1:4317/events/live
 ```
 
-UIを持たないDEMOデータだけを見たい場合:
+LIVE入力を用意せずMVPを確認する場合:
 
 ```bash
-QUEST_INPUT_PATH=/dev/null npm run demo   # DEMO storeにfixtureを投入
-curl -N http://127.0.0.1:4317/events/demo
+npm run demo                            # DEMO storeにfixtureを投入して起動
+open http://127.0.0.1:4317/#demo
 ```
 
-`QUEST_INPUT_PATH` が未設定の場合、LIVEは起動せずexit code 1で終了します（fail closed）。
+`npm run demo` は `QUEST_INPUT_PATH` を指定しなければ `/dev/null` を使うため、
+credentialもlocal sessionも不要です（既存の値があればそれを優先します）。
+`npm run live` で `QUEST_INPUT_PATH` が未設定の場合、LIVEは起動せず
+exit code 1で終了します（fail closed）。
 
 ## 設定（環境変数）
 
@@ -75,15 +84,32 @@ bind hostは **設定できません**。常に `127.0.0.1` です。
 
 | Endpoint | 内容 |
 |----------|------|
+| `GET /` | レトロオフィス画面（HTML） |
+| `GET /ui/quest.css` | 画面のstyle |
+| `GET /ui/quest-app.js` | DOM + SSE glue |
+| `GET /ui/quest-view.js` | 純粋なview model（状態mapping・席割り・client fold） |
 | `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態、`dropped_slow_subscribers`、`state_limits` |
 | `GET /events/live` | LIVE namespaceのSSE stream |
 | `GET /events/demo` | DEMO namespaceのSSE stream |
 
+静的assetは **固定tableのexact match** でのみ解決します。request pathからファイルpathを
+組み立てることはなく、ファイルはprocess起動時に一度だけ読み込まれるため、path traversalの
+余地も request毎のdisk accessもありません。assetには
+`default-src 'none'; script-src 'self'; connect-src 'self'; …` のCSPを付与しています。
+
 SSE frameの構造:
 
 - data frame … `id: <event_id>` / `event: quest_event` / `data: <wire event JSON>`
-- control frame … `event: snapshot` / `replay_start` / `replay_end` / `stream_gap`
+- control frame … `event: snapshot` / `replay_start` / `replay_end` / `stream_gap` / `fail_closed`
   （control frameは **`id:` を持ちません**。clientの `Last-Event-ID` を壊さないためです）
+
+`fail_closed` は、接続中にingestがhaltしたことを伝えるframeです。haltはeventを生まないため、
+これがないと接続済みclientはheartbeatを受け続けたまま「接続済み」を表示し続けてしまいます。
+payloadは `{ namespace, halted: true, reason, detail }` で、`reason` は
+`unsupported_schema` / `state_limit` の閉じた語彙、`detail` は `/health` の `halt_reason` と
+同じsanitized断片（`schema_version:<n>` または `<limit>:<max>`）です。stream内容は含みません。
+haltは接続中のclientへ一度だけ通知され、`snapshot` を受け取る接続では
+`snapshot` の `halted` / `halt_reason` からも判定できます。
 
 ### 再接続とreplay
 
@@ -97,6 +123,51 @@ clientが `Last-Event-ID` を送ると:
 | UUIDv4として不正 | `stream_gap`（`reason: "invalid_last_event_id"`）→ `snapshot` |
 
 replay bufferは有界です。gapは黙って埋めず、必ず明示してから現在stateのsnapshotを送ります。
+
+replay経路だけは `snapshot` を送らないため、client切断中にhaltしていた場合は
+`replay_end` の**後**に `fail_closed` を1回追加します（同じpayload、`id:` なし）。
+これがないと、offline中のhaltを挟んだ再接続でclientが「接続済み」に戻ってしまいます。
+
+## レトロオフィス画面
+
+1画面に次を表示します。
+
+- pixel風のオフィス空間（壁・窓・床・机）と、actorごとの席＋キャラクター
+- actorの表示名（`agent_id`。producerが特定できない場合は `unattributed`）、
+  role（**`resolved` のときだけ**。推測はしません）、現在状態、last tool、session、最終event時刻
+- 接続モード **LIVE / DEMO**、接続状態、最終更新、最新 `ingest_seq`、在席数
+- 状態の凡例と、上限付きのアクティビティログ
+
+### 画面に出る状態
+
+状態の判定は `src/ui/public/quest-view.js` の **純粋関数** に閉じています。
+色・animationだけに依存せず、記号とlabelを必ず併記します。
+
+| 状態 | 記号 | 判定 |
+|------|------|------|
+| 待機中 `IDLE` | `⋯` | `idle` / `waiting` / `queued` など、または未起動 |
+| 作業中 `WORKING` | `▶` | `active` / `running` / `thinking` など、または status不明で `active` |
+| 承認待ち `APPROVAL` | `‼` | `approval` / `permission` / `confirm` などを含む status |
+| 完了・終了 `ENDED` | `■` | `completed` / `stopped` / `ended`、`session_end` 後 |
+| エラー・停止 `ERROR` | `✖` | `error` / `failed` / `timeout` / `denied` など |
+
+status labelはsanitized eventの自由記述なので、小文字化・token分割してから
+上表の優先順（error → 承認待ち → 作業中 → 終了 → 待機）で判定します。
+未知のlabelは推測せず、reducerが持つ `active` にfallbackします。
+
+接続側は `未接続` / `接続中` / `接続済み` / `再接続中` / `切断・エラー` と、
+ingestがhaltしている場合の `取り込み停止 (fail-closed)` を表示します。haltは接続中でも
+`fail_closed` frameで即座に伝わり、既知のreasonのみ日本語labelとしてbannerに添えます。
+`stream_gap` は黙って埋めず、明示bannerを出してから後続の `snapshot` で復旧します。
+
+### 画面側の分離と境界
+
+- 接続は**常に1本**です。LIVE/DEMOを切り替えると接続を閉じ、client stateを
+  namespaceごとに作り直します。他namespaceのeventやsnapshotは適用せず計数だけします。
+- 画面が出すrequestは、documentされた2本のSSE GETだけです。state変更・任意path読み込み・
+  command実行・外部送信は追加していません（CSPでも封じています）。
+- stream由来の文字列は `textContent` でのみDOMへ入ります。console出力もしません。
+- 表示するのは `src/domain/wire.ts` のwhitelist fieldだけです。
 
 ## LIVE / DEMO の分離
 
@@ -198,7 +269,16 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 
 ## 既知の制限
 
-- **UI未実装。** レトロオフィス画面、キャラクター描画、Canvas、Reactはまだありません。
+- **UIはMVPです。** voice input、character editor、pathfinding・自由移動、Skills/MCP、
+  cloud/web session、auth、analyticsはいずれも対象外です。
+- 画面は現在の状態を表示するだけで、履歴の巻き戻しや録画replayのUIはありません。
+- fail-closedの表示は、`snapshot` を受ける接続では `halted` から、接続中のhaltと
+  replay経路の再接続では `fail_closed` frameから判定します。どの経路でも表示中のstateは
+  消さず、停止時点のまま凍結して表示します。
+- 画面はDEMO fixtureで全状態を再現できますが、`state_limit` によるhaltはDEMOでは起こしません
+  （DEMOを止めないため）。fail-closed表示自体はtestで検証しています。
+- 画面のレンダリングを検証する自動testはDOM contract（要素・selector・状態style・
+  reduced-motion）と純粋関数までで、実ブラウザでのpixel比較は行っていません。
 - `player` entityは初期stateにのみ存在し、eventからは絶対に変化しません（testで保証）。
 - rotation検出はinode変化に加え、offset直前64byteのsignature照合で行います。
   同一inodeのcopy-truncate後にpoll間で旧offsetと同一sizeまで再成長した場合も、

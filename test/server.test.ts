@@ -58,7 +58,7 @@ test('health reports both namespaces and never leaks the input path', async () =
     };
     assert.equal(body.status, 'ok');
     assert.equal(body.bind, '127.0.0.1');
-    assert.equal(body.ui, 'not_implemented');
+    assert.equal(body.ui, 'retro_office');
     assert.equal(body.namespaces['live']?.last_ingest_seq, 1);
     assert.equal(body.namespaces['demo']?.last_ingest_seq, 0);
     assert.equal(body.namespaces['live']?.halted, false);
@@ -93,7 +93,9 @@ test('the API is read-only: no mutating methods, no unknown routes', async () =>
     const del = await httpGet(h.port, '/events/live', {}, 'DELETE');
     assert.equal(del.status, 405);
 
-    assert.equal((await httpGet(h.port, '/')).status, 404);
+    // `/` is the read-only office screen; a mutating method still gets 405.
+    assert.equal((await httpGet(h.port, '/')).status, 200);
+    assert.equal((await httpGet(h.port, '/', {}, 'POST')).status, 405);
     assert.equal((await httpGet(h.port, '/events/prod')).status, 404);
     assert.equal((await httpGet(h.port, '/events')).status, 404);
     // Nothing was ingested by any of the above.
