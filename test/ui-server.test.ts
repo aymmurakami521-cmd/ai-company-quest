@@ -250,6 +250,104 @@ test('the halt frame stays inside its namespace and reconnects still see it', as
   }
 });
 
+test('a reconnect with a valid Last-Event-ID learns about a halt it missed (unsupported schema)', async () => {
+  const h = await startServer({ failClosedOnUnsupportedSchema: true });
+  try {
+    // Connect, receive one event, then disconnect - exactly what an EventSource
+    // does before it retries with the id of the last event it saw.
+    const first = await openSse(h.port, '/events/live');
+    const accepted = h.live.ingestObject(makeEvent({ agent_id: 'main' }));
+    assert.equal(accepted.status, 'accepted');
+    const lastEventId = accepted.status === 'accepted' ? accepted.wire.event_id : '';
+    await first.waitFor((text) => text.includes('event: quest_event'));
+    first.close();
+
+    // The store halts while nobody is listening, so no live halt frame is sent.
+    assert.equal(h.live.ingestObject(makeEvent({ schema_version: 7 })).status, 'halt');
+
+    const again = await openSse(h.port, '/events/live', { 'last-event-id': lastEventId });
+    try {
+      await again.waitFor((text) => text.includes('event: replay_end'));
+      // The replay path serves no snapshot, so the halt has to arrive on its own
+      // frame or this client reports a healthy stream forever.
+      await again.waitFor((text) => text.includes('event: fail_closed'));
+      assert.deepEqual(lastFrame(again.text(), 'fail_closed'), {
+        namespace: 'live',
+        halted: true,
+        reason: 'unsupported_schema',
+        detail: 'schema_version:7',
+      });
+      // Order is preserved and the replay contract is untouched.
+      const text = again.text();
+      assert.ok(text.indexOf('event: replay_start') < text.indexOf('event: replay_end'));
+      assert.ok(text.indexOf('event: replay_end') < text.indexOf('event: fail_closed'));
+      assert.equal(text.includes('event: snapshot'), false, 'a valid replay still serves no snapshot');
+      assert.equal(/id: [^\n]*\nevent: fail_closed/.test(text), false, 'the halt frame carries no id:');
+    } finally {
+      again.close();
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test('a reconnect with a valid Last-Event-ID learns about a halt it missed (state limit)', async () => {
+  const h = await startServer({ stateLimits: { max_actors: 1 } });
+  try {
+    const first = await openSse(h.port, '/events/live');
+    const accepted = h.live.ingestObject(makeEvent({ agent_id: 'main' }));
+    assert.equal(accepted.status, 'accepted');
+    const lastEventId = accepted.status === 'accepted' ? accepted.wire.event_id : '';
+    await first.waitFor((text) => text.includes('event: quest_event'));
+    first.close();
+
+    assert.equal(h.live.ingestObject(makeEvent({ agent_id: 'second' })).status, 'halt');
+
+    const again = await openSse(h.port, '/events/live', { 'last-event-id': lastEventId });
+    try {
+      await again.waitFor((text) => text.includes('event: fail_closed'));
+      assert.deepEqual(lastFrame(again.text(), 'fail_closed'), {
+        namespace: 'live',
+        halted: true,
+        reason: 'state_limit',
+        detail: 'actors:1',
+      });
+      // Said once per connection: the missed halt does not repeat on heartbeats.
+      assert.equal(again.text().split('event: fail_closed').length - 1, 1);
+    } finally {
+      again.close();
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test('a healthy reconnect with a valid Last-Event-ID is unchanged', async () => {
+  const h = await startServer({ failClosedOnUnsupportedSchema: true });
+  try {
+    const first = await openSse(h.port, '/events/live');
+    const accepted = h.live.ingestObject(makeEvent({ agent_id: 'main' }));
+    assert.equal(accepted.status, 'accepted');
+    const lastEventId = accepted.status === 'accepted' ? accepted.wire.event_id : '';
+    await first.waitFor((text) => text.includes('event: quest_event'));
+    first.close();
+
+    const again = await openSse(h.port, '/events/live', { 'last-event-id': lastEventId });
+    try {
+      await again.waitFor((text) => text.includes('event: replay_end'));
+      const text = again.text();
+      assert.equal(text.includes('event: fail_closed'), false, 'no halt frame while ingestion is healthy');
+      assert.equal(text.includes('event: snapshot'), false);
+      assert.equal(text.includes('event: stream_gap'), false);
+      assert.equal(lastFrame(text, 'replay_end')?.count, 0);
+    } finally {
+      again.close();
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test('a disconnected client is unsubscribed from halts too', async () => {
   const h = await startServer({ failClosedOnUnsupportedSchema: true });
   try {

@@ -24,7 +24,7 @@ import { NAMESPACES } from '../domain/event.ts';
 import { isUuidV4 } from '../domain/validate.ts';
 import type { StateLimits } from '../domain/reducer.ts';
 import type { WireEvent } from '../domain/wire.ts';
-import type { NamespaceStore } from '../collector/store.ts';
+import type { HaltNotice, NamespaceStore } from '../collector/store.ts';
 import type { UiAsset } from '../ui/assets.ts';
 import { CONTENT_SECURITY_POLICY, uiAsset } from '../ui/assets.ts';
 
@@ -293,12 +293,7 @@ export class QuestServer {
     // it an already-connected client would keep receiving heartbeats and would
     // report a healthy stream forever after ingestion stopped.
     const unsubscribeHalt = store.subscribeHalt((notice) => {
-      writeControl(writer, 'fail_closed', {
-        namespace: notice.namespace,
-        halted: true,
-        reason: notice.reason,
-        detail: notice.detail,
-      });
+      writeFailClosed(writer, notice);
     });
 
     const heartbeat = setInterval(() => {
@@ -335,6 +330,11 @@ export class QuestServer {
         });
         for (const event of lookup.events) writeEvent(writer, event);
         writeControl(writer, 'replay_end', { count: lookup.events.length });
+        // A valid replay serves no snapshot, so a halt that happened while this
+        // client was offline would otherwise reach nobody: the live subscription
+        // above only sees future transitions. Written after `replay_end` so the
+        // replay contract keeps its exact shape and order.
+        if (store.haltNotice !== null) writeFailClosed(writer, store.haltNotice);
       } else if (lookup.status === 'gap') {
         writeControl(writer, 'stream_gap', {
           reason: 'evicted',
@@ -380,6 +380,20 @@ function writeEvent(writer: BoundedSseWriter, wire: WireEvent): void {
 /** Control frames deliberately carry no `id:` so they never move Last-Event-ID. */
 function writeControl(writer: BoundedSseWriter, name: string, payload: unknown): void {
   writer.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+/**
+ * The one shape of the halt frame, so a halt observed live and a halt read back
+ * on reconnect are indistinguishable to the client. The payload is the closed
+ * vocabulary `/health` already publishes, never stream content.
+ */
+function writeFailClosed(writer: BoundedSseWriter, notice: HaltNotice): void {
+  writeControl(writer, 'fail_closed', {
+    namespace: notice.namespace,
+    halted: true,
+    reason: notice.reason,
+    detail: notice.detail,
+  });
 }
 
 /** Serves one preloaded UI file. No CORS header, so only this origin may read it. */

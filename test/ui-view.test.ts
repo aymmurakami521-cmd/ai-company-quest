@@ -417,6 +417,33 @@ test('a halt that happens mid-connection is applied from the fail_closed frame',
   assert.equal(header.last_frame_at_ms, 2_000);
 });
 
+test('a reconnect that replays into a halt ends fail-closed, not connected', () => {
+  const store = new NamespaceStore({ namespace: 'live' });
+  const wires = record(store);
+  store.ingestObject(makeEvent({ event_type: 'agent_start', status: 'active' }));
+
+  // The client saw this event, dropped its connection, and reconnected with the
+  // event's id. The server replays (nothing new) and then reports the halt that
+  // happened while the client was offline.
+  let state = setConnectionPhase(foldAll('live', wires), 'open', 1_000);
+  state = applyFrame(state, { kind: 'replay_start', payload: { count: 0 }, at_ms: 2_000 });
+  state = applyFrame(state, { kind: 'replay_end', payload: { count: 0 }, at_ms: 2_000 });
+  assert.equal(selectHeader(state).connection.code, 'CONNECTED', 'replay alone says nothing about a halt');
+
+  state = applyFrame(state, {
+    kind: 'fail_closed',
+    payload: { namespace: 'live', halted: true, reason: 'unsupported_schema', detail: 'schema_version:7' },
+    at_ms: 2_000,
+  });
+
+  const header = selectHeader(state);
+  assert.equal(header.connection.code, 'FAIL_CLOSED');
+  assert.equal(header.halt_reason, 'unsupported_schema');
+  assert.equal(header.replaying, false);
+  assert.equal(header.gap, null, 'a replayed reconnect is not a gap');
+  assert.equal(header.desk_count, 1, 'the replayed state is kept, frozen');
+});
+
 test('the halt frame respects namespace isolation and never echoes an unknown reason', () => {
   const base = setConnectionPhase(createClientState('live'), 'open');
 

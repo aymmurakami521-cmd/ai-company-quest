@@ -108,7 +108,8 @@ SSE frameの構造:
 payloadは `{ namespace, halted: true, reason, detail }` で、`reason` は
 `unsupported_schema` / `state_limit` の閉じた語彙、`detail` は `/health` の `halt_reason` と
 同じsanitized断片（`schema_version:<n>` または `<limit>:<max>`）です。stream内容は含みません。
-haltは一度だけ通知され、その後の接続では `snapshot` の `halted` / `halt_reason` から判定されます。
+haltは接続中のclientへ一度だけ通知され、`snapshot` を受け取る接続では
+`snapshot` の `halted` / `halt_reason` からも判定できます。
 
 ### 再接続とreplay
 
@@ -122,6 +123,10 @@ clientが `Last-Event-ID` を送ると:
 | UUIDv4として不正 | `stream_gap`（`reason: "invalid_last_event_id"`）→ `snapshot` |
 
 replay bufferは有界です。gapは黙って埋めず、必ず明示してから現在stateのsnapshotを送ります。
+
+replay経路だけは `snapshot` を送らないため、client切断中にhaltしていた場合は
+`replay_end` の**後**に `fail_closed` を1回追加します（同じpayload、`id:` なし）。
+これがないと、offline中のhaltを挟んだ再接続でclientが「接続済み」に戻ってしまいます。
 
 ## レトロオフィス画面
 
@@ -267,8 +272,9 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 - **UIはMVPです。** voice input、character editor、pathfinding・自由移動、Skills/MCP、
   cloud/web session、auth、analyticsはいずれも対象外です。
 - 画面は現在の状態を表示するだけで、履歴の巻き戻しや録画replayのUIはありません。
-- fail-closedの表示は、接続時は `snapshot` の `halted`、接続中のhaltは `fail_closed` frameから
-  判定します。どちらの経路でも表示中のstateは消さず、停止時点のまま凍結して表示します。
+- fail-closedの表示は、`snapshot` を受ける接続では `halted` から、接続中のhaltと
+  replay経路の再接続では `fail_closed` frameから判定します。どの経路でも表示中のstateは
+  消さず、停止時点のまま凍結して表示します。
 - 画面はDEMO fixtureで全状態を再現できますが、`state_limit` によるhaltはDEMOでは起こしません
   （DEMOを止めないため）。fail-closed表示自体はtestで検証しています。
 - 画面のレンダリングを検証する自動testはDOM contract（要素・selector・状態style・

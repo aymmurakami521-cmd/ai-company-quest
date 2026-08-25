@@ -95,6 +95,11 @@ export class NamespaceStore {
   nextIngestSeq: number;
   listeners: Set<WireListener>;
   haltListeners: Set<HaltListener>;
+  /**
+   * The halt that stopped this store, kept so a client that was not connected
+   * when it happened can still be told the same fact on the same frame shape.
+   */
+  haltNotice: HaltNotice | null;
 
   constructor(options: StoreOptions) {
     this.namespace = options.namespace;
@@ -108,6 +113,7 @@ export class NamespaceStore {
     this.nextIngestSeq = 1;
     this.listeners = new Set();
     this.haltListeners = new Set();
+    this.haltNotice = null;
     this.stats = {
       lines_seen: 0,
       accepted: 0,
@@ -156,12 +162,17 @@ export class NamespaceStore {
    * Stops ingestion for good and tells every current subscriber, once. The
    * notification is emitted only on the transition into the halted state, so a
    * second halt attempt cannot replay it.
+   *
+   * The notice is also retained, because subscribers present at the transition
+   * are not the only ones who need it: a client that was disconnected when the
+   * halt happened reads it back when it reconnects.
    */
   halt(reason: HaltReason, detail: string): IngestOutcome {
     if (this.stats.halted) return { status: 'halt', reason, detail };
     this.stats.halted = true;
     this.stats.halt_reason = `${reason}:${detail}`;
     const notice: HaltNotice = { namespace: this.namespace, reason, detail };
+    this.haltNotice = notice;
     for (const listener of this.haltListeners) listener(notice);
     return { status: 'halt', reason, detail };
   }
