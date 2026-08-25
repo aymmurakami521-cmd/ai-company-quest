@@ -60,9 +60,17 @@ export type WorldHud = {
   halted: boolean;
   replaying: boolean;
   gapped: boolean;
+  /** Every actor the projection carried, including the ones the canvas caps off. */
   desk_count: number;
+  /** Seats actually painted: `min(desk_count, MAX_ROWS * columns)`. */
+  drawn_count: number;
+  /** `desk_count - drawn_count`, stated on the canvas whenever it is not zero. */
+  hidden_count: number;
   session_count: number;
 };
+
+/** How much of the office the canvas drew. `drawn + hidden === total`, always. */
+export type WorldOverflow = { total: number; drawn: number; hidden: number };
 
 export type World = {
   viewport: Viewport;
@@ -71,8 +79,16 @@ export type World = {
   rows: number;
   empty: boolean;
   hud: WorldHud;
+  overflow: WorldOverflow;
   caption: string;
-  canvas: { width: number; height: number; device_width: number; device_height: number };
+  canvas: {
+    width: number;
+    height: number;
+    /** The ratio the buffer was built at: `viewport.dpr` unless a ceiling bit. */
+    dpr: number;
+    device_width: number;
+    device_height: number;
+  };
   room: Rect;
   wall: Rect;
   floor: Rect & { tile: number; cols: number; rows: number };
@@ -80,6 +96,8 @@ export type World = {
   actors: WorldActor[];
   notice: WorldLabel;
   caption_box: { x: number; y: number; size: number };
+  /** Empty text when nothing was left out of the drawing. */
+  overflow_label: WorldLabel;
 };
 
 export type WorldInput = {
@@ -102,7 +120,13 @@ export declare const CAPTION_SIZE: number;
 export declare const CAPTION_STRIP: number;
 export declare const TARGET_CELL_PX: number;
 export declare const MAX_DPR: number;
+export declare const MAX_ROWS: number;
+export declare const MAX_DEVICE_SIDE: number;
+export declare const MAX_DEVICE_PIXELS: number;
+export declare const MIN_DEVICE_SCALE: number;
 export declare const APPEARANCE_KEYS: readonly string[];
+
+export declare function deviceScaleFor(cssWidth: number, cssHeight: number, dpr: number): number;
 
 export declare function appearanceSeed(actorKey: unknown): number;
 export declare function appearanceFor(actorKey: unknown): Appearance;

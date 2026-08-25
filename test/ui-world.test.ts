@@ -36,12 +36,17 @@ import {
   APPEARANCE_KEYS,
   EMPTY_COLUMNS,
   MAX_COLUMNS,
+  MAX_DEVICE_PIXELS,
+  MAX_DEVICE_SIDE,
   MAX_DPR,
+  MAX_ROWS,
   MAX_SCALE,
+  MIN_DEVICE_SCALE,
   MIN_SCALE,
   appearanceFor,
   appearanceSeed,
   buildWorld,
+  deviceScaleFor,
   fitLabel,
 } from '../src/ui/public/quest-world.js';
 
@@ -303,6 +308,154 @@ test('a long name is truncated to its box instead of running over the desk', () 
   assert.equal(fitLabel(long, 68, 10), fitLabel(long, 68, 10), 'truncation is deterministic');
   assert.equal(fitLabel('short', 68, 10), 'short', 'a label that fits is left alone');
   assert.equal(fitLabel(null, 68, 10), '', 'a missing label is empty, never "null"');
+});
+
+// ------------------------------------------------- backing-store bounds ---
+
+/** Everything a browser has to allocate, asserted in one place. */
+function assertBufferBounded(world: World, label: string): void {
+  const { device_width: width, device_height: height, dpr } = world.canvas;
+  for (const [name, value] of [
+    ['device_width', width],
+    ['device_height', height],
+    ['dpr', dpr],
+    ['width', world.canvas.width],
+    ['height', world.canvas.height],
+  ] as const) {
+    assert.ok(Number.isFinite(value), `${label}: ${name} is finite`);
+    assert.ok(value > 0, `${label}: ${name} is positive, never a zero dimension`);
+  }
+  assert.ok(Number.isInteger(width) && Number.isInteger(height), `${label}: the buffer is whole pixels`);
+  assert.ok(width <= MAX_DEVICE_SIDE, `${label}: device_width ${width}`);
+  assert.ok(height <= MAX_DEVICE_SIDE, `${label}: device_height ${height}`);
+  assert.ok(width * height <= MAX_DEVICE_PIXELS, `${label}: area ${width * height}`);
+  assert.ok(dpr <= world.viewport.dpr, `${label}: the buffer never asks for more than the screen offers`);
+  assert.ok(dpr >= MIN_DEVICE_SCALE, `${label}: the buffer never collapses`);
+}
+
+test('the backing store stays inside its ceilings at every actor count, DPR and viewport', () => {
+  // `max_actors` is 4096, and the counts either side of the drawn ceiling are
+  // the ones where the cap either does or does not engage.
+  const counts = [0, 1, 40, MAX_ROWS * MAX_COLUMNS - 1, MAX_ROWS * MAX_COLUMNS, MAX_ROWS * MAX_COLUMNS + 1, 4096];
+  const viewports = [
+    { width: 240, height: 240 },
+    { width: 320, height: 480 },
+    { width: 960, height: 560 },
+    { width: 1920, height: 1080 },
+    { width: 8192, height: 8192 },
+  ];
+
+  for (const count of counts) {
+    const desks = Array.from({ length: count }, (_, index) => desk(index + 1, 'working'));
+    for (const size of viewports) {
+      for (const dpr of [1, 1.5, 2, 3, 4]) {
+        const world = buildWorld({ desks, header: emptyHeader(), viewport: { ...size, dpr } });
+        assertBufferBounded(world, `${count} desks at ${size.width}x${size.height}@${dpr}`);
+        assert.ok(world.rows <= MAX_ROWS, `${count}: rows ${world.rows}`);
+        assert.ok(world.actors.length <= MAX_ROWS * MAX_COLUMNS, `${count}: drawn ${world.actors.length}`);
+      }
+    }
+  }
+});
+
+test('the office the collector accepts at its ceiling is drawn as a bounded buffer', () => {
+  // The exact case the review reproduced: before the cap this was a
+  // 3840x125904 buffer, 483,471,360 device pixels, ~1.9 GB of RGBA.
+  const desks = Array.from({ length: 4096 }, (_, index) => desk(index + 1, 'working'));
+  const world = buildWorld({ desks, header: emptyHeader(), viewport: { width: 960, height: 560, dpr: MAX_DPR } });
+
+  assertBufferBounded(world, '4096 desks at 960x560@4');
+  assert.ok(world.canvas.device_height < 8192, `device_height ${world.canvas.device_height}`);
+  assert.ok(
+    world.canvas.device_width * world.canvas.device_height < 16_000_000,
+    `area ${world.canvas.device_width * world.canvas.device_height}`,
+  );
+  // The floor is painted tile by tile, so its loop is bounded by the same cap.
+  assert.ok(world.floor.rows * world.floor.cols < 20_000, 'the floor is not a hundred thousand tiles');
+});
+
+test('the requested device pixel ratio is honoured until a ceiling actually bites', () => {
+  // An ordinary office: nothing is lowered, so the canvas is as crisp as the
+  // screen. `Math.round(css * dpr)` is exactly what the buffer comes out as.
+  for (const dpr of [1, 1.25, 1.5, 2, 3, 4]) {
+    assert.equal(deviceScaleFor(960, 544, dpr), dpr, `960x544@${dpr} fits`);
+  }
+  // A canvas whose area alone is over the ceiling is scaled down, not truncated.
+  const wide = deviceScaleFor(8192, 4700, 4);
+  assert.ok(wide > MIN_DEVICE_SCALE && wide < 1, `expected a lowered ratio, got ${wide}`);
+  assert.ok(8192 * wide <= MAX_DEVICE_SIDE && 4700 * wide <= MAX_DEVICE_SIDE);
+  assert.ok(8192 * wide * 4700 * wide <= MAX_DEVICE_PIXELS);
+  // Deterministic: the same box always gets the same ratio.
+  assert.equal(deviceScaleFor(8192, 4700, 4), wide);
+});
+
+test('seats the canvas does not draw are counted out loud, not quietly dropped', () => {
+  const total = MAX_ROWS * MAX_COLUMNS + 25;
+  const desks = Array.from({ length: total }, (_, index) => desk(index + 1, 'idle'));
+  const world = buildWorld({ desks, header: emptyHeader(), viewport: VIEWPORT });
+
+  assert.equal(world.overflow.total, total, 'the world knows how many there are');
+  assert.equal(world.overflow.drawn, world.actors.length);
+  assert.equal(world.overflow.drawn + world.overflow.hidden, world.overflow.total, 'nothing is unaccounted for');
+  assert.ok(world.overflow.hidden > 0);
+
+  // The header count is the whole office, so the canvas never understates it.
+  assert.equal(world.hud.desk_count, total);
+  assert.equal(world.hud.drawn_count, world.overflow.drawn);
+  assert.equal(world.hud.hidden_count, world.overflow.hidden);
+
+  // The notice is integers this module counted plus its own literals: no name,
+  // no key and no wire string travels with it.
+  assert.ok(world.overflow_label.text.includes(String(world.overflow.hidden)));
+  assert.ok(world.overflow_label.text.includes(String(total)));
+  assert.ok(world.overflow_label.y <= world.canvas.height, 'and it lands on the canvas');
+  assert.ok(world.overflow_label.y > world.caption_box.y, 'below the caption, never on top of it');
+
+  // Seats that fit produce no notice at all.
+  const small = buildWorld({ desks: desks.slice(0, 4), header: emptyHeader(), viewport: VIEWPORT });
+  assert.deepEqual(small.overflow, { total: 4, drawn: 4, hidden: 0 });
+  assert.equal(small.overflow_label.text, '');
+  assert.equal(small.caption.includes('描画'), false);
+});
+
+test('capping what is drawn never reorders or rewrites the seats that are', () => {
+  const desks = Array.from({ length: 300 }, (_, index) => desk(index + 1, 'working'));
+  const world = buildWorld({ desks, header: emptyHeader(), viewport: VIEWPORT });
+
+  // The drawn seats are the projection's own leading run, in its own order -
+  // no reshuffling, no sampling, no substitute actor for the ones left out.
+  assert.deepEqual(
+    world.actors.map((actor) => actor.actor_key),
+    desks.slice(0, world.actors.length).map((entry) => entry.actor_key),
+  );
+  for (const actor of world.actors) {
+    const projected = desks.find((entry) => entry.actor_key === actor.actor_key);
+    assert.ok(projected !== undefined);
+    assert.equal(actor.seat, projected.seat, 'seat numbers come from the projection');
+  }
+  // Every drawn desk still sits inside the room it was laid out in.
+  for (const actor of world.actors) assert.ok(contains(world.room, actor.cell), `seat ${actor.seat} fits`);
+});
+
+test('a fail-closed office that overflows still reports both facts', () => {
+  let state = liveState([makeEvent({ event_type: 'agent_start', agent_id: 'worker-1', status: 'active' })]);
+  state = setConnectionPhase(state, 'open', 1_000);
+  state = applyFrame(state, {
+    kind: 'fail_closed',
+    payload: { namespace: 'live', halted: true, reason: 'state_limit', detail: 'actors:4096' },
+    at_ms: 2_000,
+  });
+  const header = selectHeader(state);
+  const desks = Array.from({ length: 4096 }, (_, index) => desk(index + 1, 'idle'));
+
+  const world = buildWorld({ desks, header, viewport: { width: 960, height: 560, dpr: MAX_DPR } });
+  assert.equal(world.hud.halted, true, 'the halt is still signalled');
+  assert.ok(world.caption.includes('取り込み停止'));
+  assert.equal(world.hud.desk_count, 4096, 'and the office is not emptied by the cap');
+  assert.ok(world.overflow.hidden > 0);
+  assertBufferBounded(world, 'fail-closed 4096 desks');
+  // The halt detail is still a boundary fact, not a picture.
+  assert.equal(JSON.stringify(world).includes('actors:4096'), false);
 });
 
 // ------------------------------------------------------ safety boundary ---

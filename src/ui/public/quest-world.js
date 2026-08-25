@@ -56,6 +56,31 @@ export const TARGET_CELL_PX = 132;
 /** Device pixel ratio is clamped: a hostile or exotic value cannot blow up the buffer. */
 export const MAX_DPR = 4;
 
+/**
+ * Most desk rows the canvas ever draws.
+ *
+ * The collector accepts up to `max_actors` (4096) actors, and six columns of
+ * them would be 683 rows tall - a backing store no browser will allocate. The
+ * canvas is the decorative layer, so it draws a bounded office and reports how
+ * many seats it left out; the DOM desk list below it stays the complete,
+ * accessible view of every actor.
+ */
+export const MAX_ROWS = 16;
+
+/** Hard ceiling on either side of the backing store, in device pixels. */
+export const MAX_DEVICE_SIDE = 8192;
+
+/**
+ * Hard ceiling on the backing store's area, in device pixels.
+ *
+ * 16,777,216 is the smallest area limit documented across the browsers this
+ * screen can run in, so a buffer under it is one every one of them accepts.
+ */
+export const MAX_DEVICE_PIXELS = 16777216;
+
+/** The buffer is never scaled below this: a canvas of zero pixels draws nothing. */
+export const MIN_DEVICE_SCALE = 0.05;
+
 const MIN_VIEWPORT = 240;
 const MAX_VIEWPORT = 8192;
 
@@ -203,6 +228,42 @@ function normalizeViewport(raw) {
   };
 }
 
+/**
+ * How many device pixels one CSS pixel is allowed to become.
+ *
+ * The requested ratio is honoured whenever the resulting buffer fits under both
+ * ceilings, so an ordinary office is as crisp as the screen it is on. When it
+ * would not fit, the ratio is lowered - a slightly soft canvas is the price of
+ * a canvas the browser will actually allocate, and every fact on it is also in
+ * the DOM below at full fidelity.
+ */
+export function deviceScaleFor(cssWidth, cssHeight, dpr) {
+  const width = Math.max(1, cssWidth);
+  const height = Math.max(1, cssHeight);
+  const limit = Math.min(MAX_DEVICE_SIDE / width, MAX_DEVICE_SIDE / height, Math.sqrt(MAX_DEVICE_PIXELS / (width * height)));
+  if (limit >= dpr) return dpr;
+  // Snapped down to a hundredth, like the ratio itself, so the buffer is
+  // reproducible rather than dependent on the last bit of a float.
+  return Math.max(MIN_DEVICE_SCALE, Math.floor(limit * 100) / 100);
+}
+
+/**
+ * The backing store for one CSS-pixel canvas.
+ *
+ * Every dimension that leaves here is a positive integer, no side exceeds
+ * `MAX_DEVICE_SIDE`, and the product never exceeds `MAX_DEVICE_PIXELS` - the
+ * last clamp closes the gap rounding could otherwise open.
+ */
+function buildBuffer(cssWidth, cssHeight, dpr) {
+  const scale = deviceScaleFor(cssWidth, cssHeight, dpr);
+  const width = clamp(Math.max(1, Math.round(cssWidth * scale)), 1, MAX_DEVICE_SIDE);
+  let height = clamp(Math.max(1, Math.round(cssHeight * scale)), 1, MAX_DEVICE_SIDE);
+  if (width * height > MAX_DEVICE_PIXELS) {
+    height = Math.max(1, Math.floor(MAX_DEVICE_PIXELS / width));
+  }
+  return { scale, width, height };
+}
+
 /** Places a unit-space rectangle at a scaled origin, rounded to whole pixels. */
 function place(originX, originY, scale, spec) {
   return {
@@ -268,7 +329,7 @@ function buildProps(roomX, roomY, scale, roomWidthUnits) {
  * wire - a `status` label, a `stream_gap` reason - stay in the DOM layer that
  * already renders them as text.
  */
-function buildHud(header, deskCount) {
+function buildHud(header, overflow) {
   const source = header === null || header === undefined ? {} : header;
   const connection = source.connection === null || typeof source.connection !== 'object' ? {} : source.connection;
   return {
@@ -279,7 +340,11 @@ function buildHud(header, deskCount) {
     replaying: source.replaying === true,
     // Presence only: the reason string is free-form, so it is never painted.
     gapped: source.gap !== null && source.gap !== undefined,
-    desk_count: deskCount,
+    // The full count, always: the canvas caps what it *paints*, never what it
+    // admits exists.
+    desk_count: overflow.total,
+    drawn_count: overflow.drawn,
+    hidden_count: overflow.hidden,
     session_count: typeof source.session_count === 'number' ? source.session_count : 0,
   };
 }
@@ -287,10 +352,22 @@ function buildHud(header, deskCount) {
 /** Caption line, assembled from this module's own literals. */
 function captionFor(hud) {
   const parts = [hud.mode, `${hud.connection_symbol} ${hud.connection_code}`, `在席 ${hud.desk_count}`];
+  if (hud.hidden_count > 0) parts.push(`描画 ${hud.drawn_count}`);
   if (hud.halted) parts.push('取り込み停止');
   else if (hud.gapped) parts.push('ストリーム欠落');
   else if (hud.replaying) parts.push('replay中');
   return parts.join('  ·  ');
+}
+
+/**
+ * The overflow line, for an office with more seats than the canvas draws.
+ *
+ * Three integers this module counted itself and nothing else - no name, no key,
+ * no wire string - so the reader learns exactly what is missing and where the
+ * rest of it is.
+ */
+function overflowTextFor(overflow) {
+  return `表示 ${overflow.drawn} 席 / 全 ${overflow.total} 席  ·  残り ${overflow.hidden} 席は下の一覧に表示`;
 }
 
 function normalizeDesk(desk, index) {
@@ -321,10 +398,17 @@ export function buildWorld(input) {
   const rawDesks = Array.isArray(source.desks) ? source.desks : [];
   const desks = rawDesks.map(normalizeDesk);
   const viewport = normalizeViewport(source.viewport);
-  const hud = buildHud(source.header ?? null, desks.length);
 
   const columns = columnsFor(desks.length, viewport.width);
-  const rows = Math.max(1, Math.ceil(desks.length / columns));
+  // Rows are capped before anything is sized, so the office the canvas has to
+  // hold is bounded whatever the collector accepted. `drawn` are the seats that
+  // get painted; the rest are counted, named on the canvas only as a number,
+  // and shown in full by the DOM desk list.
+  const rows = Math.min(Math.max(1, Math.ceil(desks.length / columns)), MAX_ROWS);
+  const drawn = desks.slice(0, Math.min(desks.length, rows * columns));
+  const overflow = { total: desks.length, drawn: drawn.length, hidden: desks.length - drawn.length };
+
+  const hud = buildHud(source.header ?? null, overflow);
 
   const roomWidthUnits = columns * CELL_UNITS.width + 2 * ROOM_PADDING;
   const roomHeightUnits = WALL_UNITS + rows * CELL_UNITS.height + 2 * ROOM_PADDING;
@@ -353,8 +437,11 @@ export function buildWorld(input) {
   // never be cropped: at the smallest scale the canvas grows instead.
   const canvasWidth = Math.max(viewport.width, roomWidth + 2 * margin);
   // The caption gets its own strip under the room, so it can never land on the
-  // furniture and never has to shrink with the scale.
-  const canvasHeight = roomHeight + 2 * margin + CAPTION_STRIP;
+  // furniture and never has to shrink with the scale. An office with seats the
+  // canvas did not draw gets a second strip for the count, so the two lines
+  // cannot overlap either.
+  const captionLines = overflow.hidden > 0 ? 2 : 1;
+  const canvasHeight = roomHeight + 2 * margin + CAPTION_STRIP * captionLines;
 
   const roomX = Math.round((canvasWidth - roomWidth) / 2);
   const roomY = margin;
@@ -371,7 +458,7 @@ export function buildWorld(input) {
   const stateSize = Math.max(7, Math.round(CELL_PARTS.stateLabel.height * scale));
   const labelBox = Math.round(CELL_PARTS.nameLabel.width * scale);
 
-  const actors = desks.map((desk, index) => {
+  const actors = drawn.map((desk, index) => {
     const column = index % columns;
     const row = Math.floor(index / columns);
     const cellX = gridX + column * cellWidth;
@@ -413,6 +500,9 @@ export function buildWorld(input) {
     };
   });
 
+  const buffer = buildBuffer(canvasWidth, canvasHeight, viewport.dpr);
+  const captionY = roomY + roomHeight + margin + CAPTION_SIZE;
+
   return {
     viewport,
     scale,
@@ -420,14 +510,19 @@ export function buildWorld(input) {
     rows,
     empty: actors.length === 0,
     hud,
+    overflow,
     // The caption strip spans the canvas, not the room: a one-desk office is a
     // narrow room, and the connection state still has to be readable in full.
     caption: fitLabel(captionFor(hud), canvasWidth - 2 * margin, CAPTION_SIZE),
     canvas: {
       width: canvasWidth,
       height: canvasHeight,
-      device_width: Math.max(1, Math.round(canvasWidth * viewport.dpr)),
-      device_height: Math.max(1, Math.round(canvasHeight * viewport.dpr)),
+      // The ratio the buffer was actually built at. It is the requested one
+      // unless that would have exceeded a ceiling, so `draw(World)` transforms
+      // by this and never by the raw `viewport.dpr`.
+      dpr: buffer.scale,
+      device_width: buffer.width,
+      device_height: buffer.height,
     },
     room: { x: roomX, y: roomY, width: roomWidth, height: roomHeight },
     wall: { x: roomX, y: roomY, width: roomWidth, height: wallHeight },
@@ -448,6 +543,14 @@ export function buildWorld(input) {
       size: noticeSize,
       text: fitLabel('席は空です — eventが届くと着席します', roomWidth - 2 * pad, noticeSize),
     },
-    caption_box: { x: margin, y: roomY + roomHeight + margin + CAPTION_SIZE, size: CAPTION_SIZE },
+    caption_box: { x: margin, y: captionY, size: CAPTION_SIZE },
+    // Empty text when nothing was left out, so the painter has one condition to
+    // check and never paints a "0 seats hidden" line.
+    overflow_label: {
+      x: margin,
+      y: captionY + CAPTION_STRIP,
+      size: CAPTION_SIZE,
+      text: overflow.hidden > 0 ? fitLabel(overflowTextFor(overflow), canvasWidth - 2 * margin, CAPTION_SIZE) : '',
+    },
   };
 }

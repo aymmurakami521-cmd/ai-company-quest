@@ -178,6 +178,25 @@ DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオ�
 - **responsive / DPR**: viewport幅から列数（最大6）とscale（0.25刻み）を決め、部屋がcanvasに
   必ず収まるようにします。bufferは `devicePixelRatio`（1〜4にclamp）倍で確保します。
   CSSは `width:100%; height:auto` だけで、scriptはinline styleを書きません。
+- **backing storeの上限**: collectorは `max_actors`（既定4096）まで受け付けるので、席数がそのまま
+  canvas高さになるとbrowserが確保できないbufferになります（6列 × 683行 = 3840×125904 device px、
+  約4.83億pixel ≒ RGBA 1.9GB）。そこで描画側に決定論的な上限を置いています。
+
+  | 定数 | 値 | 意味 |
+  |------|----|------|
+  | `MAX_ROWS` | `16` | 描画する席の行数上限（最大6列なので96席） |
+  | `MAX_DEVICE_SIDE` | `8192` | backing store 1辺の上限（device px） |
+  | `MAX_DEVICE_PIXELS` | `16777216` | backing store 総面積の上限（device px） |
+
+  行数を先にcapしてからscaleを決め、最後に実効device scale（`world.canvas.dpr`）を
+  `min(devicePixelRatio, 辺の上限, sqrt(面積の上限 / CSS面積))` へ落とします。上限に当たらない通常の
+  officeでは要求DPRがそのまま使われるので、見た目は変わりません。4096席・DPR 4・960×560では
+  3840×3240（約1244万pixel ≒ 49.8MB）に収まります。
+- **描き切れない席**: 上限を超えた分は黙って落とさず、canvas下部に固定文言＋整数だけで
+  `表示 N 席 / 全 M 席 · 残り K 席は下の一覧に表示` と明示します（`world.overflow` は
+  `drawn + hidden === total` を常に満たします）。DOMの社員一覧・凡例・logは従来通り**全actor**を
+  表示し、そちらがアクセシビリティ正本です。canvasが描くのは先頭からの連続した席で、
+  並べ替えも間引きも代替actorの生成もしません。
 - **motion**: canvasは**完全に静的**です。timerもanimation frameも使わず、state変化とresize時にだけ
   再描画するので、`prefers-reduced-motion` で止めるものがありません。
 - **accessibility**: canvasは `aria-hidden` の装飾層です。社員情報・status label・connection banner・
@@ -311,13 +330,18 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   （DEMOを止めないため）。fail-closed表示自体はtestで検証しています。
 - 画面のレンダリングを検証する自動testはDOM contract（要素・selector・状態style・
   reduced-motion）と純粋関数までで、実ブラウザでのpixel比較は行っていません。
-- Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界と、記録用の偽contextに対する
-  `drawWorld` の呼び出し列までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。
+- Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界・backing store上限（0/1/40/95/96/97/
+  4096席 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
+  までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。
 - canvasのlabel幅は `measureText` ではなく等幅fontを前提とした概算で決めています
   （全角は1em、半角は0.62em）。実際のfontが大きく異なる場合、長い名前の省略位置が
   1〜2文字ずれることがあります。切れて読めなくなるのではなく、省略記号が付きます。
-- canvasの席は最大6列で、それを超えると行が増えます。行が増えて高さがviewportに収まらない
-  場合はcanvas自体が縦に伸び、ページがscrollします（内容が切れることはありません）。
+- canvasの席は最大6列・最大16行（96席）です。それを超える席はcanvasには描かれず、件数だけを
+  canvas下部に明示します。全actorはDOMの社員一覧に従来通り表示されます。
+- 行数が増えて高さがviewportに収まらない場合はcanvas自体が縦に伸び、ページがscrollします
+  （96席までは内容が切れることはありません）。
+- 非常に大きなviewport（例: 8192×8192）ではbacking storeの面積上限に当たり、実効device scaleが
+  1未満まで下がってcanvasがやや甘くなることがあります。表示内容は欠けません。
 - canvasの説明labelは名前・状態記号・状態codeだけです。role・last tool・session・最終event時刻は
   従来通りDOM側の社員カードで確認します。
 - `player` entityは初期stateにのみ存在し、eventからは絶対に変化しません（testで保証）。

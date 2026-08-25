@@ -141,6 +141,48 @@ test('drawing starts from a device-pixel transform and clears the whole buffer',
   assert.equal(ops.at(-1)?.op, 'restore', 'the context is handed back as it was found');
 });
 
+test('the transform follows the buffer the world actually built, not the raw ratio', () => {
+  // A viewport big enough that the requested ratio would overflow the ceiling:
+  // the buffer is lowered, and the painter must transform by the lowered value
+  // or every rectangle would land off the canvas.
+  const desks = Array.from({ length: 200 }, (_, index) => desk(index + 1, 'working'));
+  const world = buildWorld({ desks, header: emptyHeader(), viewport: { width: 8192, height: 8192, dpr: 4 } });
+  assert.ok(world.canvas.dpr < world.viewport.dpr, 'this case really is clamped');
+
+  const transform = paint(world)[1];
+  assert.equal(transform?.op, 'setTransform');
+  assert.deepEqual(transform?.args, [world.canvas.dpr, 0, 0, world.canvas.dpr, 0, 0]);
+  // The whole buffer is still cleared, in the same CSS-pixel space.
+  assert.ok(world.canvas.width * world.canvas.dpr <= world.canvas.device_width + 1);
+});
+
+test('an office larger than the canvas draws says how many seats it left out', () => {
+  const desks = Array.from({ length: 400 }, (_, index) => desk(index + 1, 'idle'));
+  const world = buildWorld({ desks, header: emptyHeader(), viewport: VIEWPORT });
+  const ops = paint(world);
+  const painted = texts(ops);
+
+  assert.ok(world.overflow.hidden > 0, 'this office really does overflow');
+  assert.ok(painted.includes(world.overflow_label.text), 'the count is on the canvas');
+  assert.ok(world.overflow_label.text.includes(String(world.overflow.hidden)));
+
+  // Exactly the drawn seats are named - counted by the label positions, since
+  // a name may well have been shortened to its box.
+  const namePlaces = new Set(world.actors.map((actor) => `${actor.name_label.x}:${actor.name_label.y}`));
+  const nameOps = ops.filter(
+    (entry) => entry.op === 'fillText' && namePlaces.has(`${entry.args[1]}:${entry.args[2]}`),
+  );
+  assert.equal(nameOps.length, world.actors.length, 'exactly the drawn seats are named');
+
+  // An office that fits gets no such line, rather than a "0 hidden" one.
+  const small = buildWorld({ desks: desks.slice(0, 3), header: emptyHeader(), viewport: VIEWPORT });
+  assert.equal(small.overflow.hidden, 0);
+  assert.equal(
+    texts(paint(small)).some((entry) => entry.includes('残り')),
+    false,
+  );
+});
+
 test('a nonsense argument is ignored rather than thrown at', () => {
   assert.doesNotThrow(() => {
     drawWorld(recorder(), null);

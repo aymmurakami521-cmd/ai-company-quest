@@ -323,7 +323,9 @@ export function drawWorld(ctx, world) {
   if (ctx === null || ctx === undefined || world === null || typeof world !== 'object') return;
 
   ctx.save();
-  ctx.setTransform(world.viewport.dpr, 0, 0, world.viewport.dpr, 0, 0);
+  // The ratio the world sized its buffer at, which is the requested device
+  // pixel ratio unless that would have overflowed the backing-store ceilings.
+  ctx.setTransform(world.canvas.dpr, 0, 0, world.canvas.dpr, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, world.canvas.width, world.canvas.height);
   fill(ctx, PALETTE.backdrop, 0, 0, world.canvas.width, world.canvas.height);
@@ -340,6 +342,17 @@ export function drawWorld(ctx, world) {
   }
 
   label(ctx, PALETTE.textDim, world.caption, world.caption_box.x, world.caption_box.y, world.caption_box.size, 'left');
+  // Seats the canvas could not draw are stated, not silently dropped. `label`
+  // paints nothing for the empty string, so an office that fits gets no line.
+  label(
+    ctx,
+    PALETTE.text,
+    world.overflow_label.text,
+    world.overflow_label.x,
+    world.overflow_label.y,
+    world.overflow_label.size,
+    'left',
+  );
 
   ctx.restore();
 }
