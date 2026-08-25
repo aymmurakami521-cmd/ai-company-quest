@@ -19,7 +19,7 @@
  */
 
 import { drawWorld } from './quest-canvas.js';
-import { buildWorld } from './quest-world.js';
+import { buildWorld, measureCanvasViewport } from './quest-world.js';
 import {
   ACTOR_VISUAL_STATES,
   applyFrame,
@@ -234,12 +234,15 @@ let paintedViewport = null;
  * a non-issue here rather than a special case.
  */
 function currentViewport() {
-  const frame = dom.canvasFrame;
-  return {
-    width: frame === null ? dom.canvas.clientWidth : frame.clientWidth,
-    height: Math.round(window.innerHeight * 0.62),
+  return measureCanvasViewport({
+    // The canvas' own content box, never the padded frame around it: the buffer
+    // is displayed in this box, so this is the width it has to be built for.
+    surface_width: dom.canvas === null ? 0 : dom.canvas.clientWidth,
+    // Only reached when the canvas has no layout box to report.
+    frame_width: dom.canvasFrame === null ? 0 : dom.canvasFrame.clientWidth,
+    window_height: window.innerHeight,
     dpr: window.devicePixelRatio,
-  };
+  });
 }
 
 function paintCanvas() {

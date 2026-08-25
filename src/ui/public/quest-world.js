@@ -81,6 +81,9 @@ export const MAX_DEVICE_PIXELS = 16777216;
 /** The buffer is never scaled below this: a canvas of zero pixels draws nothing. */
 export const MIN_DEVICE_SCALE = 0.05;
 
+/** Share of the browser's inner height the office is allowed to take. */
+export const VIEWPORT_HEIGHT_RATIO = 0.62;
+
 const MIN_VIEWPORT = 240;
 const MAX_VIEWPORT = 8192;
 
@@ -226,6 +229,38 @@ function normalizeViewport(raw) {
     // every frame, and an absurd value cannot allocate an absurd buffer.
     dpr: Math.round(clamp(finite(source.dpr, 1), 1, MAX_DPR) * 100) / 100,
   };
+}
+
+/**
+ * The viewport one canvas *surface* offers, from measurements a caller took.
+ *
+ * The width that matters is the canvas element's own content box - the box the
+ * browser paints the backing store into. The frame around it carries padding,
+ * so its `clientWidth` is the wider outer box: sizing a buffer from that puts,
+ * for a 960px frame with 10px of padding on each side at ratio 4, a 3840-pixel
+ * buffer onto a 940-pixel surface. The browser then rescales by 4.085 and the
+ * pixel blocks this screen is made of stop landing on whole device pixels.
+ *
+ * The frame width is a last resort only, for a canvas that has no layout box to
+ * report yet; it is an over-estimate by exactly the padding, so it is used when
+ * the alternative is no measurement at all rather than as an equal option.
+ *
+ * No element is touched here: the caller passes plain numbers, which is what
+ * keeps this module testable in Node and free of any browser global.
+ *
+ * @param source `{ surface_width, frame_width, window_height, dpr }` in CSS
+ *   pixels, as `clientWidth` / `innerHeight` / `devicePixelRatio` report them.
+ * @returns a `Viewport` already clamped exactly like `buildWorld` clamps one.
+ */
+export function measureCanvasViewport(source) {
+  const raw = source === null || typeof source !== 'object' ? {} : source;
+  const surface = Math.floor(finite(raw.surface_width, 0));
+  const frame = Math.floor(finite(raw.frame_width, 0));
+  return normalizeViewport({
+    width: surface > 0 ? surface : frame,
+    height: Math.round(finite(raw.window_height, 0) * VIEWPORT_HEIGHT_RATIO),
+    dpr: raw.dpr,
+  });
 }
 
 /**
@@ -433,9 +468,15 @@ export function buildWorld(input) {
   const roomWidth = 2 * pad + columns * cellWidth;
   const roomHeight = wallHeight + 2 * pad + rows * cellHeight;
 
-  // The canvas is exactly as large as the room plus its margin, so the room can
+  // The room is centred in whatever width the canvas ends up with, so sideways
+  // the outer margin decides one thing only: whether the canvas has to be wider
+  // than the viewport it is displayed in. It gives way before that happens - a
+  // canvas wider than the surface showing it is one the browser rescales, and
+  // the space around the room is backdrop either way.
+  const sideMargin = Math.max(0, Math.min(margin, Math.floor((viewport.width - roomWidth) / 2)));
+  // The canvas is exactly as large as the room plus that margin, so the room can
   // never be cropped: at the smallest scale the canvas grows instead.
-  const canvasWidth = Math.max(viewport.width, roomWidth + 2 * margin);
+  const canvasWidth = Math.max(viewport.width, roomWidth + 2 * sideMargin);
   // The caption gets its own strip under the room, so it can never land on the
   // furniture and never has to shrink with the scale. An office with seats the
   // canvas did not draw gets a second strip for the count, so the two lines

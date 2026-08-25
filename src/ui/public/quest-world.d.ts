@@ -100,6 +100,19 @@ export type World = {
   overflow_label: WorldLabel;
 };
 
+/**
+ * Measurements of the canvas surface, in CSS pixels.
+ *
+ * `surface_width` is the canvas element's own content box; `frame_width` is the
+ * padded box around it and is a fallback only.
+ */
+export type CanvasMeasurement = {
+  surface_width?: number;
+  frame_width?: number;
+  window_height?: number;
+  dpr?: number;
+};
+
 export type WorldInput = {
   desks?: readonly Desk[];
   header?: Header | null;
@@ -124,9 +137,11 @@ export declare const MAX_ROWS: number;
 export declare const MAX_DEVICE_SIDE: number;
 export declare const MAX_DEVICE_PIXELS: number;
 export declare const MIN_DEVICE_SCALE: number;
+export declare const VIEWPORT_HEIGHT_RATIO: number;
 export declare const APPEARANCE_KEYS: readonly string[];
 
 export declare function deviceScaleFor(cssWidth: number, cssHeight: number, dpr: number): number;
+export declare function measureCanvasViewport(source: CanvasMeasurement | null | undefined): Viewport;
 
 export declare function appearanceSeed(actorKey: unknown): number;
 export declare function appearanceFor(actorKey: unknown): Appearance;

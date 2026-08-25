@@ -43,11 +43,13 @@ import {
   MAX_SCALE,
   MIN_DEVICE_SCALE,
   MIN_SCALE,
+  VIEWPORT_HEIGHT_RATIO,
   appearanceFor,
   appearanceSeed,
   buildWorld,
   deviceScaleFor,
   fitLabel,
+  measureCanvasViewport,
 } from '../src/ui/public/quest-world.js';
 
 // ------------------------------------------------------------- fixtures ---
@@ -308,6 +310,195 @@ test('a long name is truncated to its box instead of running over the desk', () 
   assert.equal(fitLabel(long, 68, 10), fitLabel(long, 68, 10), 'truncation is deterministic');
   assert.equal(fitLabel('short', 68, 10), 'short', 'a label that fits is left alone');
   assert.equal(fitLabel(null, 68, 10), '', 'a missing label is empty, never "null"');
+});
+
+// ------------------------------------------------ canvas surface & DPR ---
+
+/**
+ * The ratio the browser would end up showing this buffer at.
+ *
+ * The canvas is laid out at `width: 100%` of the frame's content box, so the
+ * width it is displayed at is the measured surface: the buffer is stretched over
+ * that box whatever it was sized for. Alignment means this comes out as the
+ * ratio `drawWorld` transformed by - anything else is a browser rescale.
+ */
+function effectiveRatio(world: World, surfaceWidth: number): number {
+  return world.canvas.device_width / surfaceWidth;
+}
+
+/**
+ * The whole alignment contract, in one place.
+ *
+ * Horizontally the buffer must be the surface at the transform's ratio, to
+ * within the half pixel rounding a whole-pixel buffer costs. Vertically the
+ * displayed height follows from the buffer's own ratio - `height: auto` - so
+ * what has to hold is that it lands on the CSS height the world laid the office
+ * out in, again to within a rounding pixel.
+ */
+function assertSurfaceAligned(world: World, surfaceWidth: number, requestedDpr: number, label: string): void {
+  const store = world.canvas;
+  assert.equal(store.width, surfaceWidth, `${label}: the world is as wide as the box it is shown in`);
+  assert.ok(store.dpr <= requestedDpr, `${label}: the buffer never asks for more than the screen offers`);
+  assert.equal(
+    store.dpr,
+    deviceScaleFor(store.width, store.height, requestedDpr),
+    `${label}: the ratio is the requested one unless a ceiling bit`,
+  );
+  assert.equal(store.device_width, Math.round(surfaceWidth * store.dpr), `${label}: buffer width`);
+
+  const ratio = effectiveRatio(world, surfaceWidth);
+  // Stated in device pixels: the buffer is the surface at the transform's ratio,
+  // give or take the half pixel a whole-pixel buffer has to round to.
+  assert.ok(
+    Math.abs(ratio - store.dpr) * surfaceWidth <= 0.5 + 1e-9,
+    `${label}: effective ratio ${ratio} against transform ${store.dpr}`,
+  );
+
+  const displayedHeight = (surfaceWidth * store.device_height) / store.device_width;
+  assert.ok(
+    Math.abs(displayedHeight - store.height) <= 1,
+    `${label}: displayed height ${displayedHeight} against css height ${store.height}`,
+  );
+}
+
+test('the buffer is built for the canvas surface, not for the padded frame around it', () => {
+  // The reported case: a 960px frame with 10px of padding on each side leaves a
+  // 940px canvas surface, and the screen is on a ratio-4 display.
+  const desks = Array.from({ length: 5 }, (_, index) => desk(index + 1, 'working'));
+  const frameWidth = 960;
+  const surfaceWidth = 940;
+
+  const viewport = measureCanvasViewport({
+    surface_width: surfaceWidth,
+    frame_width: frameWidth,
+    window_height: 900,
+    dpr: 4,
+  });
+  assert.equal(viewport.width, surfaceWidth, 'the surface is measured, not the frame');
+  assert.equal(viewport.height, Math.round(900 * VIEWPORT_HEIGHT_RATIO));
+  assert.equal(viewport.dpr, 4);
+
+  const world = buildWorld({ desks, header: emptyHeader(), viewport });
+  assertSurfaceAligned(world, surfaceWidth, 4, '960px frame with 10px padding at dpr 4');
+  assert.equal(world.canvas.device_width, 3760, 'the buffer is the surface at ratio 4, not the frame at ratio 4');
+  // `drawWorld` transforms by `canvas.dpr`, so the transform is the ratio the
+  // buffer is actually shown at.
+  assert.equal(world.canvas.dpr, 4);
+  assert.equal(effectiveRatio(world, surfaceWidth), 4, 'one device pixel per device pixel');
+
+  // Measuring the frame instead is what the fix removes: the same 940px surface,
+  // a buffer 80 device pixels too wide, and a ratio the browser scales away.
+  const padded = buildWorld({ desks, header: emptyHeader(), viewport: { width: frameWidth, height: 558, dpr: 4 } });
+  assert.equal(padded.canvas.device_width, 3840);
+  assert.ok(
+    Math.abs(effectiveRatio(padded, surfaceWidth) - 4) > 0.08,
+    `the padded measurement really was misaligned: ${effectiveRatio(padded, surfaceWidth)}`,
+  );
+});
+
+test('padding, DPR and desk count never change the ratio the surface is shown at', () => {
+  for (const padding of [0, 20]) {
+    for (const frameWidth of [480, 720, 960, 1440, 1920]) {
+      const surfaceWidth = frameWidth - padding;
+      for (const dpr of [1, 2, 3, 4]) {
+        for (const count of [0, 1, 7, 40]) {
+          const desks = Array.from({ length: count }, (_, index) => desk(index + 1, 'working'));
+          const viewport = measureCanvasViewport({
+            surface_width: surfaceWidth,
+            frame_width: frameWidth,
+            window_height: 900,
+            dpr,
+          });
+          const label = `${frameWidth}px frame, ${padding}px padding, dpr ${dpr}, ${count} desks`;
+
+          assert.equal(viewport.width, surfaceWidth, `${label}: measured width`);
+          const world = buildWorld({ desks, header: emptyHeader(), viewport });
+          assertSurfaceAligned(world, surfaceWidth, dpr, label);
+          assertBufferBounded(world, label);
+        }
+      }
+    }
+  }
+});
+
+test('a resize keeps the buffer aligned with the surface it lands in', () => {
+  const desks = Array.from({ length: 13 }, (_, index) => desk(index + 1, 'idle'));
+  // Frame widths a window resize walks through, each with the 20px of padding
+  // the stylesheet puts around the canvas, and a DPR change on the way.
+  const steps = [
+    { frame: 1920, height: 1080, dpr: 2 },
+    { frame: 1440, height: 900, dpr: 2 },
+    { frame: 960, height: 900, dpr: 4 },
+    { frame: 720, height: 640, dpr: 3 },
+    { frame: 480, height: 640, dpr: 1 },
+    { frame: 1920, height: 1080, dpr: 2 },
+  ];
+
+  for (const step of steps) {
+    const surfaceWidth = step.frame - 20;
+    const viewport = measureCanvasViewport({
+      surface_width: surfaceWidth,
+      frame_width: step.frame,
+      window_height: step.height,
+      dpr: step.dpr,
+    });
+    const world = buildWorld({ desks, header: emptyHeader(), viewport });
+    const label = `${step.frame}x${step.height}@${step.dpr}`;
+
+    assertSurfaceAligned(world, surfaceWidth, step.dpr, `${label} after resize`);
+    assertBufferBounded(world, label);
+    assert.equal(world.actors.length, desks.length, `${label}: nobody is dropped by a resize`);
+    // The room still fits, so the alignment is not bought with a crop.
+    assert.ok(
+      contains({ x: 0, y: 0, width: world.canvas.width, height: world.canvas.height }, world.room),
+      `${label}: the room is never cropped`,
+    );
+  }
+});
+
+test('no viewport in range leaves the canvas wider than the surface it is shown in', () => {
+  // The room is never cropped to reach this: it is the decorative outer margin
+  // that gives way, and the room stays centred in the same backdrop.
+  for (let width = 240; width <= 2400; width += 17) {
+    for (const height of [240, 558, 900]) {
+      for (const count of [0, 1, 3, 7, 40, MAX_ROWS * MAX_COLUMNS + 1]) {
+        const desks = Array.from({ length: count }, (_, index) => desk(index + 1, 'error'));
+        for (const dpr of [1, 4]) {
+          const world = buildWorld({ desks, header: emptyHeader(), viewport: { width, height, dpr } });
+          const label = `${width}x${height}@${dpr}, ${count} desks`;
+          assertSurfaceAligned(world, width, dpr, label);
+          assert.ok(
+            contains({ x: 0, y: 0, width: world.canvas.width, height: world.canvas.height }, world.room),
+            `${label}: the room is still whole`,
+          );
+          assert.ok(world.room.x >= 0 && world.room.width <= width, `${label}: the room is inside the surface`);
+        }
+      }
+    }
+  }
+});
+
+test('an unmeasurable surface falls back rather than sizing a buffer from nothing', () => {
+  // A canvas with no layout box yet: the padded frame is the only measurement
+  // there is, and an over-estimate beats no office at all.
+  assert.equal(measureCanvasViewport({ surface_width: 0, frame_width: 960, window_height: 900, dpr: 2 }).width, 960);
+  assert.equal(measureCanvasViewport({ surface_width: -5, frame_width: 960, window_height: 900, dpr: 2 }).width, 960);
+
+  // Nothing measurable at all still yields a drawable, bounded world.
+  for (const source of [null, undefined, {}, { surface_width: Number.NaN, frame_width: Number.NaN }] as const) {
+    const viewport = measureCanvasViewport(source);
+    for (const value of [viewport.width, viewport.height, viewport.dpr]) {
+      assert.ok(Number.isFinite(value) && value > 0, `fallback viewport ${JSON.stringify(viewport)}`);
+    }
+    assertBufferBounded(buildWorld({ desks: [], header: emptyHeader(), viewport }), 'fallback');
+  }
+
+  // The same clamps `buildWorld` applies, applied once here.
+  assert.equal(measureCanvasViewport({ surface_width: 99999, window_height: 99999, dpr: 99 }).dpr, MAX_DPR);
+  assert.equal(measureCanvasViewport({ surface_width: 940, window_height: 900, dpr: Number.NaN }).dpr, 1);
+  assert.equal(measureCanvasViewport({ surface_width: 940.7, window_height: 900, dpr: 2 }).width, 940);
+  const measured = measureCanvasViewport({ surface_width: 940, window_height: 900, dpr: 2 });
+  assert.deepEqual(buildWorld({ desks: [], header: emptyHeader(), viewport: measured }).viewport, measured);
 });
 
 // ------------------------------------------------- backing-store bounds ---
