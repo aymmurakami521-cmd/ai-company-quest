@@ -28,8 +28,9 @@ test('DEMO ingestion leaves the LIVE store completely untouched', () => {
   assert.equal(live.stats.accepted, 0);
   assert.equal(live.stats.lines_seen, 0);
   assert.equal(live.replay.size, 0);
-  assert.deepEqual(live.state.sessions, {});
-  assert.deepEqual(live.state.actors, {});
+  // Keyed by stream content, so these maps are prototype-less: compare contents.
+  assert.deepEqual(Object.keys(live.state.sessions), []);
+  assert.deepEqual(Object.keys(live.state.actors), []);
   assert.equal(live.state.last_ingest_seq, 0);
 });
 

@@ -19,6 +19,7 @@
  */
 
 import type { SanitizedEvent } from './event.ts';
+import { ownProperty } from './record.ts';
 
 export const MAIN_AGENT_ID = 'main';
 
@@ -86,8 +87,10 @@ export function resolveActor(
   let roleSource: ResolvedActor['role_source'] = 'none';
 
   if (directory !== undefined && agentId !== null) {
-    const scoped = directory.roles[key];
-    const unscoped = directory.roles[agentId];
+    // Own-property lookups: an `agent_id` of `toString` must miss the directory,
+    // not answer with a function inherited from `Object.prototype`.
+    const scoped = ownProperty(directory.roles, key);
+    const unscoped = ownProperty(directory.roles, agentId);
     if (typeof scoped === 'string' && scoped.length > 0) {
       role = scoped;
       roleSource = 'directory';

@@ -18,6 +18,7 @@ import type { ActorDirectory } from '../domain/actor.ts';
 import { resolveActorFromEvent } from '../domain/actor.ts';
 import type { IngestedEvent, PlayerEntity, QuestState, StateLimits } from '../domain/reducer.ts';
 import { DEFAULT_STATE_LIMITS, checkStateLimits, createInitialState, reduce } from '../domain/reducer.ts';
+import { emptyRecord, ownProperty } from '../domain/record.ts';
 import type { RejectReason, ValidationResult } from '../domain/validate.ts';
 import { DEFAULT_MAX_LINE_BYTES, validateEventObject, validateLine } from '../domain/validate.ts';
 import type { WireEvent } from '../domain/wire.ts';
@@ -101,7 +102,9 @@ export class NamespaceStore {
       duplicates: 0,
       blank: 0,
       rejected: 0,
-      rejected_by_reason: {},
+      // Prototype-less like every other keyed map here, even though the reasons
+      // themselves are a closed internal set.
+      rejected_by_reason: emptyRecord<number>(),
       dropped_producer_keys: 0,
       last_ingest_seq: 0,
       halted: false,
@@ -122,7 +125,7 @@ export class NamespaceStore {
 
   countRejection(reason: string): void {
     this.stats.rejected += 1;
-    this.stats.rejected_by_reason[reason] = (this.stats.rejected_by_reason[reason] ?? 0) + 1;
+    this.stats.rejected_by_reason[reason] = (ownProperty(this.stats.rejected_by_reason, reason) ?? 0) + 1;
   }
 
   halt(reason: HaltReason, detail: string): IngestOutcome {

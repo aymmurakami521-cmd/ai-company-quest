@@ -318,6 +318,110 @@ test('a start-at-end tailer on an empty or absent file needs no seeding', async 
   }
 });
 
+/**
+ * Stages the `stat()`-then-`open()` race deterministically: the copy-truncate
+ * happens after the poll's probe stat and before the file is opened, so the
+ * probe's size and inode describe content that no longer exists.
+ */
+class ReplacingTailer extends JsonlTailer {
+  replacement: string | null = null;
+  override async openInput(): Promise<FileHandle> {
+    const replacement = this.replacement;
+    if (replacement !== null) {
+      this.replacement = null;
+      // Same inode, rewritten in place, and longer than the probe measured.
+      await writeFile(this.path, replacement);
+    }
+    return super.openInput();
+  }
+}
+
+test('a copy-truncate between the probe and the open cannot strand a start-at-end offset', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quest-tail-'));
+  const file = join(dir, 'events.jsonl');
+  const lines: string[] = [];
+  const notices: TailerNotice[] = [];
+  const replacement = 'new-1\nnew-2\nnew-3\nnew-4\n';
+
+  const tailer = new ReplacingTailer(
+    { path: file, startFrom: 'end' },
+    {
+      onLine: (line) => {
+        lines.push(line);
+      },
+      onNotice: (notice) => {
+        notices.push(notice);
+      },
+    },
+  );
+
+  try {
+    await writeFile(file, 'old-1\nold-2\n');
+    assert.ok(replacement.length > 'old-1\nold-2\n'.length, 'the file regrows past the probed EOF');
+    tailer.replacement = replacement;
+    await tailer.pollOnce();
+
+    // start-at-end skips the history it joins - but it must skip the history of
+    // the file it actually opened, not the one the probe happened to measure.
+    assert.deepEqual(lines, [], 'pre-existing content is skipped');
+    assert.equal(tailer.offset, replacement.length, 'the EOF comes from the opened file');
+    assert.equal(tailer.stats.errors, 0);
+
+    await appendFile(file, 'live-1\n');
+    await tailer.pollOnce();
+
+    // With the offset taken from the probe, this poll resumed 12 bytes into the
+    // replacement and re-emitted records that were already there at attach time.
+    assert.deepEqual(lines, ['live-1'], 'only what was appended after attaching');
+  } finally {
+    await tailer.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a copy-truncate between the probe and the open is read at the length of the opened file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quest-tail-'));
+  const file = join(dir, 'events.jsonl');
+  const lines: string[] = [];
+  const notices: TailerNotice[] = [];
+  const replacement = 'new-1\nnew-2\nnew-3\nnew-4\n';
+
+  const tailer = new ReplacingTailer(
+    { path: file },
+    {
+      onLine: (line) => {
+        lines.push(line);
+      },
+      onNotice: (notice) => {
+        notices.push(notice);
+      },
+    },
+  );
+
+  try {
+    await writeFile(file, 'aaaa\nbbbb\ncccc\n');
+    await tailer.pollOnce();
+    assert.deepEqual(lines, ['aaaa', 'bbbb', 'cccc']);
+
+    // Something is appended, so the poll opens the file; the copy-truncate then
+    // lands between that probe and the open. The probe's 20 bytes are shorter
+    // than the replacement, so a read bounded by it would cut `new-4` in half
+    // and glue the halves together on the following poll.
+    await appendFile(file, 'dddd\n');
+    tailer.replacement = replacement;
+    await tailer.pollOnce();
+
+    assert.deepEqual(lines, ['aaaa', 'bbbb', 'cccc', 'new-1', 'new-2', 'new-3', 'new-4']);
+    assert.equal(tailer.offset, replacement.length);
+    assert.equal(tailer.stats.rotations, 0, 'the inode never changed');
+    assert.equal(tailer.stats.truncations, 1);
+    assert.ok(notices.some((notice) => notice.type === 'truncated'));
+  } finally {
+    await tailer.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('restarting the tailer re-reads the file but de-duplication keeps state stable', async () => {
   const h = await harness();
   const store = new NamespaceStore({ namespace: 'live' });

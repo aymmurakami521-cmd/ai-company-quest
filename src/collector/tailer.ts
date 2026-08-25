@@ -17,6 +17,13 @@
  * - starting at the current EOF (`startFrom: 'end'`): the bytes before that EOF
  *   are seeded as the signature, so the first copy-truncate is still detected
  *
+ * The path `stat()` is only a probe: it says whether the file exists and whether
+ * anything can have changed. Every decision that positions a read - the inode we
+ * compare, the EOF we adopt, the signature we seed or verify and the length we
+ * read up to - is taken from `fstat` on the handle we are about to read, so a
+ * rotation or a copy-truncate landing between the probe and the open can never
+ * leave the offset pointing into a different file's bytes.
+ *
  * A poll never rejects: every I/O failure becomes a sanitized notice and polling
  * continues, so a rotation racing the collector cannot terminate the process.
  *
@@ -205,9 +212,12 @@ export class JsonlTailer {
     try {
       this.stats.polls += 1;
 
-      let info: Stats;
+      // Probe only: existence, plus "can anything have changed?". Its `ino` and
+      // `size` are deliberately not used to position a read - by the time we
+      // open, the path may resolve to different content entirely.
+      let probe: Stats;
       try {
-        info = await stat(this.path);
+        probe = await stat(this.path);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code ?? 'UNKNOWN';
         if (code === 'ENOENT') {
@@ -224,36 +234,18 @@ export class JsonlTailer {
         return;
       }
 
-      if (this.inode === null) {
-        this.inode = info.ino;
-        const startAtEnd = this.startFrom === 'end' && !this.hasObservedFile;
-        this.offset = startAtEnd ? info.size : 0;
-        this.signature = EMPTY;
-        // Starting mid-file leaves us with an offset whose preceding bytes we
-        // never read. Seed them now, otherwise the first copy-truncate would be
-        // invisible to the content check and we would resume at a stale offset.
-        this.needsSignatureSeed = startAtEnd && info.size > 0;
-        this.hasObservedFile = true;
-        this.onNotice({ type: 'appeared' });
-      } else if (info.ino !== this.inode) {
-        this.inode = info.ino;
-        this.offset = 0;
-        this.discardPending();
-        this.stats.rotations += 1;
-        this.onNotice({ type: 'rotated' });
-      } else if (info.size < this.offset) {
-        this.offset = 0;
-        this.discardPending();
-        this.stats.truncations += 1;
-        this.onNotice({ type: 'truncated' });
+      // Known file, unchanged length, nothing left to seed: there is provably
+      // nothing to read, so do not pay for an open.
+      if (
+        this.inode !== null &&
+        probe.ino === this.inode &&
+        probe.size === this.offset &&
+        !this.needsSignatureSeed
+      ) {
+        return;
       }
 
-      // A poll with no new bytes still has to open the file when the signature
-      // is missing: seeding it is what makes the *next* poll able to notice a
-      // copy-truncate.
-      if (info.size <= this.offset && !this.needsSignatureSeed) return;
-
-      // The path can be replaced or removed between the stat above and this
+      // The path can be replaced or removed between the probe above and this
       // open. Every failure from here on is reported, never thrown.
       let handle: FileHandle;
       try {
@@ -264,30 +256,7 @@ export class JsonlTailer {
       }
 
       try {
-        const intact = this.needsSignatureSeed
-          ? await this.seedSignature(handle)
-          : await this.verifySignature(handle);
-        if (!intact) {
-          // Same inode, but the bytes under our offset changed: the file was
-          // copy-truncated and regrown. Restart from the beginning of the new
-          // content instead of reading the middle of a record.
-          this.offset = 0;
-          this.discardPending();
-          this.stats.truncations += 1;
-          this.onNotice({ type: 'truncated' });
-        }
-
-        while (info.size > this.offset) {
-          const length = Math.min(info.size - this.offset, this.maxChunkBytes);
-          const buffer = Buffer.alloc(length);
-          const { bytesRead } = await handle.read(buffer, 0, length, this.offset);
-          if (bytesRead <= 0) break;
-          this.offset += bytesRead;
-          this.stats.bytes_read += bytesRead;
-          const chunk = buffer.subarray(0, bytesRead);
-          this.rememberSignature(chunk);
-          this.consume(chunk);
-        }
+        await this.readOpenFile(handle);
       } catch (error) {
         this.handleIoFailure(error);
       } finally {
@@ -309,6 +278,69 @@ export class JsonlTailer {
    */
   openInput(): Promise<FileHandle> {
     return open(this.path, 'r');
+  }
+
+  /**
+   * One poll's worth of work against a single open handle.
+   *
+   * `fstat` on that handle is the only snapshot used here, so identity (`ino`),
+   * the EOF a `startFrom: 'end'` tailer adopts, the signature and the length we
+   * read up to all describe the same file. Taking the size from the path stat
+   * instead would let a replacement's prefix be skipped, or a record be cut at a
+   * stale length and rejoined with the next poll's bytes.
+   */
+  async readOpenFile(handle: FileHandle): Promise<void> {
+    const info = await handle.stat();
+
+    if (this.inode === null) {
+      this.inode = info.ino;
+      const startAtEnd = this.startFrom === 'end' && !this.hasObservedFile;
+      this.offset = startAtEnd ? info.size : 0;
+      this.signature = EMPTY;
+      // Starting mid-file leaves us with an offset whose preceding bytes we
+      // never read. Seed them from this same handle, otherwise the first
+      // copy-truncate would be invisible to the content check and we would
+      // resume at a stale offset.
+      this.needsSignatureSeed = startAtEnd && info.size > 0;
+      this.hasObservedFile = true;
+      this.onNotice({ type: 'appeared' });
+    } else if (info.ino !== this.inode) {
+      this.inode = info.ino;
+      this.offset = 0;
+      this.discardPending();
+      this.stats.rotations += 1;
+      this.onNotice({ type: 'rotated' });
+    } else if (info.size < this.offset) {
+      this.offset = 0;
+      this.discardPending();
+      this.stats.truncations += 1;
+      this.onNotice({ type: 'truncated' });
+    }
+
+    const intact = this.needsSignatureSeed
+      ? await this.seedSignature(handle)
+      : await this.verifySignature(handle);
+    if (!intact) {
+      // Same inode, but the bytes under our offset changed: the file was
+      // copy-truncated and regrown. Restart from the beginning of the new
+      // content instead of reading the middle of a record.
+      this.offset = 0;
+      this.discardPending();
+      this.stats.truncations += 1;
+      this.onNotice({ type: 'truncated' });
+    }
+
+    while (info.size > this.offset) {
+      const length = Math.min(info.size - this.offset, this.maxChunkBytes);
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, this.offset);
+      if (bytesRead <= 0) break;
+      this.offset += bytesRead;
+      this.stats.bytes_read += bytesRead;
+      const chunk = buffer.subarray(0, bytesRead);
+      this.rememberSignature(chunk);
+      this.consume(chunk);
+    }
   }
 
   /**

@@ -11,10 +11,12 @@ function seq(events: ReturnType<typeof makeEvent>[], namespace: 'live' | 'demo' 
 
 test('reduce does not mutate the previous state', () => {
   const state = createInitialState('live');
-  const before = structuredClone(state);
+  // Serialized rather than structuredClone'd: the keyed maps are prototype-less
+  // and a clone would compare unequal on the prototype alone.
+  const before = JSON.stringify(state);
   const next = reduce(state, makeIngested(makeEvent({ event_type: 'session_start' }), 1));
 
-  assert.deepEqual(state, before);
+  assert.equal(JSON.stringify(state), before);
   assert.notEqual(next, state);
   assert.equal(state.counters.applied, 0);
   assert.equal(next.counters.applied, 1);

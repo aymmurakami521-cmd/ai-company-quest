@@ -209,6 +209,16 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   ただし1 poll区間内にrotateし、旧ファイル末尾が読まれる前に消えた場合、その分は失われます。
   `stat()` と `open()` の間でファイルが消えてもprocessは落ちず、`missing` を通知して
   replacementのpollingを継続します。
+- path経由の `stat()` はpolling用のprobeにすぎません。inode比較、`QUEST_START_FROM=end`
+  で採用するEOF、signatureのseed／照合、読み出す長さは、すべて実際に読むhandleの
+  `fstat` から決めます。probeとopenの間にrotationやcopy-truncateが入っても、
+  別ファイルのoffsetを引き継いだり、record途中で切った断片を次pollのbyteと連結したり
+  しません。なお `end` modeでその競合が起きた場合、開いたfileの既存内容は
+  「追い始めた時点の履歴」として設計どおりskipされます。
+- state内でstream内容をkeyにするmap（`sessions` / `actors` / `by_type` など）はすべて
+  prototypeを持たず、参照もown property照合で行います。`__proto__` や `constructor` と
+  いった `session_id` / `agent_id` / `event_type` も通常の識別子として扱われ、
+  継承memberの誤認やそれに伴うrecord欠落は発生しません。
 - 重複排除indexは有界（既定10万件）です。これを超えて古いeventの重複が来た場合は再受理されます。
 - state保持上限に到達するとingestがhaltします。長時間稼働でsession/actorが増え続ける運用では、
   上限に達した時点で以降のeventが失われるため、定期的な再起動かfileのrotationが前提です。

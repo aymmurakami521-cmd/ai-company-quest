@@ -16,10 +16,14 @@
  *   limit is refused, never applied partially and never silently evicted: the
  *   collector turns that refusal into a fail-closed halt, so what is served
  *   always remains a complete prefix of the stream.
+ * - Every map keyed by stream content is prototype-less and read through
+ *   `ownProperty`, so an identifier like `__proto__` or `constructor` is just an
+ *   identifier and can never resolve to an inherited `Object.prototype` member.
  */
 
 import type { Namespace, SanitizedEvent } from './event.ts';
 import type { ResolvedActor } from './actor.ts';
+import { copyRecord, emptyRecord, ownProperty } from './record.ts';
 
 /** An accepted, de-duplicated event with its collector-assigned sequence. */
 export type IngestedEvent = {
@@ -151,10 +155,10 @@ export function createInitialState(
     namespace,
     player,
     limits: { ...limits },
-    sessions: {},
-    actors: {},
+    sessions: emptyRecord<SessionState>(),
+    actors: emptyRecord<ActorState>(),
     last_ingest_seq: 0,
-    counters: { applied: 0, ignored: 0, out_of_order: 0, by_type: {} },
+    counters: { applied: 0, ignored: 0, out_of_order: 0, by_type: emptyRecord<number>() },
   };
 }
 
@@ -168,12 +172,14 @@ export function checkStateLimits(state: QuestState, ingested: IngestedEvent): St
   const limits = state.limits;
   const sessionId = ingested.event.session_id;
   const actorKey = ingested.actor.actor_key;
-  const session = state.sessions[sessionId];
+  // Own-property lookups: a `session_id` of `__proto__` or `constructor` must
+  // read as "not tracked yet", not as an inherited `Object.prototype` member.
+  const session = ownProperty(state.sessions, sessionId);
 
   if (session === undefined && Object.keys(state.sessions).length >= limits.max_sessions) {
     return { limit: 'sessions', max: limits.max_sessions };
   }
-  if (state.actors[actorKey] === undefined && Object.keys(state.actors).length >= limits.max_actors) {
+  if (ownProperty(state.actors, actorKey) === undefined && Object.keys(state.actors).length >= limits.max_actors) {
     return { limit: 'actors', max: limits.max_actors };
   }
   if (
@@ -184,7 +190,7 @@ export function checkStateLimits(state: QuestState, ingested: IngestedEvent): St
     return { limit: 'actors_per_session', max: limits.max_actors_per_session };
   }
   if (
-    state.counters.by_type[ingested.event.event_type] === undefined &&
+    ownProperty(state.counters.by_type, ingested.event.event_type) === undefined &&
     Object.keys(state.counters.by_type).length >= limits.max_event_types
   ) {
     return { limit: 'event_types', max: limits.max_event_types };
@@ -231,8 +237,8 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
 
   const event = ingested.event;
   const actorKey = ingested.actor.actor_key;
-  const previousActor = state.actors[actorKey] ?? emptyActor(ingested);
-  const previousSession = state.sessions[event.session_id] ?? emptySession(event.session_id);
+  const previousActor = ownProperty(state.actors, actorKey) ?? emptyActor(ingested);
+  const previousSession = ownProperty(state.sessions, event.session_id) ?? emptySession(event.session_id);
 
   const eventMs = Date.parse(event.ts);
   const previousMs = previousActor.last_event_ts === null ? null : Date.parse(previousActor.last_event_ts);
@@ -293,9 +299,10 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
     event_count: previousActor.event_count + 1,
   };
 
-  let nextActors: Record<string, ActorState> = { ...state.actors, [actorKey]: nextActor };
+  let nextActors: Record<string, ActorState> = copyRecord(state.actors);
+  nextActors[actorKey] = nextActor;
   if (!outOfOrder && event.event_type === 'session_end') {
-    const deactivated: Record<string, ActorState> = {};
+    const deactivated: Record<string, ActorState> = emptyRecord<ActorState>();
     for (const [key, actor] of Object.entries(nextActors)) {
       deactivated[key] =
         actor.session_id === event.session_id && actor.active ? { ...actor, active: false, status: 'ended' } : actor;
@@ -318,8 +325,11 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
     actor_keys: actorKeys,
   };
 
-  const byType: Record<string, number> = { ...state.counters.by_type };
-  byType[event.event_type] = (byType[event.event_type] ?? 0) + 1;
+  const byType: Record<string, number> = copyRecord(state.counters.by_type);
+  byType[event.event_type] = (ownProperty(byType, event.event_type) ?? 0) + 1;
+
+  const nextSessions = copyRecord(state.sessions);
+  nextSessions[event.session_id] = nextSession;
 
   return {
     namespace: state.namespace,
@@ -327,7 +337,7 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
     player: state.player,
     // Likewise: limits are configuration, not something a producer can raise.
     limits: state.limits,
-    sessions: { ...state.sessions, [event.session_id]: nextSession },
+    sessions: nextSessions,
     actors: nextActors,
     last_ingest_seq: Math.max(state.last_ingest_seq, ingested.ingest_seq),
     counters: {
