@@ -1,9 +1,9 @@
 /**
- * `npm run live` entrypoint: collector + SSE only.
+ * `npm run live` entrypoint: collector + SSE + the retro office screen.
  *
- * There is no UI in this package yet. This process starts the LIVE collector,
- * an empty (or fixture-seeded) DEMO store and the localhost SSE/health server,
- * and says so on stdout instead of pretending a screen exists.
+ * This process starts the LIVE collector, an empty (or fixture-seeded) DEMO
+ * store and the localhost SSE/health/UI server. Everything it serves is
+ * read-only and bound to 127.0.0.1.
  */
 
 import { loadConfig } from './config.ts';
@@ -71,11 +71,13 @@ export async function main(): Promise<number> {
   await collector.start();
 
   process.stdout.write(
-    `quest: collector + SSE running on http://127.0.0.1:${address.port}\n` +
+    `quest: collector + SSE + UI running on http://127.0.0.1:${address.port}\n` +
+      `quest:   office  GET /                (open this in a browser)\n` +
+      `quest:   office  GET /#demo           (deterministic DEMO view)\n` +
       `quest:   health  GET /health\n` +
-      `quest:   stream  GET /events/live   (SSE)\n` +
-      `quest:   stream  GET /events/demo   (SSE)\n` +
-      'quest: no UI is implemented in this package yet.\n',
+      `quest:   stream  GET /events/live     (SSE)\n` +
+      `quest:   stream  GET /events/demo     (SSE)\n` +
+      'quest: read-only, loopback only. Ctrl-C to stop.\n',
   );
 
   let shuttingDown = false;

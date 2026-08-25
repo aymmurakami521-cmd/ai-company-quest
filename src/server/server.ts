@@ -8,6 +8,8 @@
  * - GET only; there is no endpoint that mutates collector state
  * - no CORS headers, so a random web origin cannot read the stream
  * - every streamed field comes from the `toWireEvent` whitelist
+ * - the UI is a fixed table of static files (see `ui/assets.ts`); a request path
+ *   is looked up in that table and never turned into a filesystem path
  *
  * Memory posture: a subscriber that stops reading is bounded, not buffered. Once
  * its unflushed bytes exceed `maxClientBufferBytes` the connection is dropped
@@ -23,6 +25,8 @@ import { isUuidV4 } from '../domain/validate.ts';
 import type { StateLimits } from '../domain/reducer.ts';
 import type { WireEvent } from '../domain/wire.ts';
 import type { NamespaceStore } from '../collector/store.ts';
+import type { UiAsset } from '../ui/assets.ts';
+import { CONTENT_SECURITY_POLICY, uiAsset } from '../ui/assets.ts';
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 4317;
@@ -179,6 +183,13 @@ export class QuestServer {
       return;
     }
 
+    // Exact-match lookup in a fixed table. The path is not a filesystem path.
+    const asset = uiAsset(url.pathname);
+    if (asset !== null) {
+      sendAsset(res, asset);
+      return;
+    }
+
     const streamMatch = /^\/events\/([a-z]+)$/.exec(url.pathname);
     if (streamMatch !== null) {
       const candidate = streamMatch[1] ?? '';
@@ -198,7 +209,7 @@ export class QuestServer {
     status: 'ok' | 'fail_closed';
     uptime_ms: number;
     bind: string;
-    ui: 'not_implemented';
+    ui: 'retro_office';
     namespaces: Record<Namespace, NamespaceHealth>;
   } {
     const namespaces = {} as Record<Namespace, NamespaceHealth>;
@@ -232,7 +243,7 @@ export class QuestServer {
       status: halted ? 'fail_closed' : 'ok',
       uptime_ms: this.now() - this.startedAt,
       bind: LOOPBACK_HOST,
-      ui: 'not_implemented',
+      ui: 'retro_office',
       namespaces,
     };
   }
@@ -355,6 +366,19 @@ function writeEvent(writer: BoundedSseWriter, wire: WireEvent): void {
 /** Control frames deliberately carry no `id:` so they never move Last-Event-ID. */
 function writeControl(writer: BoundedSseWriter, name: string, payload: unknown): void {
   writer.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+/** Serves one preloaded UI file. No CORS header, so only this origin may read it. */
+function sendAsset(res: ServerResponse, asset: UiAsset): void {
+  res.writeHead(200, {
+    'Content-Type': asset.contentType,
+    'Content-Length': asset.body.byteLength,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': CONTENT_SECURITY_POLICY,
+  });
+  res.end(asset.body);
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {

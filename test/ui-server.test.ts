@@ -1,0 +1,250 @@
+/**
+ * The UI routes.
+ *
+ * The screen is served from a fixed table of files, so these tests are about
+ * the boundary: which paths exist, what headers they carry, what a request can
+ * NOT reach, and what the shipped assets are allowed to contain.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { NamespaceStore } from '../src/collector/store.ts';
+import { QuestServer } from '../src/server/server.ts';
+import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
+import { httpGet } from './helpers.ts';
+
+type Harness = { server: QuestServer; port: number; close: () => Promise<void> };
+
+async function startServer(): Promise<Harness> {
+  const live = new NamespaceStore({ namespace: 'live' });
+  const demo = new NamespaceStore({ namespace: 'demo' });
+  const server = new QuestServer({ stores: { live, demo }, heartbeatMs: 60_000 });
+  const address = await server.listen(0);
+  return {
+    server,
+    port: address.port,
+    close: async () => {
+      await server.close();
+    },
+  };
+}
+
+function assetText(pathname: string): string {
+  const asset = uiAsset(pathname);
+  assert.ok(asset !== null, `${pathname} is served`);
+  return asset.body.toString('utf8');
+}
+
+test('the office screen is served on loopback with the expected content types', async () => {
+  const h = await startServer();
+  try {
+    const expected: Record<string, string> = {
+      '/': 'text/html; charset=utf-8',
+      '/ui/quest.css': 'text/css; charset=utf-8',
+      '/ui/quest-app.js': 'text/javascript; charset=utf-8',
+      '/ui/quest-view.js': 'text/javascript; charset=utf-8',
+    };
+    assert.deepEqual([...UI_ASSET_PATHS].sort(), Object.keys(expected).sort());
+
+    for (const [pathname, contentType] of Object.entries(expected)) {
+      const response = await httpGet(h.port, pathname);
+      assert.equal(response.status, 200, pathname);
+      assert.equal(response.headers['content-type'], contentType, pathname);
+      assert.equal(response.headers['cache-control'], 'no-store', pathname);
+      assert.equal(response.headers['x-content-type-options'], 'nosniff', pathname);
+      assert.equal(response.headers['access-control-allow-origin'], undefined, pathname);
+      assert.ok(response.body.length > 0, pathname);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test('the served page is locked down by a same-origin CSP', async () => {
+  const h = await startServer();
+  try {
+    const response = await httpGet(h.port, '/');
+    const csp = response.headers['content-security-policy'];
+    assert.equal(typeof csp, 'string');
+    for (const directive of [
+      "default-src 'none'",
+      "script-src 'self'",
+      "style-src 'self'",
+      "connect-src 'self'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+    ]) {
+      assert.ok(String(csp).includes(directive), `CSP contains ${directive}`);
+    }
+    assert.equal(response.headers['referrer-policy'], 'no-referrer');
+  } finally {
+    await h.close();
+  }
+});
+
+test('the UI adds no writable route and no new namespace', async () => {
+  const h = await startServer();
+  try {
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+      const response = await httpGet(h.port, '/', {}, method);
+      assert.equal(response.status, 405, `${method} /`);
+      assert.equal(response.headers['allow'], 'GET');
+    }
+    const upload = await httpGet(h.port, '/ui/quest-app.js', {}, 'POST');
+    assert.equal(upload.status, 405);
+    assert.equal((await httpGet(h.port, '/events/prod')).status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test('only the exact asset paths resolve: nothing else is readable', async () => {
+  const h = await startServer();
+  try {
+    const denied = [
+      '/ui/',
+      '/ui',
+      '/ui/index.html',
+      '/index.html',
+      '/package.json',
+      '/ui/quest-view.d.ts',
+      '/ui/quest-app.js.map',
+      '/ui/%2e%2e/package.json',
+      '/ui/..%2fpackage.json',
+      '/ui/quest-app.js/../../package.json',
+      '/../package.json',
+      '/ui/QUEST-APP.JS',
+    ];
+    for (const pathname of denied) {
+      const response = await httpGet(h.port, pathname);
+      assert.equal(response.status, 404, `${pathname} must not resolve`);
+      assert.equal(JSON.parse(response.body).error, 'not_found', pathname);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test('a foreign Host cannot fetch the UI either (DNS rebinding guard)', async () => {
+  const h = await startServer();
+  try {
+    for (const pathname of UI_ASSET_PATHS) {
+      const response = await httpGet(h.port, pathname, { host: 'quest.example.com' });
+      assert.equal(response.status, 403, pathname);
+      assert.equal(JSON.parse(response.body).error, 'host_not_allowed');
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test('health reports that the UI now exists', async () => {
+  const h = await startServer();
+  try {
+    const body = JSON.parse((await httpGet(h.port, '/health')).body) as { ui: string };
+    assert.equal(body.ui, 'retro_office');
+  } finally {
+    await h.close();
+  }
+});
+
+test('the shipped assets contain no path, secret or external destination', () => {
+  for (const pathname of UI_ASSET_PATHS) {
+    const text = assetText(pathname);
+    // No absolute filesystem path, no home directory, no credential shape.
+    assert.equal(/\/(Users|home|root|etc|var|private|tmp|Volumes)\//.test(text), false, `${pathname}: absolute path`);
+    assert.equal(text.includes('~/'), false, `${pathname}: home path`);
+    assert.equal(/sk-ant-|AKIA[0-9A-Z]{16}|-----BEGIN /.test(text), false, `${pathname}: credential shape`);
+    // No off-origin destination: the page only ever talks to 127.0.0.1.
+    assert.equal(/https?:\/\//.test(text), false, `${pathname}: external URL`);
+    assert.equal(/\bfetch\(|XMLHttpRequest|navigator\.sendBeacon|WebSocket/.test(text), false, `${pathname}: transport`);
+  }
+});
+
+test('the page renders stream content as text, never as markup or code', () => {
+  const app = assetText('/ui/quest-app.js');
+  const view = assetText('/ui/quest-view.js');
+  const html = assetText('/');
+
+  for (const [name, source] of [
+    ['quest-app.js', app],
+    ['quest-view.js', view],
+  ] as const) {
+    assert.equal(source.includes('innerHTML'), false, `${name}: innerHTML`);
+    assert.equal(source.includes('outerHTML'), false, `${name}: outerHTML`);
+    assert.equal(source.includes('insertAdjacentHTML'), false, `${name}: insertAdjacentHTML`);
+    assert.equal(source.includes('document.write'), false, `${name}: document.write`);
+    assert.equal(/\beval\(|new Function\(/.test(source), false, `${name}: dynamic code`);
+  }
+
+  // Nothing is logged, so stream content cannot leak into the browser console.
+  assert.equal(/console\.(log|info|warn|error|debug)/.test(app), false, 'no console output');
+  assert.equal(/console\.(log|info|warn|error|debug)/.test(view), false, 'no console output');
+
+  // The CSP forbids inline code; the page must not rely on any.
+  assert.equal(/<script(?![^>]*\bsrc=)/.test(html), false, 'no inline <script>');
+  assert.equal(html.includes('<style'), false, 'no inline <style>');
+  assert.equal(/\son[a-z]+=/.test(html), false, 'no inline event handler attributes');
+});
+
+test('the page only ever opens the two documented read-only streams', () => {
+  const app = assetText('/ui/quest-app.js');
+  const sources = app.match(/new EventSource\([^)]*\)/g) ?? [];
+  assert.deepEqual(sources, ['new EventSource(`/events/${namespace}`)']);
+  assert.ok(app.includes("const NAMESPACES = ['live', 'demo']"), 'namespaces are a fixed pair');
+});
+
+test('every element the app looks up exists in the page it is served with', () => {
+  const app = assetText('/ui/quest-app.js');
+  const html = assetText('/');
+
+  const ids = [...app.matchAll(/getElementById\('([^']+)'\)/g)].map((match) => match[1]);
+  assert.ok(ids.length > 0, 'the app looks elements up by id');
+  for (const id of ids) assert.ok(html.includes(`id="${String(id)}"`), `page has #${String(id)}`);
+
+  // Class selectors, including the ones passed to the `text()` helper.
+  const selectors = [
+    ...[...app.matchAll(/querySelector(?:All)?\('([^']+)'\)/g)].map((match) => match[1]),
+    ...[...app.matchAll(/text\([a-z]+, '([^']+)'/g)].map((match) => match[1]),
+  ];
+  for (const selector of selectors) {
+    const name = String(selector).replace(/^\./, '');
+    if (name.startsWith('[')) {
+      assert.ok(html.includes(name.slice(1, -1).split('=')[0] ?? ''), `page has ${name}`);
+      continue;
+    }
+    assert.ok(html.includes(name), `page has .${name}`);
+  }
+
+  // The three templates the app clones must all be present.
+  for (const template of ['desk-template', 'log-template', 'legend-template']) {
+    assert.ok(html.includes(`id="${template}"`), `page has the ${template}`);
+  }
+});
+
+test('every visual state has a style, and all motion is opt-in', () => {
+  const css = assetText('/ui/quest.css');
+
+  for (const state of ['working', 'awaiting_approval', 'error', 'ended', 'idle']) {
+    assert.ok(css.includes(`--state-${state}:`), `${state} has a colour token`);
+    assert.ok(css.includes(`.desk[data-state='${state}']`), `${state} has a desk rule`);
+  }
+
+  const marker = '@media (prefers-reduced-motion: no-preference)';
+  const split = css.indexOf(marker);
+  assert.ok(split > 0, 'motion is behind a reduced-motion guard');
+  assert.equal(
+    /animation:/.test(css.slice(0, split)),
+    false,
+    'no animation is declared outside the reduced-motion guard',
+  );
+  assert.ok(css.includes('@media (max-width: 720px)'), 'the layout has a narrow-viewport breakpoint');
+});
+
+test('the view model the browser loads is the one the tests exercise', () => {
+  const app = assetText('/ui/quest-app.js');
+  assert.ok(app.includes("from './quest-view.js'"), 'the app imports the tested module');
+  const view = assetText('/ui/quest-view.js');
+  assert.equal(/\bdocument\b|\bwindow\b|EventSource|setTimeout|setInterval|Date\.now/.test(view), false);
+});
