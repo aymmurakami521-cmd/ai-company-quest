@@ -1,0 +1,274 @@
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+# One implementation run at a time per issue/PR. cancel-in-progress: false keeps
+# the run that is already executing: two runs pushing to the same head branch
+# race each other, and cancelling one mid-push can leave a half-applied change.
+#
+# Note this does NOT queue every request. A concurrency group holds at most one
+# running and one pending run, so when a third request arrives the *pending* one
+# is cancelled even with cancel-in-progress: false. That is acceptable here --
+# dropping a superseded duplicate is the intent -- but a burst of distinct
+# instructions on one PR will not all execute. Re-comment to re-request.
+concurrency:
+  group: claude-impl-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+# Deny by default; each job re-grants only what it needs.
+permissions: {}
+
+jobs:
+  # Cheap read-only gate that runs before any write token is issued.
+  # issue_comment payloads carry no head-repo information, so whether the
+  # comment belongs to a fork pull request can only be resolved via the API.
+  guard:
+    name: Gate
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      allowed: ${{ steps.resolve.outputs.allowed }}
+      number: ${{ steps.resolve.outputs.number }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      is_pr: ${{ steps.resolve.outputs.is_pr }}
+    steps:
+      - name: Resolve target and reject fork head branches
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_PR_URL: ${{ github.event.issue.pull_request.url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          number=""
+          head_sha=""
+          head_repo=""
+          is_pr=false
+
+          case "$EVENT_NAME" in
+            pull_request_review|pull_request_review_comment)
+              # These payloads already describe the head branch.
+              number="$PR_NUMBER"
+              head_sha="$PR_HEAD_SHA"
+              head_repo="$PR_HEAD_REPO"
+              is_pr=true
+              ;;
+            issue_comment)
+              number="$ISSUE_NUMBER"
+              if [ -n "$ISSUE_PR_URL" ]; then
+                pr_json=$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}")
+                head_repo=$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')
+                head_sha=$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')
+                is_pr=true
+              else
+                # A plain issue has no head branch. Claude opens a fresh
+                # claude/* branch in this repository instead.
+                head_repo="$REPO"
+                head_sha="$GITHUB_SHA"
+              fi
+              ;;
+            issues)
+              number="$ISSUE_NUMBER"
+              head_repo="$REPO"
+              head_sha="$GITHUB_SHA"
+              ;;
+          esac
+
+          if [ "$head_repo" = "$REPO" ] && [ -n "$head_repo" ]; then
+            allowed=true
+          else
+            allowed=false
+            echo "::warning::Refusing to run. Head branch lives in '${head_repo:-unknown}', not '${REPO}'. Pull requests from forks are not given a write token."
+          fi
+
+          {
+            echo "allowed=${allowed}"
+            echo "number=${number}"
+            echo "head_sha=${head_sha}"
+            echo "is_pr=${is_pr}"
+          } >> "$GITHUB_OUTPUT"
+
+  claude:
+    name: Claude Code
+    needs: guard
+    if: needs.guard.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    # Backstop only. The step-level timeout below is the one that matters: a
+    # job-level timeout *cancels* the job, and cancelled jobs skip if: failure()
+    # steps, so the notice step would never run.
+    timeout-minutes: 45
+    permissions:
+      # write so Claude can commit to the pull request head branch. It never
+      # targets main: for an open PR the action checks out that PR's head
+      # branch, and for an issue it creates a new claude/* branch off the base.
+      contents: write
+      # write on both is what lets Claude post its reply. The generated scaffold
+      # had these as read, which makes the job go green without ever commenting.
+      pull-requests: write
+      issues: write
+      id-token: write # required by the GitHub App auth path to fetch an OIDC token
+      actions: read # Required for Claude to read CI results on PRs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        timeout-minutes: 30
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Codex posts its review through the ChatGPT connector App, and the
+          # action refuses non-human actors unless they are listed here. Both
+          # spellings are given because the observed actor login is
+          # chatgpt-codex-connector[bot]; the action lowercases each entry and
+          # strips a trailing [bot], so the two collapse to one rule. Listing
+          # named bots rather than '*' keeps every other App out.
+          allowed_bots: 'chatgpt-codex-connector[bot],chatgpt-codex-connector'
+
+          # This is an optional setting that allows Claude to read CI results on PRs
+          additional_permissions: |
+            actions: read
+
+          # Pinned rather than left to the action's default, so a change to that
+          # default cannot silently move this workflow onto another model.
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+          claude_args: '--model claude-opus-5 --effort high'
+
+      - name: Report Claude Action failure
+        # Only fires when a step above failed. GitHub Actions is non-interactive,
+        # so a failed run is otherwise silent: this leaves a single breadcrumb on
+        # the PR/issue. It deliberately does NOT re-run the job, switch models, or
+        # spend usage credits — classifying the failure is a human decision.
+        # See docs/automation-protocol.md.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ needs.guard.outputs.number }}
+          IS_PR: ${{ needs.guard.outputs.is_pr }}
+          START_SHA: ${{ needs.guard.outputs.head_sha }}
+          # Set when Claude created its own branch for this run (issue path).
+          CLAUDE_BRANCH: ${{ steps.claude.outputs.branch_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          JOB_NAME: ${{ github.job }}
+        run: |
+          set -euo pipefail
+          MARKER="<!-- claude-action-failure:v1 run=${RUN_ID} -->"
+
+          if [ -z "$NUMBER" ]; then
+            echo "No issue or pull request to comment on; nothing to post."
+            exit 0
+          fi
+
+          # One notice per run id. A re-run of a failed run reuses the same run
+          # id, so this also stops a re-run from stacking a duplicate comment.
+          #
+          # The listing is consumed in full before being searched. Piping it
+          # straight into `grep -q` breaks the dedupe: grep exits at the first
+          # match, --paginate is still writing, and under `pipefail` the
+          # producer's broken-pipe status makes the condition false, so the
+          # duplicate this check exists to prevent gets posted anyway.
+          existing_bodies=$(gh api --paginate "repos/${REPO}/issues/${NUMBER}/comments" \
+                              --jq '.[].body' || true)
+          if grep -qF "$MARKER" <<<"$existing_bodies"; then
+            echo "Notice for run ${RUN_ID} is already posted; not posting again."
+            exit 0
+          fi
+
+          # Report where the branch actually is now, not where it was before the
+          # run. Claude may have committed and pushed before failing or timing
+          # out, and the operator needs to inspect that partial state.
+          current_sha="$START_SHA"
+          if [ -n "$CLAUDE_BRANCH" ]; then
+            s=$(gh api "repos/${REPO}/git/ref/heads/${CLAUDE_BRANCH}" \
+                  --jq '.object.sha' 2>/dev/null || true)
+            [ -n "$s" ] && current_sha="$s"
+          elif [ "$IS_PR" = "true" ]; then
+            s=$(gh api "repos/${REPO}/pulls/${NUMBER}" \
+                  --jq '.head.sha' 2>/dev/null || true)
+            [ -n "$s" ] && current_sha="$s"
+          fi
+
+          # Name the branch the operator should actually look at. An early
+          # failure on an issue (checkout, action startup) leaves CLAUDE_BRANCH
+          # empty and creates no branch at all, so it must not be labelled
+          # "PR head" -- there is no PR in that case.
+          if [ -n "$CLAUDE_BRANCH" ]; then
+            target="$CLAUDE_BRANCH"
+          elif [ "$IS_PR" = "true" ]; then
+            target="PR head"
+          else
+            target="なし（この run ではブランチが作成されていません）"
+          fi
+
+          if [ "$current_sha" = "$START_SHA" ]; then
+            pushed="変化なし（この run での push は検出されていません）"
+          else
+            pushed="**push あり。** 実行前は ${START_SHA} でした。中途半端な commit が残っていないか確認してください"
+          fi
+
+          # Fixed text plus run metadata only. No stdout, stderr, or log content
+          # is copied in: Claude Action logs can contain tokens and tool output.
+          # The body must never contain the @claude trigger phrase, or this
+          # notice would trigger the workflow that just failed.
+          {
+            printf '%s\n\n' "$MARKER"
+            printf '## Claude Action が失敗しました（自動再試行はしていません）\n\n'
+            printf '| 項目 | 値 |\n'
+            printf '|------|-----|\n'
+            printf '| Workflow | %s |\n' "$WORKFLOW_NAME"
+            printf '| Job | %s |\n' "$JOB_NAME"
+            printf '| Run ID | %s |\n' "$RUN_ID"
+            printf '| head SHA (現在) | %s |\n' "${current_sha:-unknown}"
+            printf '| ブランチの状態 | %s |\n' "$pushed"
+            printf '| 対象ブランチ | %s |\n' "$target"
+            printf '| ログ | %s |\n\n' "$RUN_URL"
+            cat <<'NOTICE'
+          **これは利用制限の確定通知ではありません。** 失敗の原因はまだ分類されていません。
+          上記ログを確認し、次のどれに当たるかを判定してください。
+
+          - 5時間制限
+          - 週次制限
+          - Opus 固有の制限
+          - usage credits 不足 / spend limit
+          - 通常の実装エラー（テスト失敗・ツールエラー・設定ミス等）
+
+          利用制限だった場合はハードストップします。自動再試行・モデル変更・
+          usage credits の自動消費はいずれも行いません。運用契約は
+          docs/automation-protocol.md の
+          「Claude Action の利用制限ハードストップ」を参照してください。
+          NOTICE
+          } > "${RUNNER_TEMP}/claude-failure-notice.md"
+
+          gh api "repos/${REPO}/issues/${NUMBER}/comments" \
+            -F "body=@${RUNNER_TEMP}/claude-failure-notice.md" >/dev/null
+          echo "Posted failure notice for run ${RUN_ID} on #${NUMBER}."
