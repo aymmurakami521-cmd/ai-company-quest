@@ -1,0 +1,211 @@
+/**
+ * Per-namespace ingest store.
+ *
+ * One store == one namespace == one reduced state, one `ingest_seq` counter,
+ * one de-duplication index, one replay buffer and one subscriber list. LIVE and
+ * DEMO are separate instances and share no mutable structure, so a DEMO event
+ * cannot reach a LIVE consumer.
+ */
+
+import type { Namespace, SanitizedEvent } from '../domain/event.ts';
+import type { ActorDirectory } from '../domain/actor.ts';
+import { resolveActorFromEvent } from '../domain/actor.ts';
+import type { IngestedEvent, PlayerEntity, QuestState } from '../domain/reducer.ts';
+import { createInitialState, reduce } from '../domain/reducer.ts';
+import type { RejectReason, ValidationResult } from '../domain/validate.ts';
+import { DEFAULT_MAX_LINE_BYTES, validateEventObject, validateLine } from '../domain/validate.ts';
+import type { WireEvent } from '../domain/wire.ts';
+import { toWireEvent } from '../domain/wire.ts';
+import { BoundedIdSet, ReplayBuffer } from './replayBuffer.ts';
+
+export type IngestOutcome =
+  | { status: 'accepted'; wire: WireEvent; ingested: IngestedEvent }
+  | { status: 'duplicate'; event_id: string }
+  | { status: 'blank' }
+  | { status: 'rejected'; reason: RejectReason | 'halted'; detail: string }
+  | { status: 'halt'; reason: 'unsupported_schema'; detail: string };
+
+export type IngestStats = {
+  lines_seen: number;
+  accepted: number;
+  duplicates: number;
+  blank: number;
+  rejected: number;
+  rejected_by_reason: Record<string, number>;
+  dropped_producer_keys: number;
+  last_ingest_seq: number;
+  halted: boolean;
+  halt_reason: string | null;
+};
+
+export type ReplayLookup =
+  | { status: 'replay'; events: WireEvent[] }
+  | { status: 'gap'; reason: 'evicted'; oldest_event_id: string | null; oldest_ingest_seq: number | null }
+  | { status: 'unknown'; reason: 'unknown_event_id' };
+
+export type StoreOptions = {
+  namespace: Namespace;
+  /** LIVE sets this: an unsupported schema halts ingestion instead of skipping lines. */
+  failClosedOnUnsupportedSchema?: boolean;
+  replayCapacity?: number;
+  dedupeCapacity?: number;
+  maxLineBytes?: number;
+  directory?: ActorDirectory;
+  player?: PlayerEntity;
+};
+
+export const DEFAULT_REPLAY_CAPACITY = 500;
+export const DEFAULT_DEDUPE_CAPACITY = 100_000;
+
+export type WireListener = (wire: WireEvent) => void;
+
+export class NamespaceStore {
+  readonly namespace: Namespace;
+  readonly failClosedOnUnsupportedSchema: boolean;
+  readonly maxLineBytes: number;
+  readonly replay: ReplayBuffer;
+  readonly seenIds: BoundedIdSet;
+  readonly directory: ActorDirectory | undefined;
+
+  state: QuestState;
+  stats: IngestStats;
+  nextIngestSeq: number;
+  listeners: Set<WireListener>;
+
+  constructor(options: StoreOptions) {
+    this.namespace = options.namespace;
+    this.failClosedOnUnsupportedSchema = options.failClosedOnUnsupportedSchema ?? options.namespace === 'live';
+    this.maxLineBytes = options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
+    this.replay = new ReplayBuffer(options.replayCapacity ?? DEFAULT_REPLAY_CAPACITY);
+    this.seenIds = new BoundedIdSet(options.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY);
+    this.directory = options.directory;
+    this.state = createInitialState(options.namespace, options.player);
+    this.nextIngestSeq = 1;
+    this.listeners = new Set();
+    this.stats = {
+      lines_seen: 0,
+      accepted: 0,
+      duplicates: 0,
+      blank: 0,
+      rejected: 0,
+      rejected_by_reason: {},
+      dropped_producer_keys: 0,
+      last_ingest_seq: 0,
+      halted: false,
+      halt_reason: null,
+    };
+  }
+
+  get halted(): boolean {
+    return this.stats.halted;
+  }
+
+  subscribe(listener: WireListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  countRejection(reason: string): void {
+    this.stats.rejected += 1;
+    this.stats.rejected_by_reason[reason] = (this.stats.rejected_by_reason[reason] ?? 0) + 1;
+  }
+
+  halt(detail: string): IngestOutcome {
+    this.stats.halted = true;
+    this.stats.halt_reason = `unsupported_schema:${detail}`;
+    return { status: 'halt', reason: 'unsupported_schema', detail };
+  }
+
+  /** Ingests one raw JSONL line. */
+  ingestLine(line: string): IngestOutcome {
+    this.stats.lines_seen += 1;
+    if (this.stats.halted) {
+      this.countRejection('halted');
+      return { status: 'rejected', reason: 'halted', detail: 'store:halted' };
+    }
+    const result = validateLine(line, { maxLineBytes: this.maxLineBytes });
+    return this.applyValidation(result);
+  }
+
+  /** Ingests an already-parsed object (demo fixtures, tests, replay tooling). */
+  ingestObject(raw: unknown): IngestOutcome {
+    this.stats.lines_seen += 1;
+    if (this.stats.halted) {
+      this.countRejection('halted');
+      return { status: 'rejected', reason: 'halted', detail: 'store:halted' };
+    }
+    return this.applyValidation(validateEventObject(raw));
+  }
+
+  applyValidation(result: ValidationResult): IngestOutcome {
+    if (!result.ok) {
+      if (result.reason === 'blank') {
+        this.stats.blank += 1;
+        return { status: 'blank' };
+      }
+      if (result.reason === 'unsupported_schema' && this.failClosedOnUnsupportedSchema) {
+        this.countRejection('unsupported_schema');
+        return this.halt(result.detail);
+      }
+      this.countRejection(result.reason);
+      return { status: 'rejected', reason: result.reason, detail: result.detail };
+    }
+
+    this.stats.dropped_producer_keys += result.dropped_keys.length;
+    return this.accept(result.event);
+  }
+
+  /**
+   * Assigns `ingest_seq` and folds the event. Only accepted, unique events get a
+   * sequence number, so the sequence is deterministic for a given accepted
+   * stream regardless of producer-side numbering.
+   */
+  accept(event: SanitizedEvent): IngestOutcome {
+    if (!this.seenIds.add(event.event_id)) {
+      this.stats.duplicates += 1;
+      return { status: 'duplicate', event_id: event.event_id };
+    }
+
+    const ingested: IngestedEvent = {
+      namespace: this.namespace,
+      ingest_seq: this.nextIngestSeq,
+      event,
+      actor: resolveActorFromEvent(event, this.directory),
+    };
+    this.nextIngestSeq += 1;
+
+    this.state = reduce(this.state, ingested);
+    this.stats.accepted += 1;
+    this.stats.last_ingest_seq = ingested.ingest_seq;
+
+    const wire = toWireEvent(ingested);
+    this.replay.push(wire);
+    for (const listener of this.listeners) listener(wire);
+
+    return { status: 'accepted', wire, ingested };
+  }
+
+  /**
+   * Resolves a `Last-Event-ID` into either a replay slice or an explicit gap.
+   *
+   * - `replay`: the id is still buffered; the caller gets everything after it.
+   * - `gap`: the id was ingested but has been evicted from the bounded buffer.
+   * - `unknown`: this store has never seen the id (wrong namespace, or restart).
+   */
+  replayFrom(lastEventId: string): ReplayLookup {
+    const after = this.replay.after(lastEventId);
+    if (after !== null) return { status: 'replay', events: after };
+    const oldest = this.replay.oldest();
+    if (this.seenIds.has(lastEventId)) {
+      return {
+        status: 'gap',
+        reason: 'evicted',
+        oldest_event_id: oldest === null ? null : oldest.event_id,
+        oldest_ingest_seq: oldest === null ? null : oldest.ingest_seq,
+      };
+    }
+    return { status: 'unknown', reason: 'unknown_event_id' };
+  }
+}

@@ -1,0 +1,294 @@
+/**
+ * Read-only localhost SSE + health server.
+ *
+ * Security posture:
+ * - binds to 127.0.0.1 only (the host is not configurable)
+ * - rejects any connection whose peer is not loopback
+ * - rejects Host headers other than 127.0.0.1 / localhost (DNS-rebinding guard)
+ * - GET only; there is no endpoint that mutates collector state
+ * - no CORS headers, so a random web origin cannot read the stream
+ * - every streamed field comes from the `toWireEvent` whitelist
+ */
+
+import { createServer as createHttpServer } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type { Namespace } from '../domain/event.ts';
+import { NAMESPACES } from '../domain/event.ts';
+import { isUuidV4 } from '../domain/validate.ts';
+import type { WireEvent } from '../domain/wire.ts';
+import type { NamespaceStore } from '../collector/store.ts';
+
+export const LOOPBACK_HOST = '127.0.0.1';
+export const DEFAULT_PORT = 4317;
+
+const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+const ALLOWED_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+export type QuestServerOptions = {
+  stores: Record<Namespace, NamespaceStore>;
+  heartbeatMs?: number;
+  now?: () => number;
+};
+
+export type NamespaceHealth = {
+  halted: boolean;
+  halt_reason: string | null;
+  last_ingest_seq: number;
+  subscribers: number;
+  sessions: number;
+  actors: number;
+  replay: { capacity: number; size: number };
+  ingest: {
+    lines_seen: number;
+    accepted: number;
+    duplicates: number;
+    blank: number;
+    rejected: number;
+    rejected_by_reason: Record<string, number>;
+    dropped_producer_keys: number;
+  };
+};
+
+export class QuestServer {
+  readonly stores: Record<Namespace, NamespaceStore>;
+  readonly heartbeatMs: number;
+  readonly http: Server;
+  readonly startedAt: number;
+  readonly now: () => number;
+
+  constructor(options: QuestServerOptions) {
+    this.stores = options.stores;
+    this.heartbeatMs = options.heartbeatMs ?? 15_000;
+    this.now = options.now ?? (() => Date.now());
+    this.startedAt = this.now();
+    this.http = createHttpServer((req, res) => {
+      this.route(req, res);
+    });
+  }
+
+  listen(port: number = DEFAULT_PORT): Promise<AddressInfo> {
+    return new Promise((resolve, reject) => {
+      const onError = (error: Error): void => reject(error);
+      this.http.once('error', onError);
+      this.http.listen(port, LOOPBACK_HOST, () => {
+        this.http.removeListener('error', onError);
+        const address = this.http.address();
+        if (address === null || typeof address === 'string') {
+          reject(new Error('server did not bind to a TCP address'));
+          return;
+        }
+        resolve(address);
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    this.http.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      this.http.close((error) => {
+        if (error !== undefined && error !== null) reject(error);
+        else resolve();
+      });
+    });
+  }
+
+  route(req: IncomingMessage, res: ServerResponse): void {
+    if (!isLoopbackPeer(req)) {
+      sendJson(res, 403, { error: 'loopback_only' });
+      return;
+    }
+    if (!isAllowedHost(req)) {
+      sendJson(res, 403, { error: 'host_not_allowed' });
+      return;
+    }
+    if (req.method !== 'GET') {
+      res.setHeader('Allow', 'GET');
+      sendJson(res, 405, { error: 'method_not_allowed' });
+      return;
+    }
+
+    const url = new URL(req.url ?? '/', `http://${LOOPBACK_HOST}`);
+    if (url.pathname === '/health') {
+      sendJson(res, 200, this.health());
+      return;
+    }
+
+    const streamMatch = /^\/events\/([a-z]+)$/.exec(url.pathname);
+    if (streamMatch !== null) {
+      const candidate = streamMatch[1] ?? '';
+      const namespace = NAMESPACES.find((value) => value === candidate);
+      if (namespace === undefined) {
+        sendJson(res, 404, { error: 'unknown_namespace' });
+        return;
+      }
+      this.stream(req, res, namespace, url);
+      return;
+    }
+
+    sendJson(res, 404, { error: 'not_found' });
+  }
+
+  health(): {
+    status: 'ok' | 'fail_closed';
+    uptime_ms: number;
+    bind: string;
+    ui: 'not_implemented';
+    namespaces: Record<Namespace, NamespaceHealth>;
+  } {
+    const namespaces = {} as Record<Namespace, NamespaceHealth>;
+    let halted = false;
+    for (const namespace of NAMESPACES) {
+      const store = this.stores[namespace];
+      const stats = store.stats;
+      if (stats.halted) halted = true;
+      namespaces[namespace] = {
+        halted: stats.halted,
+        halt_reason: stats.halt_reason,
+        last_ingest_seq: stats.last_ingest_seq,
+        subscribers: store.listeners.size,
+        sessions: Object.keys(store.state.sessions).length,
+        actors: Object.keys(store.state.actors).length,
+        replay: { capacity: store.replay.capacity, size: store.replay.size },
+        ingest: {
+          lines_seen: stats.lines_seen,
+          accepted: stats.accepted,
+          duplicates: stats.duplicates,
+          blank: stats.blank,
+          rejected: stats.rejected,
+          rejected_by_reason: { ...stats.rejected_by_reason },
+          dropped_producer_keys: stats.dropped_producer_keys,
+        },
+      };
+    }
+    return {
+      status: halted ? 'fail_closed' : 'ok',
+      uptime_ms: this.now() - this.startedAt,
+      bind: LOOPBACK_HOST,
+      ui: 'not_implemented',
+      namespaces,
+    };
+  }
+
+  snapshot(namespace: Namespace): unknown {
+    const store = this.stores[namespace];
+    const oldest = store.replay.oldest();
+    const newest = store.replay.newest();
+    return {
+      namespace,
+      halted: store.stats.halted,
+      last_ingest_seq: store.stats.last_ingest_seq,
+      replay: {
+        capacity: store.replay.capacity,
+        size: store.replay.size,
+        oldest_event_id: oldest === null ? null : oldest.event_id,
+        newest_event_id: newest === null ? null : newest.event_id,
+      },
+      state: store.state,
+    };
+  }
+
+  stream(req: IncomingMessage, res: ServerResponse, namespace: Namespace, url: URL): void {
+    const store = this.stores[namespace];
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    res.write(`: quest ${namespace} stream\n\n`);
+
+    // Subscribe before replaying: ingestion is synchronous, so no event can slip
+    // between the replay slice and the live subscription.
+    const unsubscribe = store.subscribe((wire) => {
+      writeEvent(res, wire);
+    });
+
+    const requested = readLastEventId(req, url);
+    if (requested === null) {
+      writeControl(res, 'snapshot', this.snapshot(namespace));
+    } else if (!isUuidV4(requested)) {
+      writeControl(res, 'stream_gap', { reason: 'invalid_last_event_id' });
+      writeControl(res, 'snapshot', this.snapshot(namespace));
+    } else {
+      const lookup = store.replayFrom(requested);
+      if (lookup.status === 'replay') {
+        writeControl(res, 'replay_start', {
+          last_event_id: requested,
+          count: lookup.events.length,
+          buffer_capacity: store.replay.capacity,
+        });
+        for (const event of lookup.events) writeEvent(res, event);
+        writeControl(res, 'replay_end', { count: lookup.events.length });
+      } else if (lookup.status === 'gap') {
+        writeControl(res, 'stream_gap', {
+          reason: 'evicted',
+          last_event_id: requested,
+          oldest_event_id: lookup.oldest_event_id,
+          oldest_ingest_seq: lookup.oldest_ingest_seq,
+          buffer_capacity: store.replay.capacity,
+        });
+        writeControl(res, 'snapshot', this.snapshot(namespace));
+      } else {
+        writeControl(res, 'stream_gap', { reason: 'unknown_event_id', last_event_id: requested });
+        writeControl(res, 'snapshot', this.snapshot(namespace));
+      }
+    }
+
+    const heartbeat = setInterval(() => {
+      res.write(': keep-alive\n\n');
+    }, this.heartbeatMs);
+    heartbeat.unref();
+
+    const cleanup = (): void => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+  }
+}
+
+function isLoopbackPeer(req: IncomingMessage): boolean {
+  const address = req.socket.remoteAddress;
+  return typeof address === 'string' && LOOPBACK_PEERS.has(address);
+}
+
+function isAllowedHost(req: IncomingMessage): boolean {
+  const host = req.headers.host;
+  if (typeof host !== 'string' || host.length === 0) return false;
+  const hostname = host.startsWith('[') ? (host.split(']')[0] ?? '') + ']' : (host.split(':')[0] ?? '');
+  return ALLOWED_HOSTNAMES.has(hostname);
+}
+
+function readLastEventId(req: IncomingMessage, url: URL): string | null {
+  const header = req.headers['last-event-id'];
+  if (typeof header === 'string' && header.length > 0) return header;
+  if (Array.isArray(header) && header.length > 0) return header[0] ?? null;
+  const query = url.searchParams.get('last_event_id');
+  if (query !== null && query.length > 0) return query;
+  return null;
+}
+
+function writeEvent(res: ServerResponse, wire: WireEvent): void {
+  res.write(`id: ${wire.event_id}\nevent: quest_event\ndata: ${JSON.stringify(wire)}\n\n`);
+}
+
+/** Control frames deliberately carry no `id:` so they never move Last-Event-ID. */
+function writeControl(res: ServerResponse, name: string, payload: unknown): void {
+  res.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const text = JSON.stringify(body);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(text, 'utf8'),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(text);
+}
