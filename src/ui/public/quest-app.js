@@ -25,7 +25,7 @@ import {
   applyFrame,
   createClientState,
   describeFreshness,
-  haltLabel,
+  selectBanner,
   selectDesks,
   selectHeader,
   setConnectionPhase,
@@ -186,32 +186,27 @@ function renderLog(entries) {
   dom.logEmpty.hidden = entries.length > 0;
 }
 
+/**
+ * Writes the one status banner.
+ *
+ * Which situation is showing is decided by `selectBanner` in the tested view
+ * model, not here, and it always returns one - the screen is never silent about
+ * its connection. This is also the screen's only live region: the header stats
+ * repeat the same facts as plain text, so a change is announced exactly once.
+ *
+ * The code and the symbol are written as text next to the message, so the tone
+ * (a colour) never carries meaning that is not already readable.
+ */
 function renderBanner(header) {
-  let message = null;
-  let tone = 'info';
-  if (header.halted) {
-    const reason = haltLabel(header.halt_reason);
-    message =
-      '取り込みが停止しています (fail-closed)。表示中のstateは停止時点のままです。' +
-      (reason === null ? '' : `理由: ${reason}。`);
-    tone = 'error';
-  } else if (header.connection.state === 'error') {
-    message = '接続が切れました。「再接続」を押すか、collectorが動いているか確認してください。';
-    tone = 'error';
-  } else if (header.connection.state === 'reconnecting') {
-    message = '再接続中です。Last-Event-IDから続きを取得します。';
-    tone = 'warn';
-  } else if (header.gap !== null) {
-    message = `ストリームに欠落がありました (${header.gap.reason})。snapshotから復旧します。`;
-    tone = 'warn';
-  } else if (header.replaying) {
-    message = '取りこぼし分をreplay中です。';
-    tone = 'info';
-  }
-
-  dom.banner.hidden = message === null;
-  dom.banner.dataset.tone = tone;
-  dom.banner.textContent = message ?? '';
+  const banner = selectBanner(header);
+  dom.banner.dataset.tone = banner.tone;
+  dom.banner.dataset.code = banner.code;
+  const symbol = dom.banner.querySelector('.banner__symbol');
+  if (symbol !== null) symbol.textContent = banner.symbol;
+  const code = dom.banner.querySelector('.banner__code');
+  if (code !== null) code.textContent = banner.code;
+  const message = dom.banner.querySelector('.banner__message');
+  if (message !== null) message.textContent = banner.message;
 }
 
 // ------------------------------------------------------- canvas layer ---

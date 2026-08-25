@@ -88,6 +88,16 @@ h3 {
   z-index: 10;
 }
 
+/*
+ * One focus ring for everything focusable, declared once so a new control can
+ * never ship without a visible focus indicator. It is drawn outside the element
+ * (`outline-offset`) so it stays visible against a filled button too.
+ */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ---------------------------------------------------------------- HUD --- */
 
 .hud,
@@ -165,12 +175,21 @@ h3 {
   font-size: 0.95rem;
 }
 
+/*
+ * The status banner. `data-tone` only ever changes the colour: the symbol and
+ * the status code next to the message say the same thing in text, so the banner
+ * is still unambiguous in monochrome or for a colour-blind reader.
+ */
 .banner {
   margin: 0;
   padding: 10px 12px;
   border: var(--pixel) solid var(--state-awaiting_approval);
   background: #2a2113;
   color: var(--text);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
 }
 
 .banner[data-tone='error'] {
@@ -181,6 +200,24 @@ h3 {
 .banner[data-tone='info'] {
   border-color: var(--state-idle);
   background: #12212e;
+}
+
+.banner[data-tone='ok'] {
+  border-color: var(--state-working);
+  background: #10241a;
+}
+
+.banner__code {
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.banner__message {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------------- office --- */
@@ -505,15 +542,23 @@ h3 {
   font-size: 0.75rem;
 }
 
+/*
+ * The scroll container, not the list itself, so the <ol> keeps its list
+ * semantics while the scrollable box is the thing that takes keyboard focus.
+ */
+.log__scroll {
+  margin-top: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
 .log {
   list-style: none;
-  margin: 10px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 260px;
-  overflow-y: auto;
 }
 
 .log__row {
@@ -549,7 +594,27 @@ h3 {
   margin: 0;
 }
 
-/* --------------------------------------------------------- responsive --- */
+/*
+ * --------------------------------------------------------- responsive ---
+ *
+ * Three steps, chosen so that browser zoom is just a narrower viewport: at 200%
+ * zoom a 1280px screen reports 640 CSS px and a 960px screen reports 480, so the
+ * same rules that handle a phone handle a zoomed desktop. Nothing below is a
+ * `min-width`, and no container carries a fixed width, so the page still reflows
+ * into a single column at 320 CSS px without a horizontal scrollbar.
+ */
+
+/* Give the log detail column room before the fixed columns squeeze it out. */
+@media (max-width: 1024px) {
+  .log__row {
+    grid-template-columns: 1.2rem 3.5rem 6rem 1fr;
+  }
+
+  .log__type,
+  .log__detail {
+    grid-column: 3 / -1;
+  }
+}
 
 @media (max-width: 720px) {
   body {
@@ -580,9 +645,33 @@ h3 {
     grid-auto-rows: auto;
   }
 
+  /* Every field stacks under the symbol; the 1024px rule's third column is gone. */
   .log__ts,
-  .log__seq {
+  .log__seq,
+  .log__actor,
+  .log__type,
+  .log__detail {
     grid-column: 2;
+  }
+}
+
+/*
+ * 320-480 CSS px: a phone, or a 960px desktop at 200% zoom. The desk card stops
+ * reserving a sprite column and the meta rows stack, so a long agent id, role or
+ * tool name still wraps inside the viewport instead of pushing it wider.
+ */
+@media (max-width: 480px) {
+  .desk__card {
+    flex-direction: column;
+  }
+
+  .desk__meta > div {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .log__scroll {
+    max-height: 340px;
   }
 }
 

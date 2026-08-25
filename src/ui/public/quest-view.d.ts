@@ -65,6 +65,9 @@ export type ViewSession = {
 /** Closed vocabulary; mirrors `HaltReason` in `src/collector/store.ts`. */
 export type HaltReasonToken = 'unsupported_schema' | 'state_limit';
 
+/** Closed vocabulary; mirrors the `stream_gap` reasons `src/server/server.ts` emits. */
+export type GapReasonToken = 'invalid_last_event_id' | 'unknown_event_id' | 'evicted';
+
 export type ViewConnection = {
   phase: ConnectionPhase;
   halted: boolean;
@@ -166,9 +169,32 @@ export type Header = {
   by_state: Record<ActorVisualState, number>;
 };
 
+/**
+ * The screen's closed status vocabulary. Exactly one code is showing at any
+ * moment, so there is no state of the screen that reports nothing.
+ */
+export type BannerCode =
+  | 'FAIL_CLOSED'
+  | 'DISCONNECTED'
+  | 'RECONNECTING'
+  | 'STREAM_GAP'
+  | 'REPLAYING'
+  | 'LOADING'
+  | 'EMPTY'
+  | 'CONNECTED';
+
+export type Banner = {
+  readonly code: BannerCode;
+  /** Colour hook only: `code` and `symbol` already carry the meaning as text. */
+  readonly tone: 'error' | 'warn' | 'info' | 'ok';
+  readonly symbol: string;
+  readonly message: string;
+};
+
 export declare const UNATTRIBUTED_AGENT_LABEL: string;
 export declare const MAX_LOG_ENTRIES: number;
 export declare const ACTOR_VISUAL_STATES: readonly ActorVisualState[];
+export declare const BANNER_CODES: readonly BannerCode[];
 
 export declare function statusTokens(status: string | null): string[];
 export declare function classifyStatus(status: string | null): ActorVisualState | null;
@@ -182,7 +208,10 @@ export declare function applySnapshot(state: ClientState, payload: unknown, atMs
 export declare function applyHalt(state: ClientState, payload: unknown, atMs?: number | null): ClientState;
 export declare function normalizeHaltReason(value: unknown): HaltReasonToken | null;
 export declare function haltLabel(reason: unknown): string | null;
+export declare function normalizeGapReason(value: unknown): GapReasonToken | null;
+export declare function gapLabel(reason: unknown): string | null;
 export declare function applyFrame(state: ClientState, frame: Frame): ClientState;
 export declare function selectDesks(state: ClientState): Desk[];
 export declare function selectHeader(state: ClientState): Header;
+export declare function selectBanner(header: Header): Banner;
 export declare function describeFreshness(state: ClientState, nowMs: number | null): string;

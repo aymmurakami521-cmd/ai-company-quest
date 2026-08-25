@@ -28,8 +28,11 @@ import {
   classifyStatus,
   createClientState,
   describeFreshness,
+  gapLabel,
   haltLabel,
+  normalizeGapReason,
   normalizeHaltReason,
+  selectBanner,
   selectDesks,
   selectHeader,
   setConnectionPhase,
@@ -310,6 +313,74 @@ test('an empty office reports itself as empty', () => {
   assert.equal(header.desk_count, 0);
   assert.equal(header.session_count, 0);
   assert.equal(header.connection.code, 'OFFLINE');
+});
+
+test('the banner follows one connection through every situation it can reach', () => {
+  const store = new NamespaceStore({ namespace: 'live' });
+  const wires = record(store);
+  store.ingestObject(makeEvent({ event_type: 'agent_start', status: 'active' }));
+
+  const codeOf = (state: ClientState): string => selectBanner(selectHeader(state)).code;
+
+  // Before anything arrives, and while the socket is still opening.
+  let state = createClientState('live');
+  assert.equal(codeOf(state), 'LOADING');
+  state = setConnectionPhase(state, 'connecting', 1_000);
+  assert.equal(codeOf(state), 'LOADING');
+
+  // Open but with no actor yet: still an explicit code, never a blank screen.
+  state = setConnectionPhase(state, 'open', 2_000);
+  assert.equal(codeOf(state), 'EMPTY');
+
+  // The snapshot seats someone.
+  state = applyFrame(state, { kind: 'snapshot', payload: snapshotOf(store), at_ms: 3_000 });
+  assert.equal(codeOf(state), 'CONNECTED');
+
+  // A replay is announced, and cleared when it ends.
+  state = applyFrame(state, { kind: 'replay_start', payload: { count: wires.length }, at_ms: 4_000 });
+  assert.equal(codeOf(state), 'REPLAYING');
+  state = applyFrame(state, { kind: 'replay_end', payload: { count: wires.length }, at_ms: 5_000 });
+  assert.equal(codeOf(state), 'CONNECTED');
+
+  // A gap outranks a healthy connection until the snapshot that repairs it.
+  state = applyFrame(state, { kind: 'stream_gap', payload: { reason: 'evicted' }, at_ms: 6_000 });
+  assert.equal(codeOf(state), 'STREAM_GAP');
+  state = applyFrame(state, { kind: 'snapshot', payload: snapshotOf(store), at_ms: 7_000 });
+  assert.equal(codeOf(state), 'CONNECTED');
+
+  // Losing the socket, and getting it back.
+  state = setConnectionPhase(state, 'reconnecting', 8_000);
+  assert.equal(codeOf(state), 'RECONNECTING');
+  state = setConnectionPhase(state, 'error', 9_000);
+  assert.equal(codeOf(state), 'DISCONNECTED');
+  state = setConnectionPhase(state, 'open', 10_000);
+  assert.equal(codeOf(state), 'CONNECTED');
+
+  // A halt is sticky and outranks everything, including a healthy socket.
+  state = applyFrame(state, {
+    kind: 'fail_closed',
+    payload: { namespace: 'live', halted: true, reason: 'unsupported_schema', detail: 'x' },
+    at_ms: 11_000,
+  });
+  assert.equal(codeOf(state), 'FAIL_CLOSED');
+  const halted = selectBanner(selectHeader(state));
+  assert.ok(halted.message.includes('fail-closed'), 'the banner names the boundary');
+  assert.ok(halted.message.includes('未対応のschema version'), 'and the known reason behind it');
+  assert.equal(selectDesks(state).length, 1, 'and the frozen state is still on screen');
+  state = setConnectionPhase(state, 'open', 12_000);
+  assert.equal(codeOf(state), 'FAIL_CLOSED');
+});
+
+test('an unknown gap reason is reported as a gap, not echoed as text', () => {
+  let state = setConnectionPhase(createClientState('live'), 'open', 1_000);
+  state = applyFrame(state, { kind: 'stream_gap', payload: { reason: 'x'.repeat(200) }, at_ms: 2_000 });
+
+  const banner = selectBanner(selectHeader(state));
+  assert.equal(banner.code, 'STREAM_GAP');
+  assert.equal(banner.message.includes('xxx'), false, 'the wire string never reaches the banner');
+  assert.equal(normalizeGapReason('x'.repeat(200)), null);
+  assert.equal(gapLabel('evicted'), 'replay bufferから溢れた分があります');
+  assert.equal(gapLabel('nonsense'), null);
 });
 
 test('a stream gap is shown until the snapshot that follows it clears it', () => {
