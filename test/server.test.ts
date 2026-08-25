@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { NamespaceStore } from '../src/collector/store.ts';
 import { QuestServer } from '../src/server/server.ts';
@@ -221,6 +222,71 @@ test('LIVE and DEMO streams stay separated', async () => {
     demoClient.close();
     await h.close();
   }
+});
+
+/**
+ * A subscriber that accepts nothing: every write stays queued, exactly what a
+ * real socket reports when the peer has stopped reading.
+ */
+function stalledSubscriber(): {
+  req: IncomingMessage;
+  res: ServerResponse;
+  state: { queued: number; peak: number; destroyed: boolean };
+} {
+  const state = { queued: 0, peak: 0, destroyed: false };
+  const res = {
+    writeHead: (): void => {},
+    write: (chunk: string): boolean => {
+      if (state.destroyed) return false;
+      state.queued += Buffer.byteLength(chunk, 'utf8');
+      state.peak = Math.max(state.peak, state.queued);
+      return false; // never flushed
+    },
+    destroy: (): void => {
+      state.destroyed = true;
+      // Node releases the queued bytes together with the socket.
+      state.queued = 0;
+    },
+    get writableLength(): number {
+      return state.queued;
+    },
+    on: (): void => {},
+  };
+  const req = { headers: {}, on: (): void => {} };
+  return {
+    req: req as unknown as IncomingMessage,
+    res: res as unknown as ServerResponse,
+    state,
+  };
+}
+
+test('a backpressured SSE subscriber is dropped instead of buffering without bound', () => {
+  const live = new NamespaceStore({ namespace: 'live' });
+  const demo = new NamespaceStore({ namespace: 'demo' });
+  const limit = 4096;
+  const server = new QuestServer({
+    stores: { live, demo },
+    heartbeatMs: 60_000,
+    maxClientBufferBytes: limit,
+  });
+
+  const client = stalledSubscriber();
+  server.stream(client.req, client.res, 'live', new URL('http://127.0.0.1/events/live'));
+  assert.equal(live.listeners.size, 1);
+
+  for (let index = 0; index < 500; index += 1) {
+    live.ingestLine(makeLine({ summary: `event ${index}` }));
+  }
+
+  assert.equal(live.stats.accepted, 500, 'ingestion is never blocked by a slow client');
+  assert.equal(client.state.destroyed, true, 'the connection is closed');
+  assert.equal(live.listeners.size, 0, 'the slow subscriber is unsubscribed');
+  assert.equal(client.state.queued, 0, 'nothing stays queued for a dropped client');
+  // Worst case is the limit plus the single frame that crossed it - not the
+  // 500 events that followed.
+  assert.ok(client.state.peak <= limit + 8192, `peak queued bytes stayed bounded (${client.state.peak})`);
+  assert.equal(server.health().namespaces.live.dropped_slow_subscribers, 1);
+  assert.equal(server.health().namespaces.demo.dropped_slow_subscribers, 0);
 });
 
 test('nothing resembling a prompt, path or secret reaches the stream', async () => {

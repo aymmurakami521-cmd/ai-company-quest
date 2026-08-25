@@ -75,7 +75,7 @@ bind hostは **設定できません**。常に `127.0.0.1` です。
 
 | Endpoint | 内容 |
 |----------|------|
-| `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態 |
+| `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態、`dropped_slow_subscribers` |
 | `GET /events/live` | LIVE namespaceのSSE stream |
 | `GET /events/demo` | DEMO namespaceのSSE stream |
 
@@ -130,6 +130,13 @@ replay buffer、subscriber listのいずれも共有しません。
 - Host headerは `127.0.0.1` / `localhost` のみ許可します（DNS rebinding対策）。
 - `{session_id}:main` はmain orchestratorという構造上の事実のみを意味し、CEO等の役職は推測しません。
   org情報が無ければ role は `null`、`resolved` は `false` のままです。
+- actor identityは `(session_id, agent_id)` のtupleです。両IDとも `:` を含み得るため、
+  keyは component ごとに `%` → `%25`、`:` → `%3A` をescapeしてから連結します。
+  `agent_id` が `null` の場合のみ marker `%00` を使うので、`unknown` という名のagentとも衝突しません。
+  通常のIDでは key はそのまま `${session_id}:${agent_id}` です。
+- SSE subscriberは有界です。未flushのbyteが上限（既定1MiB）を超えたclientは
+  bufferingを続けず切断・購読解除し、`/health` の `dropped_slow_subscribers` に計上します。
+  読まないclientがprocess memoryを無制限に増やすことはありません。
 
 ## 開発
 
@@ -159,8 +166,13 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 
 - **UI未実装。** レトロオフィス画面、キャラクター描画、Canvas、Reactはまだありません。
 - `player` entityは初期stateにのみ存在し、eventからは絶対に変化しません（testで保証）。
-- rotation検出はinode変化に依存します。1 poll区間内にrotateし、旧ファイル末尾が
-  読まれる前に消えた場合、その分は失われます。
+- rotation検出はinode変化に加え、offset直前64byteのsignature照合で行います。
+  同一inodeのcopy-truncate後にpoll間で旧offset以上へ再成長した場合も検出し、
+  新ファイルの先頭から読み直します（record途中からの誤読はしません）。
+  新内容のoffset直前64byteが旧内容と完全一致する場合のみ検出できません。
+  ただし1 poll区間内にrotateし、旧ファイル末尾が読まれる前に消えた場合、その分は失われます。
+  `stat()` と `open()` の間でファイルが消えてもprocessは落ちず、`missing` を通知して
+  replacementのpollingを継続します。
 - 重複排除indexは有界（既定10万件）です。これを超えて古いeventの重複が来た場合は再受理されます。
 - replay bufferはprocess memoryのみです。再起動でreplay履歴は消え、以後の再接続は
   `unknown_event_id` として扱われます。

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFile, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -181,6 +182,77 @@ test('an oversized line arriving without its newline is skipped safely', async (
     assert.deepEqual(h.lines, ['ok']);
   } finally {
     await h.cleanup();
+  }
+});
+
+test('copy-truncation that regrows past the old offset is detected by content', async () => {
+  const h = await harness();
+  try {
+    await writeFile(h.file, 'aaaa\nbbbb\ncccc\n');
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc']);
+
+    // Copy-truncate: same inode, and by the next poll the file is already
+    // LARGER than the offset we stopped at, so a size comparison sees nothing.
+    await writeFile(h.file, 'new-1\nnew-2\nnew-3\nnew-4\n');
+    assert.ok('new-1\nnew-2\nnew-3\nnew-4\n'.length > 'aaaa\nbbbb\ncccc\n'.length);
+    await h.tailer.pollOnce();
+
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc', 'new-1', 'new-2', 'new-3', 'new-4']);
+    assert.equal(h.tailer.stats.rotations, 0, 'the inode never changed');
+    assert.equal(h.tailer.stats.truncations, 1);
+    assert.ok(h.notices.some((notice) => notice.type === 'truncated'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a file removed between stat() and open() is reported, not thrown', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quest-tail-'));
+  const file = join(dir, 'events.jsonl');
+  const lines: string[] = [];
+  const notices: TailerNotice[] = [];
+
+  // Stages the real race: stat() has already measured the file when it is
+  // unlinked, so the following open() fails with a genuine ENOENT.
+  class RacingTailer extends JsonlTailer {
+    removeOnNextOpen = true;
+    override async openInput(): Promise<FileHandle> {
+      if (this.removeOnNextOpen) {
+        this.removeOnNextOpen = false;
+        await rm(this.path, { force: true });
+      }
+      return super.openInput();
+    }
+  }
+
+  const tailer = new RacingTailer(
+    { path: file },
+    {
+      onLine: (line) => {
+        lines.push(line);
+      },
+      onNotice: (notice) => {
+        notices.push(notice);
+      },
+    },
+  );
+
+  try {
+    await writeFile(file, 'doomed\n');
+    // Must resolve: an unhandled rejection here would take the process down.
+    await tailer.pollOnce();
+    assert.deepEqual(lines, []);
+    assert.equal(tailer.stats.errors, 0, 'a rotation is not an error');
+    assert.ok(notices.some((notice) => notice.type === 'missing'));
+
+    // Polling continues and picks the replacement file up from its start.
+    await writeFile(file, 'replacement-1\nreplacement-2\n');
+    await tailer.pollOnce();
+    assert.deepEqual(lines, ['replacement-1', 'replacement-2']);
+  } finally {
+    await tailer.stop();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

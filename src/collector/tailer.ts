@@ -9,20 +9,32 @@
  * Handled conditions:
  * - partial trailing line (buffered until its newline arrives)
  * - appends between polls
- * - rotation (inode change) and truncation (size shrink)
+ * - rotation (inode change) and truncation, including copy-truncate that regrows
+ *   past the previous offset between two polls (detected by content, not size)
  * - oversized lines (dropped up to the next newline, counted)
- * - the file not existing yet, or disappearing
+ * - the file not existing yet, disappearing, or being replaced between the
+ *   `stat()` and the `open()` of the same poll
+ *
+ * A poll never rejects: every I/O failure becomes a sanitized notice and polling
+ * continues, so a rotation racing the collector cannot terminate the process.
  *
  * Polling is used instead of fs.watch because watch semantics differ across
  * platforms; `pollOnce()` is exposed so tests are deterministic and timer-free.
  */
 
 import { open, stat } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { DEFAULT_MAX_LINE_BYTES } from '../domain/validate.ts';
 
 const NEWLINE = 0x0a;
 const EMPTY = Buffer.alloc(0);
+/**
+ * Bytes kept from just before the read offset. Re-checked against the file on
+ * every poll that has new data: if they changed, the file was rewritten under
+ * the same inode (copy-truncate) even when it is now larger than before.
+ */
+const SIGNATURE_BYTES = 64;
 
 export type TailerNotice =
   | { type: 'appeared' }
@@ -69,6 +81,8 @@ export class JsonlTailer {
   offset: number;
   inode: number | null;
   pending: Buffer;
+  /** Last bytes read, ending exactly at `offset`. Empty when nothing was read. */
+  signature: Buffer;
   skippingOversized: boolean;
   hasObservedFile: boolean;
   running: boolean;
@@ -88,6 +102,7 @@ export class JsonlTailer {
     this.offset = 0;
     this.inode = null;
     this.pending = EMPTY;
+    this.signature = EMPTY;
     this.skippingOversized = false;
     this.hasObservedFile = false;
     this.running = false;
@@ -125,7 +140,11 @@ export class JsonlTailer {
   schedule(): void {
     if (!this.running) return;
     const timer = setTimeout(() => {
-      void this.pollOnce().then(() => this.schedule());
+      // `pollOnce` is written not to reject; the catch is a process-safety net so
+      // a timer-driven poll can never become an unhandled rejection.
+      void this.pollOnce()
+        .catch(() => {})
+        .then(() => this.schedule());
     }, this.pollIntervalMs);
     timer.unref();
     this.timer = timer;
@@ -136,7 +155,37 @@ export class JsonlTailer {
       this.stats.partial_bytes_discarded += this.pending.length;
       this.pending = EMPTY;
     }
+    this.signature = EMPTY;
     this.skippingOversized = false;
+  }
+
+  /** Remembers the bytes ending at `offset` so the next poll can verify them. */
+  rememberSignature(chunk: Buffer): void {
+    if (chunk.length >= SIGNATURE_BYTES) {
+      this.signature = Buffer.from(chunk.subarray(chunk.length - SIGNATURE_BYTES));
+      return;
+    }
+    const combined = Buffer.concat([this.signature, chunk]);
+    this.signature =
+      combined.length <= SIGNATURE_BYTES ? combined : combined.subarray(combined.length - SIGNATURE_BYTES);
+  }
+
+  /**
+   * Sanitized handling for an I/O failure that happened after this poll's
+   * `stat()`. ENOENT means the file we measured was rotated or deleted in the
+   * meantime: forget it and keep polling for its replacement.
+   */
+  handleIoFailure(error: unknown): void {
+    const code = (error as NodeJS.ErrnoException).code ?? 'UNKNOWN';
+    if (code === 'ENOENT') {
+      this.inode = null;
+      this.offset = 0;
+      this.discardPending();
+      this.onNotice({ type: 'missing' });
+      return;
+    }
+    this.stats.errors += 1;
+    this.onNotice({ type: 'error', code });
   }
 
   async pollOnce(): Promise<void> {
@@ -167,6 +216,7 @@ export class JsonlTailer {
       if (this.inode === null) {
         this.inode = info.ino;
         this.offset = this.startFrom === 'end' && !this.hasObservedFile ? info.size : 0;
+        this.signature = EMPTY;
         this.hasObservedFile = true;
         this.onNotice({ type: 'appeared' });
       } else if (info.ino !== this.inode) {
@@ -184,8 +234,27 @@ export class JsonlTailer {
 
       if (info.size <= this.offset) return;
 
-      const handle = await open(this.path, 'r');
+      // The path can be replaced or removed between the stat above and this
+      // open. Every failure from here on is reported, never thrown.
+      let handle: FileHandle;
       try {
+        handle = await this.openInput();
+      } catch (error) {
+        this.handleIoFailure(error);
+        return;
+      }
+
+      try {
+        if (!(await this.verifySignature(handle))) {
+          // Same inode, but the bytes under our offset changed: the file was
+          // copy-truncated and regrown. Restart from the beginning of the new
+          // content instead of reading the middle of a record.
+          this.offset = 0;
+          this.discardPending();
+          this.stats.truncations += 1;
+          this.onNotice({ type: 'truncated' });
+        }
+
         while (info.size > this.offset) {
           const length = Math.min(info.size - this.offset, this.maxChunkBytes);
           const buffer = Buffer.alloc(length);
@@ -193,14 +262,43 @@ export class JsonlTailer {
           if (bytesRead <= 0) break;
           this.offset += bytesRead;
           this.stats.bytes_read += bytesRead;
-          this.consume(buffer.subarray(0, bytesRead));
+          const chunk = buffer.subarray(0, bytesRead);
+          this.rememberSignature(chunk);
+          this.consume(chunk);
         }
+      } catch (error) {
+        this.handleIoFailure(error);
       } finally {
-        await handle.close();
+        await handle.close().catch(() => {});
       }
+    } catch (error) {
+      // Defence in depth: a poll must never reject, whatever it was doing.
+      this.stats.errors += 1;
+      this.onNotice({ type: 'error', code: (error as NodeJS.ErrnoException).code ?? 'UNKNOWN' });
     } finally {
       this.polling = false;
     }
+  }
+
+  /**
+   * The only place the input file is opened. A seam, so tests can stage the
+   * `stat()`-then-`open()` race deterministically; it is never given a path
+   * derived from event content.
+   */
+  openInput(): Promise<FileHandle> {
+    return open(this.path, 'r');
+  }
+
+  /**
+   * Re-reads the bytes recorded just before `offset` from the *same* handle we
+   * are about to read from. False means the file content moved under us.
+   */
+  async verifySignature(handle: FileHandle): Promise<boolean> {
+    const expected = this.signature;
+    if (expected.length === 0 || this.offset < expected.length) return true;
+    const probe = Buffer.alloc(expected.length);
+    const { bytesRead } = await handle.read(probe, 0, expected.length, this.offset - expected.length);
+    return bytesRead === expected.length && probe.equals(expected);
   }
 
   consume(chunk: Buffer): void {

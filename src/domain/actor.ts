@@ -10,23 +10,38 @@
  *   `null` and `resolved` is false. No fallback, no inference, no job titles.
  * - `{session_id}:main` is the main orchestrator of that session. That is a
  *   structural fact only; it does NOT imply "CEO" or any other human role.
+ *
+ * Identity is a *tuple*, not a string. `session_id` and `agent_id` both accept
+ * `:`, so plain concatenation is ambiguous: (`a:b`, `c`) and (`a`, `b:c`) would
+ * collapse into one state key. `actorKeyOf` therefore escapes each component
+ * before joining, and encodes "no agent_id" with a marker no component can ever
+ * produce - so a real agent literally named `unknown` stays distinct from null.
  */
 
 import type { SanitizedEvent } from './event.ts';
 
 export const MAIN_AGENT_ID = 'main';
-export const UNKNOWN_AGENT_ID = 'unknown';
 
 /**
- * Explicitly allowed agent metadata. Keys are either `${session_id}:${agent_id}`
- * (session-scoped, higher precedence) or a bare `${agent_id}` (global).
+ * Marker for a null `agent_id`. `%` is escaped inside every component, so no
+ * real identifier - including the literal string `unknown` - can encode to it.
+ */
+export const NULL_AGENT_MARKER = '%00';
+
+const ACTOR_KEY_SEPARATOR = ':';
+
+/**
+ * Explicitly allowed agent metadata. Keys are either the encoded actor key
+ * produced by `actorKeyOf` (session-scoped, higher precedence) or a bare
+ * `${agent_id}` (global). For identifiers without `:` or `%` - the normal case -
+ * the encoded key is exactly `${session_id}:${agent_id}`.
  */
 export type ActorDirectory = {
   roles: Record<string, string>;
 };
 
 export type ResolvedActor = {
-  /** Stable identity used by the reducer: `${session_id}:${agent_id}`. */
+  /** Stable identity used by the reducer. Collision-free, see `actorKeyOf`. */
   actor_key: string;
   session_id: string;
   agent_id: string | null;
@@ -40,8 +55,23 @@ export type ResolvedActor = {
   role_source: 'directory' | 'event' | 'none';
 };
 
+/**
+ * Escapes one tuple component so the joined key can be split back unambiguously:
+ * `%` first (so the escape marker itself cannot be forged), then the separator.
+ * The result contains no `:`, so the key holds exactly one separator.
+ */
+function encodeComponent(value: string): string {
+  return value.replaceAll('%', '%25').replaceAll(ACTOR_KEY_SEPARATOR, '%3A');
+}
+
+/**
+ * Injective encoding of the `(session_id, agent_id)` tuple. Distinct tuples
+ * always produce distinct keys, including when a component contains `:` or when
+ * `agent_id` is null versus the literal string `unknown`.
+ */
 export function actorKeyOf(sessionId: string, agentId: string | null): string {
-  return `${sessionId}:${agentId ?? UNKNOWN_AGENT_ID}`;
+  const agentPart = agentId === null ? NULL_AGENT_MARKER : encodeComponent(agentId);
+  return `${encodeComponent(sessionId)}${ACTOR_KEY_SEPARATOR}${agentPart}`;
 }
 
 export function resolveActor(

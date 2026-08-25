@@ -8,6 +8,10 @@
  * - GET only; there is no endpoint that mutates collector state
  * - no CORS headers, so a random web origin cannot read the stream
  * - every streamed field comes from the `toWireEvent` whitelist
+ *
+ * Memory posture: a subscriber that stops reading is bounded, not buffered. Once
+ * its unflushed bytes exceed `maxClientBufferBytes` the connection is dropped
+ * and unsubscribed, so a single slow local client cannot grow the process heap.
  */
 
 import { createServer as createHttpServer } from 'node:http';
@@ -21,6 +25,8 @@ import type { NamespaceStore } from '../collector/store.ts';
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 4317;
+/** Per-subscriber ceiling on bytes accepted by the socket but not yet flushed. */
+export const DEFAULT_MAX_CLIENT_BUFFER_BYTES = 1024 * 1024;
 
 const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const ALLOWED_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
@@ -28,14 +34,65 @@ const ALLOWED_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 export type QuestServerOptions = {
   stores: Record<Namespace, NamespaceStore>;
   heartbeatMs?: number;
+  maxClientBufferBytes?: number;
   now?: () => number;
 };
+
+/** The part of `ServerResponse` the SSE writer uses. Kept narrow for testing. */
+export type SseSink = {
+  write: (chunk: string) => boolean;
+  destroy: () => void;
+  readonly writableLength: number;
+};
+
+/**
+ * Bounded SSE writer.
+ *
+ * `res.write()` returning false means the socket is backpressured; Node keeps
+ * queueing whatever is written after that. This writer instead watches the
+ * unflushed byte count and, past the limit, drops the subscriber: the queued
+ * bytes are released by `destroy()` and no further event is queued for it.
+ * Dropping (rather than waiting for `drain`) keeps ingestion non-blocking and
+ * gives an explicit, bounded worst case per client.
+ */
+export class BoundedSseWriter {
+  readonly sink: SseSink;
+  readonly maxBufferedBytes: number;
+  readonly onDrop: (reason: 'slow_consumer') => void;
+  dropped: boolean;
+
+  constructor(sink: SseSink, maxBufferedBytes: number, onDrop: (reason: 'slow_consumer') => void) {
+    this.sink = sink;
+    this.maxBufferedBytes = maxBufferedBytes;
+    this.onDrop = onDrop;
+    this.dropped = false;
+  }
+
+  write(frame: string): boolean {
+    if (this.dropped) return false;
+    const flushed = this.sink.write(frame);
+    if (!flushed && this.sink.writableLength > this.maxBufferedBytes) {
+      this.drop();
+      return false;
+    }
+    return flushed;
+  }
+
+  drop(): void {
+    if (this.dropped) return;
+    this.dropped = true;
+    this.onDrop('slow_consumer');
+    this.sink.destroy();
+  }
+}
 
 export type NamespaceHealth = {
   halted: boolean;
   halt_reason: string | null;
   last_ingest_seq: number;
   subscribers: number;
+  /** Subscribers disconnected for exceeding the per-client buffer ceiling. */
+  dropped_slow_subscribers: number;
   sessions: number;
   actors: number;
   replay: { capacity: number; size: number };
@@ -53,15 +110,20 @@ export type NamespaceHealth = {
 export class QuestServer {
   readonly stores: Record<Namespace, NamespaceStore>;
   readonly heartbeatMs: number;
+  readonly maxClientBufferBytes: number;
   readonly http: Server;
   readonly startedAt: number;
   readonly now: () => number;
+  readonly droppedSubscribers: Record<Namespace, number>;
 
   constructor(options: QuestServerOptions) {
     this.stores = options.stores;
     this.heartbeatMs = options.heartbeatMs ?? 15_000;
+    this.maxClientBufferBytes = options.maxClientBufferBytes ?? DEFAULT_MAX_CLIENT_BUFFER_BYTES;
     this.now = options.now ?? (() => Date.now());
     this.startedAt = this.now();
+    this.droppedSubscribers = {} as Record<Namespace, number>;
+    for (const namespace of NAMESPACES) this.droppedSubscribers[namespace] = 0;
     this.http = createHttpServer((req, res) => {
       this.route(req, res);
     });
@@ -147,6 +209,7 @@ export class QuestServer {
         halt_reason: stats.halt_reason,
         last_ingest_seq: stats.last_ingest_seq,
         subscribers: store.listeners.size,
+        dropped_slow_subscribers: this.droppedSubscribers[namespace],
         sessions: Object.keys(store.state.sessions).length,
         actors: Object.keys(store.state.actors).length,
         replay: { capacity: store.replay.capacity, size: store.replay.size },
@@ -198,57 +261,65 @@ export class QuestServer {
       'X-Accel-Buffering': 'no',
       'X-Content-Type-Options': 'nosniff',
     });
-    res.write(`: quest ${namespace} stream\n\n`);
+    let cleanup = (): void => {};
+    const writer = new BoundedSseWriter(res, this.maxClientBufferBytes, () => {
+      this.droppedSubscribers[namespace] += 1;
+      cleanup();
+    });
 
     // Subscribe before replaying: ingestion is synchronous, so no event can slip
     // between the replay slice and the live subscription.
     const unsubscribe = store.subscribe((wire) => {
-      writeEvent(res, wire);
+      writeEvent(writer, wire);
     });
 
-    const requested = readLastEventId(req, url);
-    if (requested === null) {
-      writeControl(res, 'snapshot', this.snapshot(namespace));
-    } else if (!isUuidV4(requested)) {
-      writeControl(res, 'stream_gap', { reason: 'invalid_last_event_id' });
-      writeControl(res, 'snapshot', this.snapshot(namespace));
-    } else {
-      const lookup = store.replayFrom(requested);
-      if (lookup.status === 'replay') {
-        writeControl(res, 'replay_start', {
-          last_event_id: requested,
-          count: lookup.events.length,
-          buffer_capacity: store.replay.capacity,
-        });
-        for (const event of lookup.events) writeEvent(res, event);
-        writeControl(res, 'replay_end', { count: lookup.events.length });
-      } else if (lookup.status === 'gap') {
-        writeControl(res, 'stream_gap', {
-          reason: 'evicted',
-          last_event_id: requested,
-          oldest_event_id: lookup.oldest_event_id,
-          oldest_ingest_seq: lookup.oldest_ingest_seq,
-          buffer_capacity: store.replay.capacity,
-        });
-        writeControl(res, 'snapshot', this.snapshot(namespace));
-      } else {
-        writeControl(res, 'stream_gap', { reason: 'unknown_event_id', last_event_id: requested });
-        writeControl(res, 'snapshot', this.snapshot(namespace));
-      }
-    }
-
     const heartbeat = setInterval(() => {
-      res.write(': keep-alive\n\n');
+      writer.write(': keep-alive\n\n');
     }, this.heartbeatMs);
     heartbeat.unref();
 
-    const cleanup = (): void => {
+    cleanup = (): void => {
       clearInterval(heartbeat);
       unsubscribe();
     };
     req.on('close', cleanup);
     res.on('close', cleanup);
     res.on('error', cleanup);
+
+    // Written only once the teardown path exists, so a drop can never strand a
+    // subscription on the store.
+    writer.write(`: quest ${namespace} stream\n\n`);
+
+    const requested = readLastEventId(req, url);
+    if (requested === null) {
+      writeControl(writer, 'snapshot', this.snapshot(namespace));
+    } else if (!isUuidV4(requested)) {
+      writeControl(writer, 'stream_gap', { reason: 'invalid_last_event_id' });
+      writeControl(writer, 'snapshot', this.snapshot(namespace));
+    } else {
+      const lookup = store.replayFrom(requested);
+      if (lookup.status === 'replay') {
+        writeControl(writer, 'replay_start', {
+          last_event_id: requested,
+          count: lookup.events.length,
+          buffer_capacity: store.replay.capacity,
+        });
+        for (const event of lookup.events) writeEvent(writer, event);
+        writeControl(writer, 'replay_end', { count: lookup.events.length });
+      } else if (lookup.status === 'gap') {
+        writeControl(writer, 'stream_gap', {
+          reason: 'evicted',
+          last_event_id: requested,
+          oldest_event_id: lookup.oldest_event_id,
+          oldest_ingest_seq: lookup.oldest_ingest_seq,
+          buffer_capacity: store.replay.capacity,
+        });
+        writeControl(writer, 'snapshot', this.snapshot(namespace));
+      } else {
+        writeControl(writer, 'stream_gap', { reason: 'unknown_event_id', last_event_id: requested });
+        writeControl(writer, 'snapshot', this.snapshot(namespace));
+      }
+    }
   }
 }
 
@@ -273,13 +344,13 @@ function readLastEventId(req: IncomingMessage, url: URL): string | null {
   return null;
 }
 
-function writeEvent(res: ServerResponse, wire: WireEvent): void {
-  res.write(`id: ${wire.event_id}\nevent: quest_event\ndata: ${JSON.stringify(wire)}\n\n`);
+function writeEvent(writer: BoundedSseWriter, wire: WireEvent): void {
+  writer.write(`id: ${wire.event_id}\nevent: quest_event\ndata: ${JSON.stringify(wire)}\n\n`);
 }
 
 /** Control frames deliberately carry no `id:` so they never move Last-Event-ID. */
-function writeControl(res: ServerResponse, name: string, payload: unknown): void {
-  res.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
+function writeControl(writer: BoundedSseWriter, name: string, payload: unknown): void {
+  writer.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
