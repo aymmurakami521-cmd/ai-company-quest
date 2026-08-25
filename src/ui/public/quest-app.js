@@ -61,6 +61,9 @@ const dom = {
 let source = null;
 let state = createClientState(readNamespaceFromHash());
 
+/** The banner last written to the live region, so an unchanged one is not re-announced. */
+let announced = null;
+
 function readNamespaceFromHash() {
   const requested = window.location.hash.replace('#', '');
   return NAMESPACES.includes(requested) ? requested : 'live';
@@ -196,9 +199,26 @@ function renderLog(entries) {
  *
  * The code and the symbol are written as text next to the message, so the tone
  * (a colour) never carries meaning that is not already readable.
+ *
+ * A live region announces itself whenever its descendants are rewritten, even
+ * when the new text is the character-for-character same. Most frames leave the
+ * status exactly as it was - a heartbeat or a tool call on a seat that is
+ * already taken says nothing new about the connection - so the banner is
+ * written only when it actually changed. That is what keeps one change to one
+ * announcement instead of one per frame.
  */
 function renderBanner(header) {
   const banner = selectBanner(header);
+  if (
+    announced !== null &&
+    announced.code === banner.code &&
+    announced.tone === banner.tone &&
+    announced.symbol === banner.symbol &&
+    announced.message === banner.message
+  ) {
+    return;
+  }
+  announced = banner;
   dom.banner.dataset.tone = banner.tone;
   dom.banner.dataset.code = banner.code;
   const symbol = dom.banner.querySelector('.banner__symbol');
