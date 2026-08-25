@@ -1,0 +1,48 @@
+# Minimal CI for the quest core (tests + typecheck).
+#
+# This file is NOT active. The GitHub App used by the Claude workflow cannot
+# create or update files under .github/workflows, so the owner must copy it:
+#
+#   cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
+#
+# It does not touch, replace or reference .github/workflows/claude.yml.
+#
+# Note on dependencies: this package has zero runtime and zero dev dependencies,
+# so package-lock.json is empty by design. TypeScript is fetched only for the
+# typecheck step with --no-save, which keeps the lockfile authoritative.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Verify the lockfile is installable
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Typecheck
+        run: |
+          npm install --no-save --no-package-lock typescript@^5.6.0 @types/node@^22.7.0
+          npm run typecheck
