@@ -160,6 +160,57 @@ ingestがhaltしている場合の `取り込み停止 (fail-closed)` を表示�
 `fail_closed` frameで即座に伝わり、既知のreasonのみ日本語labelとしてbannerに添えます。
 `stream_gap` は黙って埋めず、明示bannerを出してから後続の `snapshot` で復旧します。
 
+### Canvas描画（`World → draw(World)`）
+
+DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオフィスとしても描画します。
+描画層は2つの純粋moduleに閉じています。
+
+| file | 役割 |
+|------|------|
+| `src/ui/public/quest-world.js` | `selectDesks` / `selectHeader` の出力＋viewportから、描画用 `World` を組む純粋関数 |
+| `src/ui/public/quest-canvas.js` | `drawWorld(ctx, world)`。渡された2D context以外に触らない |
+
+- **決定論**: 同じ入力・同じviewportなら、部屋・床・壁・机・キャラクター・labelの座標は常に同一です。
+  キャラクターの見た目（肌・髪・髪型・服・ズボン）は `actor_key` のhashから固定パレットを引くので、
+  同じactorは常に同じ姿で、乱数もclockも使いません。
+- **状態表現**: 5状態それぞれに**形の違うpixel marker**（`▶`＝三角 / `‼`＝感嘆符 / `✖`＝×印 /
+  `■`＝四角 / `⋯`＝点列）を頭上に描き、記号と状態codeをtextでも併記します。色だけには依存しません。
+- **responsive / DPR**: viewport幅から列数（最大6）とscale（0.25刻み）を決め、部屋がcanvasに
+  必ず収まるようにします。bufferは `devicePixelRatio`（1〜4にclamp）倍で確保します。
+  CSSは `width:100%; height:auto` だけで、scriptはinline styleを書きません。
+- **backing storeの上限**: collectorは `max_actors`（既定4096）まで受け付けるので、席数がそのまま
+  canvas高さになるとbrowserが確保できないbufferになります（6列 × 683行 = 3840×125904 device px、
+  約4.83億pixel ≒ RGBA 1.9GB）。そこで描画側に決定論的な上限を置いています。
+
+  | 定数 | 値 | 意味 |
+  |------|----|------|
+  | `MAX_ROWS` | `16` | 描画する席の行数上限（最大6列なので96席） |
+  | `MAX_DEVICE_SIDE` | `8192` | backing store 1辺の上限（device px） |
+  | `MAX_DEVICE_PIXELS` | `16777216` | backing store 総面積の上限（device px） |
+
+  行数を先にcapしてからscaleを決め、最後に実効device scale（`world.canvas.dpr`）を
+  `min(devicePixelRatio, 辺の上限, sqrt(面積の上限 / CSS面積))` へ落とします。上限に当たらない通常の
+  officeでは要求DPRがそのまま使われるので、見た目は変わりません。4096席・DPR 4・960×560では
+  3840×3240（約1244万pixel ≒ 49.8MB）に収まります。
+- **描き切れない席**: 上限を超えた分は黙って落とさず、canvas下部に固定文言＋整数だけで
+  `表示 N 席 / 全 M 席 · 残り K 席は下の一覧に表示` と明示します（`world.overflow` は
+  `drawn + hidden === total` を常に満たします）。DOMの社員一覧・凡例・logは従来通り**全actor**を
+  表示し、そちらがアクセシビリティ正本です。canvasが描くのは先頭からの連続した席で、
+  並べ替えも間引きも代替actorの生成もしません。
+- **motion**: canvasは**完全に静的**です。timerもanimation frameも使わず、state変化とresize時にだけ
+  再描画するので、`prefers-reduced-motion` で止めるものがありません。
+- **accessibility**: canvasは `aria-hidden` の装飾層です。社員情報・status label・connection banner・
+  凡例・アクティビティログ・LIVE/DEMO切替はこれまで通りDOM側に残り、そちらが正のアクセシビリティ層です。
+- **素材**: 外部assetは一切取得しません。すべて矩形と文字だけで描いています。
+- canvasが描くのは名前・状態記号・状態codeだけです。raw status label、tool名、`stream_gap` の
+  reason文字列といった自由記述はcanvasへ渡らず、従来通りDOM側だけが表示します。
+
+**戻し方**: 描画層だけを外せばPR #4の最小DOM画面に戻ります。
+`quest-world.js` / `quest-canvas.js`（と `.d.ts`、`test/ui-world.test.ts`、`test/ui-canvas.test.ts`）を削除し、
+`src/ui/assets.ts` のasset table 2行、`index.html` の `#office-canvas-frame` block、
+`quest.css` の `.office__canvas*`、`quest-app.js` のcanvas layer block（2つのimportと
+`renderCanvas` 呼び出しを含む）を戻すだけです。SSE・client fold・DOM描画には触れていません。
+
 ### 画面側の分離と境界
 
 - 接続は**常に1本**です。LIVE/DEMOを切り替えると接続を閉じ、client stateを
@@ -279,6 +330,20 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   （DEMOを止めないため）。fail-closed表示自体はtestで検証しています。
 - 画面のレンダリングを検証する自動testはDOM contract（要素・selector・状態style・
   reduced-motion）と純粋関数までで、実ブラウザでのpixel比較は行っていません。
+- Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界・backing store上限（0/1/40/95/96/97/
+  4096席 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
+  までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。
+- canvasのlabel幅は `measureText` ではなく等幅fontを前提とした概算で決めています
+  （全角は1em、半角は0.62em）。実際のfontが大きく異なる場合、長い名前の省略位置が
+  1〜2文字ずれることがあります。切れて読めなくなるのではなく、省略記号が付きます。
+- canvasの席は最大6列・最大16行（96席）です。それを超える席はcanvasには描かれず、件数だけを
+  canvas下部に明示します。全actorはDOMの社員一覧に従来通り表示されます。
+- 行数が増えて高さがviewportに収まらない場合はcanvas自体が縦に伸び、ページがscrollします
+  （96席までは内容が切れることはありません）。
+- 非常に大きなviewport（例: 8192×8192）ではbacking storeの面積上限に当たり、実効device scaleが
+  1未満まで下がってcanvasがやや甘くなることがあります。表示内容は欠けません。
+- canvasの説明labelは名前・状態記号・状態codeだけです。role・last tool・session・最終event時刻は
+  従来通りDOM側の社員カードで確認します。
 - `player` entityは初期stateにのみ存在し、eventからは絶対に変化しません（testで保証）。
 - rotation検出はinode変化に加え、offset直前64byteのsignature照合で行います。
   同一inodeのcopy-truncate後にpoll間で旧offsetと同一sizeまで再成長した場合も、

@@ -30,6 +30,8 @@ const ASSET_TABLE: readonly { pathname: string; file: string; contentType: strin
   { pathname: '/ui/quest.css', file: 'quest.css', contentType: 'text/css; charset=utf-8' },
   { pathname: '/ui/quest-app.js', file: 'quest-app.js', contentType: 'text/javascript; charset=utf-8' },
   { pathname: '/ui/quest-view.js', file: 'quest-view.js', contentType: 'text/javascript; charset=utf-8' },
+  { pathname: '/ui/quest-world.js', file: 'quest-world.js', contentType: 'text/javascript; charset=utf-8' },
+  { pathname: '/ui/quest-canvas.js', file: 'quest-canvas.js', contentType: 'text/javascript; charset=utf-8' },
 ];
 
 /** Same-origin only, no inline code, no way to reach an external service. */
