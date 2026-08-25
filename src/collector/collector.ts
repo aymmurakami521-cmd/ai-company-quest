@@ -7,11 +7,12 @@
  */
 
 import type { Namespace } from '../domain/event.ts';
-import type { IngestOutcome, NamespaceStore } from './store.ts';
+import type { HaltReason, IngestOutcome, NamespaceStore } from './store.ts';
 import type { TailerNotice, TailerOptions } from './tailer.ts';
 import { JsonlTailer } from './tailer.ts';
 
-export type CollectorHaltReason = 'unsupported_schema';
+/** Unsupported schema, or a retention limit reached. Both stop ingestion. */
+export type CollectorHaltReason = HaltReason;
 
 export type CollectorOptions = {
   store: NamespaceStore;

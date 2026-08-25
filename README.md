@@ -75,7 +75,7 @@ bind hostは **設定できません**。常に `127.0.0.1` です。
 
 | Endpoint | 内容 |
 |----------|------|
-| `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態、`dropped_slow_subscribers` |
+| `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態、`dropped_slow_subscribers`、`state_limits` |
 | `GET /events/live` | LIVE namespaceのSSE stream |
 | `GET /events/demo` | DEMO namespaceのSSE stream |
 
@@ -114,11 +114,43 @@ replay buffer、subscriber listのいずれも共有しません。
 |------|------|
 | `QUEST_INPUT_PATH` 未設定 | LIVEを起動しない（exit 1） |
 | `schema_version` が2以外（LIVE） | ingestを即時halt。以降の行は全て拒否し、`/health` は `fail_closed` |
+| state保持上限に到達（LIVE / DEMO両方） | ingestを即時halt。上限超過のeventは適用せず、既存stateは削除も置換もしない |
 | malformed JSON / 契約key欠落 / 型不一致 | その行だけ拒否・理由別に計数 |
 | 行がoversized | 破棄・計数（次のnewlineまでskip） |
 | 絶対path・shell command・credential様の文字列 | その行を拒否（修復や部分redactはしない） |
 
 `sanitizer_version` は **観測情報** です。値が変わっても拒否もhaltもしません。
+
+## State保持上限（bounded memory）
+
+reducerが保持する構造は、event内容で増えるものすべてに明示的な上限があります。
+上限は `src/domain/reducer.ts` の `DEFAULT_STATE_LIMITS` に定義され、`/health` の
+`namespaces.<ns>.state_limits` で確認できます。
+
+| 上限 | 既定値 | 対象 |
+|------|--------|------|
+| `max_sessions` | `512` | 保持する `session_id` の種類数 |
+| `max_actors` | `4096` | 全sessionを通じたactorの総数 |
+| `max_actors_per_session` | `256` | 1 sessionの `actor_keys` 配列長 |
+| `max_event_types` | `64` | `counters.by_type` のbucket数 |
+
+挙動:
+
+- **上限までは通常どおり受理**します。既知のactor・session・event_typeへのeventは
+  保持量を増やさないため、上限に達した後も **受理され続けます**（duplicateもduplicateのまま）。
+- **新しいkeyが上限を超える場合**、そのeventは適用せずingestを **halt** します（fail closed）。
+  LIVE・DEMOとも同じ挙動です。silent evictionは行いません。既存のactor/sessionを捨てると
+  配信中のstateが「streamにあった事実」と食い違うためです。
+- halt後は `/health` が `fail_closed` になり、`halt_reason` は `state_limit:<上限名>:<値>` です。
+  `session_id` や `agent_id` などのstream内容は含みません。以降の行はすべて拒否されます。
+- halt後の **再開手段はprocess再起動のみ** です。state・`ingest_seq`・replay bufferは
+  process memoryのみに存在するため、再起動で初期化されます。
+- 上限に環境変数はありません（設定面を増やさないため）。変更する場合は
+  `NamespaceStore` の `stateLimits` option を使います。
+
+これにより、`event_id` 重複排除index・replay buffer・SSE client bufferに加えて
+**reduced stateも有界**となり、常時稼働のcollectorがheapを使い切ることはありません。
+`/health` と SSE snapshotのサイズも同じ上限で頭打ちになります。
 
 ## 安全境界
 
@@ -137,6 +169,8 @@ replay buffer、subscriber listのいずれも共有しません。
 - SSE subscriberは有界です。未flushのbyteが上限（既定1MiB）を超えたclientは
   bufferingを続けず切断・購読解除し、`/health` の `dropped_slow_subscribers` に計上します。
   読まないclientがprocess memoryを無制限に増やすことはありません。
+- reduced stateも有界です。session・actor・`actor_keys`・`by_type` bucketには明示的な上限があり、
+  超過時はsilent evictionではなくsanitized reasonでhaltします（「State保持上限」参照）。
 
 ## 開発
 
@@ -170,10 +204,14 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   同一inodeのcopy-truncate後にpoll間で旧offset以上へ再成長した場合も検出し、
   新ファイルの先頭から読み直します（record途中からの誤読はしません）。
   新内容のoffset直前64byteが旧内容と完全一致する場合のみ検出できません。
+  `QUEST_START_FROM=end` で途中から追い始めた場合も、初回pollでEOF直前のbyteを
+  signatureとしてseedするため、その直後のcopy-truncateを検出できます。
   ただし1 poll区間内にrotateし、旧ファイル末尾が読まれる前に消えた場合、その分は失われます。
   `stat()` と `open()` の間でファイルが消えてもprocessは落ちず、`missing` を通知して
   replacementのpollingを継続します。
 - 重複排除indexは有界（既定10万件）です。これを超えて古いeventの重複が来た場合は再受理されます。
+- state保持上限に到達するとingestがhaltします。長時間稼働でsession/actorが増え続ける運用では、
+  上限に達した時点で以降のeventが失われるため、定期的な再起動かfileのrotationが前提です。
 - replay bufferはprocess memoryのみです。再起動でreplay履歴は消え、以後の再接続は
   `unknown_event_id` として扱われます。
 - tailerはpolling方式です（fs.watchのplatform差を避けるため）。

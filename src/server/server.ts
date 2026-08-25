@@ -20,6 +20,7 @@ import type { AddressInfo } from 'node:net';
 import type { Namespace } from '../domain/event.ts';
 import { NAMESPACES } from '../domain/event.ts';
 import { isUuidV4 } from '../domain/validate.ts';
+import type { StateLimits } from '../domain/reducer.ts';
 import type { WireEvent } from '../domain/wire.ts';
 import type { NamespaceStore } from '../collector/store.ts';
 
@@ -95,6 +96,8 @@ export type NamespaceHealth = {
   dropped_slow_subscribers: number;
   sessions: number;
   actors: number;
+  /** The ceilings that halt ingestion when the state would grow past them. */
+  state_limits: StateLimits;
   replay: { capacity: number; size: number };
   ingest: {
     lines_seen: number;
@@ -212,6 +215,7 @@ export class QuestServer {
         dropped_slow_subscribers: this.droppedSubscribers[namespace],
         sessions: Object.keys(store.state.sessions).length,
         actors: Object.keys(store.state.actors).length,
+        state_limits: { ...store.stateLimits },
         replay: { capacity: store.replay.capacity, size: store.replay.size },
         ingest: {
           lines_seen: stats.lines_seen,

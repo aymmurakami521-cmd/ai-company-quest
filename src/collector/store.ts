@@ -5,25 +5,34 @@
  * one de-duplication index, one replay buffer and one subscriber list. LIVE and
  * DEMO are separate instances and share no mutable structure, so a DEMO event
  * cannot reach a LIVE consumer.
+ *
+ * Every structure that grows with the stream is bounded: the replay buffer and
+ * the de-duplication index evict their oldest entries, and the reduced state is
+ * capped by `StateLimits`. Reaching a state limit halts ingestion (fail closed)
+ * rather than evicting actors or sessions, because dropping an actor would make
+ * the served state a silent lie about what the stream contained.
  */
 
 import type { Namespace, SanitizedEvent } from '../domain/event.ts';
 import type { ActorDirectory } from '../domain/actor.ts';
 import { resolveActorFromEvent } from '../domain/actor.ts';
-import type { IngestedEvent, PlayerEntity, QuestState } from '../domain/reducer.ts';
-import { createInitialState, reduce } from '../domain/reducer.ts';
+import type { IngestedEvent, PlayerEntity, QuestState, StateLimits } from '../domain/reducer.ts';
+import { DEFAULT_STATE_LIMITS, checkStateLimits, createInitialState, reduce } from '../domain/reducer.ts';
 import type { RejectReason, ValidationResult } from '../domain/validate.ts';
 import { DEFAULT_MAX_LINE_BYTES, validateEventObject, validateLine } from '../domain/validate.ts';
 import type { WireEvent } from '../domain/wire.ts';
 import { toWireEvent } from '../domain/wire.ts';
 import { BoundedIdSet, ReplayBuffer } from './replayBuffer.ts';
 
+/** Why ingestion stopped for good. Details are sanitized, never stream content. */
+export type HaltReason = 'unsupported_schema' | 'state_limit';
+
 export type IngestOutcome =
   | { status: 'accepted'; wire: WireEvent; ingested: IngestedEvent }
   | { status: 'duplicate'; event_id: string }
   | { status: 'blank' }
   | { status: 'rejected'; reason: RejectReason | 'halted'; detail: string }
-  | { status: 'halt'; reason: 'unsupported_schema'; detail: string };
+  | { status: 'halt'; reason: HaltReason; detail: string };
 
 export type IngestStats = {
   lines_seen: number;
@@ -52,6 +61,8 @@ export type StoreOptions = {
   maxLineBytes?: number;
   directory?: ActorDirectory;
   player?: PlayerEntity;
+  /** Per-limit overrides; anything omitted keeps `DEFAULT_STATE_LIMITS`. */
+  stateLimits?: Partial<StateLimits>;
 };
 
 export const DEFAULT_REPLAY_CAPACITY = 500;
@@ -66,6 +77,7 @@ export class NamespaceStore {
   readonly replay: ReplayBuffer;
   readonly seenIds: BoundedIdSet;
   readonly directory: ActorDirectory | undefined;
+  readonly stateLimits: StateLimits;
 
   state: QuestState;
   stats: IngestStats;
@@ -79,7 +91,8 @@ export class NamespaceStore {
     this.replay = new ReplayBuffer(options.replayCapacity ?? DEFAULT_REPLAY_CAPACITY);
     this.seenIds = new BoundedIdSet(options.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY);
     this.directory = options.directory;
-    this.state = createInitialState(options.namespace, options.player);
+    this.stateLimits = { ...DEFAULT_STATE_LIMITS, ...options.stateLimits };
+    this.state = createInitialState(options.namespace, options.player, this.stateLimits);
     this.nextIngestSeq = 1;
     this.listeners = new Set();
     this.stats = {
@@ -112,10 +125,10 @@ export class NamespaceStore {
     this.stats.rejected_by_reason[reason] = (this.stats.rejected_by_reason[reason] ?? 0) + 1;
   }
 
-  halt(detail: string): IngestOutcome {
+  halt(reason: HaltReason, detail: string): IngestOutcome {
     this.stats.halted = true;
-    this.stats.halt_reason = `unsupported_schema:${detail}`;
-    return { status: 'halt', reason: 'unsupported_schema', detail };
+    this.stats.halt_reason = `${reason}:${detail}`;
+    return { status: 'halt', reason, detail };
   }
 
   /** Ingests one raw JSONL line. */
@@ -147,7 +160,7 @@ export class NamespaceStore {
       }
       if (result.reason === 'unsupported_schema' && this.failClosedOnUnsupportedSchema) {
         this.countRejection('unsupported_schema');
-        return this.halt(result.detail);
+        return this.halt('unsupported_schema', result.detail);
       }
       this.countRejection(result.reason);
       return { status: 'rejected', reason: result.reason, detail: result.detail };
@@ -163,17 +176,26 @@ export class NamespaceStore {
    * stream regardless of producer-side numbering.
    */
   accept(event: SanitizedEvent): IngestOutcome {
-    if (!this.seenIds.add(event.event_id)) {
-      this.stats.duplicates += 1;
-      return { status: 'duplicate', event_id: event.event_id };
-    }
-
     const ingested: IngestedEvent = {
       namespace: this.namespace,
       ingest_seq: this.nextIngestSeq,
       event,
       actor: resolveActorFromEvent(event, this.directory),
     };
+
+    // Checked before the de-duplication slot and the sequence number are spent,
+    // so a halted store never records the event that halted it. A duplicate or
+    // an event for a known actor can never trigger this: only new keys count.
+    const violation = checkStateLimits(this.state, ingested);
+    if (violation !== null) {
+      this.countRejection('state_limit');
+      return this.halt('state_limit', `${violation.limit}:${violation.max}`);
+    }
+
+    if (!this.seenIds.add(event.event_id)) {
+      this.stats.duplicates += 1;
+      return { status: 'duplicate', event_id: event.event_id };
+    }
     this.nextIngestSeq += 1;
 
     this.state = reduce(this.state, ingested);

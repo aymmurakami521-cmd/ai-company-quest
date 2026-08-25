@@ -256,6 +256,68 @@ test('a file removed between stat() and open() is reported, not thrown', async (
   }
 });
 
+test('copy-truncation right after a start-at-end initialisation is still detected', async () => {
+  const h = await harness({ startFrom: 'end' });
+  try {
+    // The tailer joins an existing file and skips its history, so the offset it
+    // adopts points at bytes it never read itself.
+    await writeFile(h.file, 'old-1\nold-2\n');
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, [], 'pre-existing content is skipped');
+    assert.equal(h.tailer.offset, 'old-1\nold-2\n'.length);
+
+    // Copy-truncate, regrowing past that offset before the next poll: a size
+    // comparison sees a larger file and would resume mid-record.
+    await writeFile(h.file, 'new-1\nnew-2\nnew-3\nnew-4\n');
+    assert.ok('new-1\nnew-2\nnew-3\nnew-4\n'.length > 'old-1\nold-2\n'.length);
+    await h.tailer.pollOnce();
+
+    assert.deepEqual(h.lines, ['new-1', 'new-2', 'new-3', 'new-4'], 'no record suffix, no lost head');
+    assert.equal(h.tailer.stats.rotations, 0, 'the inode never changed');
+    assert.equal(h.tailer.stats.truncations, 1);
+    assert.ok(h.notices.some((notice) => notice.type === 'truncated'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a start-at-end tailer that shrinks before its next poll reads the new content whole', async () => {
+  const h = await harness({ startFrom: 'end' });
+  try {
+    await writeFile(h.file, 'old-1\nold-2\nold-3\n');
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, []);
+
+    await writeFile(h.file, 'short\n');
+    await h.tailer.pollOnce();
+
+    assert.deepEqual(h.lines, ['short']);
+    assert.equal(h.tailer.stats.truncations, 1);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a start-at-end tailer on an empty or absent file needs no seeding', async () => {
+  const h = await harness({ startFrom: 'end' });
+  try {
+    await h.tailer.pollOnce();
+    assert.equal(h.tailer.needsSignatureSeed, false, 'nothing to seed while the file is absent');
+
+    await writeFile(h.file, '');
+    await h.tailer.pollOnce();
+    assert.equal(h.tailer.needsSignatureSeed, false, 'an empty file has no preceding bytes');
+
+    await appendFile(h.file, 'live-1\n');
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, ['live-1']);
+    assert.equal(h.tailer.stats.truncations, 0);
+    assert.equal(h.tailer.stats.errors, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test('restarting the tailer re-reads the file but de-duplication keeps state stable', async () => {
   const h = await harness();
   const store = new NamespaceStore({ namespace: 'live' });

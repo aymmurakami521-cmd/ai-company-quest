@@ -11,6 +11,11 @@
  *   handling. Events cannot change it, ever.
  * - A state belongs to exactly one namespace; folding a foreign-namespace event
  *   throws instead of silently mixing LIVE and DEMO.
+ * - Everything the state retains per event is bounded by explicit limits carried
+ *   in the state itself. An event that would grow a retention structure past its
+ *   limit is refused, never applied partially and never silently evicted: the
+ *   collector turns that refusal into a fail-closed halt, so what is served
+ *   always remains a complete prefix of the stream.
  */
 
 import type { Namespace, SanitizedEvent } from './event.ts';
@@ -65,9 +70,46 @@ export type StateCounters = {
   by_type: Record<string, number>;
 };
 
+/**
+ * Ceilings on every structure whose size is driven by event content. They are
+ * part of the state so that a replay of the same stream through the same limits
+ * is bit-for-bit the same fold, wherever it runs.
+ */
+export type StateLimits = {
+  /** Distinct `session_id` values retained. */
+  max_sessions: number;
+  /** Distinct actors retained across all sessions. */
+  max_actors: number;
+  /** Length of any single session's `actor_keys` list. */
+  max_actors_per_session: number;
+  /** Distinct `event_type` buckets in `counters.by_type`. */
+  max_event_types: number;
+};
+
+/**
+ * Sized for a local workstation: far above any plausible sanitized session, far
+ * below anything that could exhaust a Node heap. Roughly a few MB of state at
+ * the ceiling, which is also the worst case for an SSE snapshot.
+ */
+export const DEFAULT_STATE_LIMITS: StateLimits = {
+  max_sessions: 512,
+  max_actors: 4096,
+  max_actors_per_session: 256,
+  max_event_types: 64,
+};
+
+export type StateLimitKind = 'sessions' | 'actors' | 'actors_per_session' | 'event_types';
+
+/** Which ceiling an event would have crossed. Carries no identifier, ever. */
+export type StateLimitViolation = {
+  limit: StateLimitKind;
+  max: number;
+};
+
 export type QuestState = {
   namespace: Namespace;
   player: PlayerEntity;
+  limits: StateLimits;
   sessions: Record<string, SessionState>;
   actors: Record<string, ActorState>;
   last_ingest_seq: number;
@@ -80,15 +122,74 @@ export const DEFAULT_PLAYER: PlayerEntity = {
   display_name: 'Player',
 };
 
-export function createInitialState(namespace: Namespace, player: PlayerEntity = DEFAULT_PLAYER): QuestState {
+/**
+ * Raised by `reduce` for an event that would push a retention structure past its
+ * limit. The message names the limit and its value only - never a `session_id`,
+ * an `agent_id`, an `event_type` or any other stream content.
+ */
+export class StateLimitExceededError extends Error {
+  readonly limit: StateLimitKind;
+  readonly max: number;
+  /** Sanitized, safe for health output and logs. */
+  readonly detail: string;
+
+  constructor(violation: StateLimitViolation) {
+    super(`state limit reached: ${violation.limit}:${violation.max}`);
+    this.name = 'StateLimitExceededError';
+    this.limit = violation.limit;
+    this.max = violation.max;
+    this.detail = `${violation.limit}:${violation.max}`;
+  }
+}
+
+export function createInitialState(
+  namespace: Namespace,
+  player: PlayerEntity = DEFAULT_PLAYER,
+  limits: StateLimits = DEFAULT_STATE_LIMITS,
+): QuestState {
   return {
     namespace,
     player,
+    limits: { ...limits },
     sessions: {},
     actors: {},
     last_ingest_seq: 0,
     counters: { applied: 0, ignored: 0, out_of_order: 0, by_type: {} },
   };
+}
+
+/**
+ * Reports the ceiling `ingested` would cross, or null when it fits. Only *new*
+ * keys count: an event for an already-tracked actor, session or event type adds
+ * nothing to retain and is always allowed, so a live session never starts
+ * failing because of its own event volume.
+ */
+export function checkStateLimits(state: QuestState, ingested: IngestedEvent): StateLimitViolation | null {
+  const limits = state.limits;
+  const sessionId = ingested.event.session_id;
+  const actorKey = ingested.actor.actor_key;
+  const session = state.sessions[sessionId];
+
+  if (session === undefined && Object.keys(state.sessions).length >= limits.max_sessions) {
+    return { limit: 'sessions', max: limits.max_sessions };
+  }
+  if (state.actors[actorKey] === undefined && Object.keys(state.actors).length >= limits.max_actors) {
+    return { limit: 'actors', max: limits.max_actors };
+  }
+  if (
+    session !== undefined &&
+    !session.actor_keys.includes(actorKey) &&
+    session.actor_keys.length >= limits.max_actors_per_session
+  ) {
+    return { limit: 'actors_per_session', max: limits.max_actors_per_session };
+  }
+  if (
+    state.counters.by_type[ingested.event.event_type] === undefined &&
+    Object.keys(state.counters.by_type).length >= limits.max_event_types
+  ) {
+    return { limit: 'event_types', max: limits.max_event_types };
+  }
+  return null;
 }
 
 function emptyActor(ingested: IngestedEvent): ActorState {
@@ -124,6 +225,9 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
   if (ingested.namespace !== state.namespace) {
     throw new Error(`namespace mismatch: state=${state.namespace} event=${ingested.namespace}`);
   }
+
+  const violation = checkStateLimits(state, ingested);
+  if (violation !== null) throw new StateLimitExceededError(violation);
 
   const event = ingested.event;
   const actorKey = ingested.actor.actor_key;
@@ -221,6 +325,8 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
     namespace: state.namespace,
     // Carried by reference on purpose: events can never touch the player.
     player: state.player,
+    // Likewise: limits are configuration, not something a producer can raise.
+    limits: state.limits,
     sessions: { ...state.sessions, [event.session_id]: nextSession },
     actors: nextActors,
     last_ingest_seq: Math.max(state.last_ingest_seq, ingested.ingest_seq),

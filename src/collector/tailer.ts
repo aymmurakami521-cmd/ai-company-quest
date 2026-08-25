@@ -14,6 +14,8 @@
  * - oversized lines (dropped up to the next newline, counted)
  * - the file not existing yet, disappearing, or being replaced between the
  *   `stat()` and the `open()` of the same poll
+ * - starting at the current EOF (`startFrom: 'end'`): the bytes before that EOF
+ *   are seeded as the signature, so the first copy-truncate is still detected
  *
  * A poll never rejects: every I/O failure becomes a sanitized notice and polling
  * continues, so a rotation racing the collector cannot terminate the process.
@@ -83,6 +85,11 @@ export class JsonlTailer {
   pending: Buffer;
   /** Last bytes read, ending exactly at `offset`. Empty when nothing was read. */
   signature: Buffer;
+  /**
+   * True while `offset` points at a position this tailer never read itself, so
+   * there is no signature to compare yet. Only `startFrom: 'end'` produces it.
+   */
+  needsSignatureSeed: boolean;
   skippingOversized: boolean;
   hasObservedFile: boolean;
   running: boolean;
@@ -103,6 +110,7 @@ export class JsonlTailer {
     this.inode = null;
     this.pending = EMPTY;
     this.signature = EMPTY;
+    this.needsSignatureSeed = false;
     this.skippingOversized = false;
     this.hasObservedFile = false;
     this.running = false;
@@ -156,6 +164,9 @@ export class JsonlTailer {
       this.pending = EMPTY;
     }
     this.signature = EMPTY;
+    // The offset always returns to a position we will read ourselves, so there
+    // is nothing left to seed.
+    this.needsSignatureSeed = false;
     this.skippingOversized = false;
   }
 
@@ -215,8 +226,13 @@ export class JsonlTailer {
 
       if (this.inode === null) {
         this.inode = info.ino;
-        this.offset = this.startFrom === 'end' && !this.hasObservedFile ? info.size : 0;
+        const startAtEnd = this.startFrom === 'end' && !this.hasObservedFile;
+        this.offset = startAtEnd ? info.size : 0;
         this.signature = EMPTY;
+        // Starting mid-file leaves us with an offset whose preceding bytes we
+        // never read. Seed them now, otherwise the first copy-truncate would be
+        // invisible to the content check and we would resume at a stale offset.
+        this.needsSignatureSeed = startAtEnd && info.size > 0;
         this.hasObservedFile = true;
         this.onNotice({ type: 'appeared' });
       } else if (info.ino !== this.inode) {
@@ -232,7 +248,10 @@ export class JsonlTailer {
         this.onNotice({ type: 'truncated' });
       }
 
-      if (info.size <= this.offset) return;
+      // A poll with no new bytes still has to open the file when the signature
+      // is missing: seeding it is what makes the *next* poll able to notice a
+      // copy-truncate.
+      if (info.size <= this.offset && !this.needsSignatureSeed) return;
 
       // The path can be replaced or removed between the stat above and this
       // open. Every failure from here on is reported, never thrown.
@@ -245,7 +264,10 @@ export class JsonlTailer {
       }
 
       try {
-        if (!(await this.verifySignature(handle))) {
+        const intact = this.needsSignatureSeed
+          ? await this.seedSignature(handle)
+          : await this.verifySignature(handle);
+        if (!intact) {
           // Same inode, but the bytes under our offset changed: the file was
           // copy-truncated and regrown. Restart from the beginning of the new
           // content instead of reading the middle of a record.
@@ -287,6 +309,22 @@ export class JsonlTailer {
    */
   openInput(): Promise<FileHandle> {
     return open(this.path, 'r');
+  }
+
+  /**
+   * Fills `signature` from the bytes immediately before an offset this tailer
+   * adopted without reading (`startFrom: 'end'`). Returns false when the file is
+   * already shorter than that offset, which the caller treats as a truncation.
+   */
+  async seedSignature(handle: FileHandle): Promise<boolean> {
+    this.needsSignatureSeed = false;
+    const length = Math.min(SIGNATURE_BYTES, this.offset);
+    if (length === 0) return true;
+    const probe = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(probe, 0, length, this.offset - length);
+    if (bytesRead < length) return false;
+    this.signature = probe;
+    return true;
   }
 
   /**
