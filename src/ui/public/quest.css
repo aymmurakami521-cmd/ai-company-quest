@@ -250,6 +250,29 @@ h3 {
   border: var(--pixel) solid #101828;
 }
 
+/*
+ * Canvas layer.
+ *
+ * Sized entirely from CSS plus the canvas' own width/height attributes: the
+ * script never writes an inline style, and `height: auto` makes the element's
+ * intrinsic ratio (the device-pixel buffer) decide the displayed height, so a
+ * device pixel ratio change needs no style write either. No animation lives
+ * here, so there is nothing for reduced-motion to switch off.
+ */
+.office__canvas {
+  padding: 10px;
+  background: var(--ink);
+  border-bottom: var(--pixel) solid #121a2e;
+  overflow-x: auto;
+}
+
+.office__canvas-surface {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+}
+
 .office__floor {
   padding: 14px;
   background:

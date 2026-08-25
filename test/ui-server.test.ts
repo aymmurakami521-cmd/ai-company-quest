@@ -65,6 +65,8 @@ test('the office screen is served on loopback with the expected content types', 
       '/ui/quest.css': 'text/css; charset=utf-8',
       '/ui/quest-app.js': 'text/javascript; charset=utf-8',
       '/ui/quest-view.js': 'text/javascript; charset=utf-8',
+      '/ui/quest-world.js': 'text/javascript; charset=utf-8',
+      '/ui/quest-canvas.js': 'text/javascript; charset=utf-8',
     };
     assert.deepEqual([...UI_ASSET_PATHS].sort(), Object.keys(expected).sort());
 

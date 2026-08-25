@@ -59,6 +59,15 @@
           <div class="wall-poster">AI<br />CO.</div>
           <div class="wall-window"><span class="wall-window__sun"></span></div>
         </div>
+        <!--
+          Canvas layer. Purely additive: it is `aria-hidden`, and every fact it
+          paints is also present in the desk list, the legend and the log below,
+          which stay the accessible view of the same state.
+        -->
+        <div class="office__canvas" id="office-canvas-frame">
+          <canvas class="office__canvas-surface" id="office-canvas" width="960" height="480" aria-hidden="true">
+          </canvas>
+        </div>
         <div class="office__floor">
           <ul class="desks" id="desks"></ul>
           <p class="office__empty" id="empty-state">

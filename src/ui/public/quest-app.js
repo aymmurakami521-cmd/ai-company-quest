@@ -12,8 +12,14 @@
  * - stream content reaches the DOM through `textContent` only, never through a
  *   markup-parsing assignment, so a sanitized label is always rendered as text;
  * - nothing is logged to the console, so no stream content lands there either.
+ *
+ * The canvas layer added on top of this is deliberately thin: it turns the same
+ * two projections into a `World` and paints it. It is additive - if the canvas
+ * or its 2D context is missing, every part of the DOM screen still works.
  */
 
+import { drawWorld } from './quest-canvas.js';
+import { buildWorld } from './quest-world.js';
 import {
   ACTOR_VISUAL_STATES,
   applyFrame,
@@ -48,6 +54,8 @@ const dom = {
   deskTemplate: document.getElementById('desk-template'),
   logTemplate: document.getElementById('log-template'),
   legendTemplate: document.getElementById('legend-template'),
+  canvas: document.getElementById('office-canvas'),
+  canvasFrame: document.getElementById('office-canvas-frame'),
 };
 
 let source = null;
@@ -206,6 +214,79 @@ function renderBanner(header) {
   dom.banner.textContent = message ?? '';
 }
 
+// ------------------------------------------------------- canvas layer ---
+
+const canvasContext =
+  dom.canvas === null || typeof dom.canvas.getContext !== 'function' ? null : dom.canvas.getContext('2d');
+
+/** The last projections painted, so a resize can repaint without new events. */
+let painted = null;
+
+/** The viewport those projections were painted at, so a resize can be a no-op. */
+let paintedViewport = null;
+
+/**
+ * Repaints the office.
+ *
+ * Called on every state change and on every viewport change - never on a timer
+ * and never from an animation-frame callback, so the canvas holds still unless
+ * something actually changed. That is what makes `prefers-reduced-motion`
+ * a non-issue here rather than a special case.
+ */
+function currentViewport() {
+  const frame = dom.canvasFrame;
+  return {
+    width: frame === null ? dom.canvas.clientWidth : frame.clientWidth,
+    height: Math.round(window.innerHeight * 0.62),
+    dpr: window.devicePixelRatio,
+  };
+}
+
+function paintCanvas() {
+  if (canvasContext === null || painted === null) return;
+  const viewport = currentViewport();
+  const world = buildWorld({ desks: painted.desks, header: painted.header, viewport });
+  paintedViewport = viewport;
+  // Setting the buffer size also clears it; CSS keeps the displayed box at the
+  // element's intrinsic ratio, so no inline style is ever written.
+  dom.canvas.width = world.canvas.device_width;
+  dom.canvas.height = world.canvas.device_height;
+  drawWorld(canvasContext, world);
+}
+
+/**
+ * Repaint only if the box really changed.
+ *
+ * Painting resizes the canvas, which resizes the frame, which notifies the
+ * observer again: without this guard that is a repaint that feeds itself.
+ */
+function repaintIfResized() {
+  if (paintedViewport === null) return;
+  const viewport = currentViewport();
+  if (
+    viewport.width === paintedViewport.width &&
+    viewport.height === paintedViewport.height &&
+    viewport.dpr === paintedViewport.dpr
+  ) {
+    return;
+  }
+  paintCanvas();
+}
+
+function renderCanvas(header, desks) {
+  painted = { header, desks };
+  paintCanvas();
+}
+
+if (canvasContext !== null) {
+  if (typeof window.ResizeObserver === 'function' && dom.canvasFrame !== null) {
+    new window.ResizeObserver(repaintIfResized).observe(dom.canvasFrame);
+  }
+  // Covers the case a ResizeObserver does not: the same box on a screen whose
+  // device pixel ratio just changed.
+  window.addEventListener('resize', repaintIfResized);
+}
+
 function render() {
   const header = selectHeader(state);
   const desks = selectDesks(state);
@@ -224,6 +305,7 @@ function render() {
   renderDesks(desks);
   renderLog(state.log);
   dom.emptyState.hidden = !header.empty;
+  renderCanvas(header, desks);
 }
 
 for (const button of dom.modeButtons) {
