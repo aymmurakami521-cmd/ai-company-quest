@@ -180,9 +180,72 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           WORKFLOW_NAME: ${{ github.workflow }}
           JOB_NAME: ${{ github.job }}
+          # Local path produced by the action. The diagnostic below reads it
+          # in-place and emits only allow-listed metadata and a coarse category.
+          # Raw Claude text and tool output are never copied to logs/comments.
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -euo pipefail
           MARKER="<!-- claude-action-failure:v1 run=${RUN_ID} -->"
+
+          diagnostic_category="unknown"
+          diagnostic_subtype="unknown"
+          diagnostic_is_error="unknown"
+          diagnostic_duration_ms="unknown"
+          diagnostic_turns="unknown"
+          diagnostic_cost_usd="unknown"
+          diagnostic_model_usage_count="unknown"
+          diagnostic_permission_denials="unknown"
+          diagnostic_message_present="unknown"
+
+          # The action intentionally hides full output because it may contain
+          # secrets and tool results. Read its local execution file and reduce
+          # it to a fixed allow-list. Do not print or persist the raw message.
+          if [ -n "${EXECUTION_FILE:-}" ] && [ -f "$EXECUTION_FILE" ]; then
+            diagnostics=$(jq -sc '
+              def events:
+                [ .[]
+                  | if type == "array" then .[] else . end
+                  | select(type == "object") ];
+              events as $events
+              | ($events | map(select(.type == "result")) | last // {}) as $r
+              | (($r.result // $r.error // "") | tostring | ascii_downcase) as $m
+              | {
+                  subtype: ($r.subtype // "unknown"),
+                  is_error: ($r.is_error // "unknown"),
+                  duration_ms: ($r.duration_ms // "unknown"),
+                  turns: ($r.num_turns // "unknown"),
+                  cost_usd: ($r.total_cost_usd // "unknown"),
+                  model_usage_count: (($r.modelUsage // {}) | length),
+                  permission_denials: ($r.permission_denials_count // "unknown"),
+                  message_present: (($m | length) > 0),
+                  category:
+                    (if ($m | test("5.?hour|five.?hour")) then "five-hour-limit"
+                     elif ($m | test("weekly|week.?limit")) then "weekly-limit"
+                     elif ($m | test("opus.*limit|limit.*opus")) then "opus-model-limit"
+                     elif ($m | test("usage.?credit|credit.?balance|spend.?limit|billing|payment.?required")) then "usage-credit-or-spend-limit"
+                     elif ($m | test("rate.?limit|too many requests|(^|[^0-9])429([^0-9]|$)")) then "rate-limit"
+                     elif ($m | test("oauth|authenticat|unauthorized|invalid.?token|(^|[^0-9])401([^0-9]|$)")) then "authentication"
+                     elif ($m | test("model.*(not found|unavailable|access|unsupported)|invalid.?model")) then "model-access"
+                     elif ($m | test("permission|forbidden|(^|[^0-9])403([^0-9]|$)")) then "permission"
+                     elif ($m | length) == 0 then "empty-result"
+                     else "unclassified-error"
+                     end)
+                }
+            ' "$EXECUTION_FILE" 2>/dev/null || true)
+
+            if [ -n "$diagnostics" ]; then
+              diagnostic_category=$(jq -r '.category' <<<"$diagnostics")
+              diagnostic_subtype=$(jq -r '.subtype' <<<"$diagnostics")
+              diagnostic_is_error=$(jq -r '.is_error' <<<"$diagnostics")
+              diagnostic_duration_ms=$(jq -r '.duration_ms' <<<"$diagnostics")
+              diagnostic_turns=$(jq -r '.turns' <<<"$diagnostics")
+              diagnostic_cost_usd=$(jq -r '.cost_usd' <<<"$diagnostics")
+              diagnostic_model_usage_count=$(jq -r '.model_usage_count' <<<"$diagnostics")
+              diagnostic_permission_denials=$(jq -r '.permission_denials' <<<"$diagnostics")
+              diagnostic_message_present=$(jq -r '.message_present' <<<"$diagnostics")
+            fi
+          fi
 
           if [ -z "$NUMBER" ]; then
             echo "No issue or pull request to comment on; nothing to post."
@@ -208,21 +271,25 @@ jobs:
           # run. Claude may have committed and pushed before failing or timing
           # out, and the operator needs to inspect that partial state.
           current_sha="$START_SHA"
+          branch_exists=false
           if [ -n "$CLAUDE_BRANCH" ]; then
-            s=$(gh api "repos/${REPO}/git/ref/heads/${CLAUDE_BRANCH}" \
-                  --jq '.object.sha' 2>/dev/null || true)
-            [ -n "$s" ] && current_sha="$s"
+            if s=$(gh api "repos/${REPO}/git/ref/heads/${CLAUDE_BRANCH}" \
+                     --jq '.object.sha' 2>/dev/null); then
+              [ -n "$s" ] && current_sha="$s"
+              branch_exists=true
+            fi
           elif [ "$IS_PR" = "true" ]; then
-            s=$(gh api "repos/${REPO}/pulls/${NUMBER}" \
-                  --jq '.head.sha' 2>/dev/null || true)
-            [ -n "$s" ] && current_sha="$s"
+            if s=$(gh api "repos/${REPO}/pulls/${NUMBER}" \
+                     --jq '.head.sha' 2>/dev/null); then
+              [ -n "$s" ] && current_sha="$s"
+            fi
           fi
 
           # Name the branch the operator should actually look at. An early
           # failure on an issue (checkout, action startup) leaves CLAUDE_BRANCH
           # empty and creates no branch at all, so it must not be labelled
           # "PR head" -- there is no PR in that case.
-          if [ -n "$CLAUDE_BRANCH" ]; then
+          if [ -n "$CLAUDE_BRANCH" ] && [ "$branch_exists" = "true" ]; then
             target="$CLAUDE_BRANCH"
           elif [ "$IS_PR" = "true" ]; then
             target="PR head"
@@ -248,6 +315,11 @@ jobs:
             printf '| Workflow | %s |\n' "$WORKFLOW_NAME"
             printf '| Job | %s |\n' "$JOB_NAME"
             printf '| Run ID | %s |\n' "$RUN_ID"
+            printf '| 診断カテゴリ | %s |\n' "$diagnostic_category"
+            printf '| result subtype / is_error | %s / %s |\n' "$diagnostic_subtype" "$diagnostic_is_error"
+            printf '| duration_ms / turns / cost_usd | %s / %s / %s |\n' "$diagnostic_duration_ms" "$diagnostic_turns" "$diagnostic_cost_usd"
+            printf '| model usage count / permission denials | %s / %s |\n' "$diagnostic_model_usage_count" "$diagnostic_permission_denials"
+            printf '| 非公開エラー本文の有無 | %s |\n' "$diagnostic_message_present"
             printf '| head SHA (現在) | %s |\n' "${current_sha:-unknown}"
             printf '| ブランチの状態 | %s |\n' "$pushed"
             printf '| 対象ブランチ | %s |\n' "$target"
