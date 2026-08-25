@@ -29,7 +29,7 @@ import {
   visualForState,
 } from '../src/ui/public/quest-view.js';
 import type { World } from '../src/ui/public/quest-world.js';
-import { buildWorld } from '../src/ui/public/quest-world.js';
+import { buildWorld, measureCanvasViewport } from '../src/ui/public/quest-world.js';
 import type { DrawSurface } from '../src/ui/public/quest-canvas.js';
 import { MARKER_BITMAPS, STATE_COLORS, drawWorld } from '../src/ui/public/quest-canvas.js';
 
@@ -154,6 +154,33 @@ test('the transform follows the buffer the world actually built, not the raw rat
   assert.deepEqual(transform?.args, [world.canvas.dpr, 0, 0, world.canvas.dpr, 0, 0]);
   // The whole buffer is still cleared, in the same CSS-pixel space.
   assert.ok(world.canvas.width * world.canvas.dpr <= world.canvas.device_width + 1);
+});
+
+test('the transform is the ratio the padded canvas surface is actually shown at', () => {
+  // The reported case: a 960px frame with 10px of padding on each side leaves a
+  // 940px surface, and the buffer has to be built for that surface. What the
+  // painter transforms by then really is the browser's device pixel ratio.
+  const frameWidth = 960;
+  const surfaceWidth = 940;
+  const desks = Array.from({ length: 5 }, (_, index) => desk(index + 1, 'working'));
+
+  for (const dpr of [1, 2, 3, 4]) {
+    const viewport = measureCanvasViewport({
+      surface_width: surfaceWidth,
+      frame_width: frameWidth,
+      window_height: 900,
+      dpr,
+    });
+    const world = buildWorld({ desks, header: emptyHeader(), viewport });
+    const transform = paint(world)[1];
+
+    assert.equal(transform?.op, 'setTransform');
+    assert.deepEqual(transform?.args, [dpr, 0, 0, dpr, 0, 0], `dpr ${dpr}: the transform`);
+    // Buffer, transform and displayed surface agree: the pixel blocks land on
+    // whole device pixels instead of being rescaled by 940/960.
+    assert.equal(world.canvas.device_width, surfaceWidth * dpr, `dpr ${dpr}: the buffer`);
+    assert.equal(world.canvas.device_width / surfaceWidth, dpr, `dpr ${dpr}: effective ratio`);
+  }
 });
 
 test('an office larger than the canvas draws says how many seats it left out', () => {
@@ -361,6 +388,15 @@ test('the app wires the canvas layer up without touching the stream', () => {
   // The canvas is repainted on change and on resize - never on an animation
   // timer, so `prefers-reduced-motion` has nothing to suppress.
   assert.equal(/requestAnimationFrame|setInterval\(paintCanvas|animate/.test(app), false, 'no canvas animation loop');
+
+  // The buffer is sized from the canvas surface itself. The frame around it is
+  // padded, so measuring that is what put a 3840-pixel buffer in a 940-pixel
+  // box; it survives only as the fallback for a canvas with no layout box.
+  assert.ok(app.includes('surface_width: dom.canvas === null ? 0 : dom.canvas.clientWidth'), 'the surface is measured');
+  assert.ok(app.includes('measureCanvasViewport('), 'through the tested, DOM-free helper');
+  const css = uiAsset('/ui/quest.css')?.body.toString('utf8') ?? '';
+  assert.ok(/\.office__canvas\s*\{[^}]*padding:/.test(css), 'the frame really is padded');
+  assert.ok(/\.office__canvas-surface\s*\{[^}]*width:\s*100%/.test(css), 'and the surface really is its content box');
 
   // The canvas is the decorative layer; the DOM stays the accessible one.
   const html = uiAsset('/')?.body.toString('utf8') ?? '';
