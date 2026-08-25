@@ -100,6 +100,16 @@ const CONNECTION_VISUALS = Object.freeze({
   }),
 });
 
+/**
+ * Halt reasons, as a closed vocabulary. The server sends a token from this set;
+ * anything else is treated as an unlabelled halt rather than rendered verbatim,
+ * so the banner can never show an arbitrary string from the wire.
+ */
+const HALT_LABELS = Object.freeze({
+  unsupported_schema: '未対応のschema versionを検出しました',
+  state_limit: 'stateの上限に到達しました',
+});
+
 /** A new prototype-less map: a `session_id` of `__proto__` is just a key. */
 function emptyMap() {
   return Object.create(null);
@@ -167,6 +177,23 @@ export function classifyActor(actor) {
   return active ? ACTOR_VISUALS.working : ACTOR_VISUALS.idle;
 }
 
+/**
+ * Reduces a halt reason to a known token. `/health`-style `reason:detail`
+ * strings are accepted, and only the reason part is kept - the detail is a
+ * boundary fact for logs and health, not something the screen repeats.
+ */
+export function normalizeHaltReason(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const token = value.split(':')[0] ?? '';
+  return ownProp(HALT_LABELS, token) === undefined ? null : token;
+}
+
+/** Readable text for a halt reason, or null when there is nothing certain to say. */
+export function haltLabel(reason) {
+  const token = normalizeHaltReason(reason);
+  return token === null ? null : HALT_LABELS[token];
+}
+
 /** Connection banner. A halted (fail-closed) namespace outranks every phase. */
 export function classifyConnection(connection) {
   if (connection !== null && connection !== undefined && connection.halted === true) {
@@ -183,6 +210,7 @@ export function createClientState(namespace) {
     connection: {
       phase: 'offline',
       halted: false,
+      halt_reason: null,
       replaying: false,
       gap: null,
       last_event_id: null,
@@ -192,7 +220,7 @@ export function createClientState(namespace) {
     actors: emptyMap(),
     last_ingest_seq: 0,
     last_event_ts: null,
-    counters: { applied: 0, ignored: 0, out_of_order: 0, foreign: 0, snapshots: 0, gaps: 0 },
+    counters: { applied: 0, ignored: 0, out_of_order: 0, foreign: 0, snapshots: 0, gaps: 0, halts: 0 },
     log: [],
   };
 }
@@ -389,6 +417,7 @@ export function applySnapshot(state, payload, atMs = null) {
     connection: {
       ...state.connection,
       halted: payload.halted === true,
+      halt_reason: payload.halted === true ? normalizeHaltReason(payload.halt_reason) : null,
       replaying: false,
       gap: null,
       last_frame_at_ms: atMs === null ? state.connection.last_frame_at_ms : atMs,
@@ -398,6 +427,32 @@ export function applySnapshot(state, payload, atMs = null) {
     last_ingest_seq: typeof payload.last_ingest_seq === 'number' ? payload.last_ingest_seq : 0,
     last_event_ts: latestTs,
     counters: { ...state.counters, snapshots: state.counters.snapshots + 1 },
+  };
+}
+
+/**
+ * Applies a `fail_closed` control frame: the collector stopped ingesting while
+ * this client was connected.
+ *
+ * Ingestion stopping produces no event, so without this frame the screen would
+ * keep reporting a healthy connection indefinitely. The halt is sticky: what is
+ * on screen stays, labelled as frozen at the halt.
+ */
+export function applyHalt(state, payload, atMs = null) {
+  const frame = payload === null || typeof payload !== 'object' ? {} : payload;
+  if (frame.namespace !== undefined && frame.namespace !== state.namespace) {
+    return { ...state, counters: { ...state.counters, foreign: state.counters.foreign + 1 } };
+  }
+  return {
+    ...state,
+    connection: {
+      ...state.connection,
+      halted: true,
+      halt_reason: normalizeHaltReason(frame.reason),
+      replaying: false,
+      last_frame_at_ms: atMs === null ? state.connection.last_frame_at_ms : atMs,
+    },
+    counters: { ...state.counters, halts: state.counters.halts + 1 },
   };
 }
 
@@ -416,6 +471,8 @@ export function applyFrame(state, frame) {
       return applyEvent(state, frame.payload, atMs);
     case 'snapshot':
       return applySnapshot(state, frame.payload, atMs);
+    case 'fail_closed':
+      return applyHalt(state, frame.payload, atMs);
     case 'replay_start':
       return {
         ...state,
@@ -514,6 +571,7 @@ export function selectHeader(state) {
     namespace: state.namespace,
     connection: classifyConnection(state.connection),
     halted: state.connection.halted === true,
+    halt_reason: state.connection.halted === true ? normalizeHaltReason(state.connection.halt_reason) : null,
     replaying: state.connection.replaying === true,
     gap: state.connection.gap,
     empty: desks.length === 0,

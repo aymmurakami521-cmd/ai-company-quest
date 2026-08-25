@@ -28,6 +28,8 @@ import {
   classifyStatus,
   createClientState,
   describeFreshness,
+  haltLabel,
+  normalizeHaltReason,
   selectDesks,
   selectHeader,
   setConnectionPhase,
@@ -47,6 +49,7 @@ function snapshotOf(store: NamespaceStore): unknown {
   return {
     namespace: store.namespace,
     halted: store.stats.halted,
+    halt_reason: store.stats.halt_reason,
     last_ingest_seq: store.stats.last_ingest_seq,
     // The server serialises the state to JSON; do the same so the test sees
     // exactly the object shape a browser would receive.
@@ -383,8 +386,61 @@ test('a halted namespace is reported as fail-closed', () => {
   assert.equal(header.halted, true);
   assert.equal(header.connection.code, 'FAIL_CLOSED');
   assert.ok(header.connection.label.length > 0);
+  assert.equal(header.halt_reason, 'unsupported_schema');
   // The state the client already has is kept: fail closed freezes, not erases.
   assert.equal(header.desk_count, 1);
+});
+
+test('a halt that happens mid-connection is applied from the fail_closed frame', () => {
+  const store = new NamespaceStore({ namespace: 'live' });
+  const wires = record(store);
+  store.ingestObject(makeEvent({ event_type: 'agent_start', status: 'active' }));
+
+  // The client is connected and healthy: the office is shown, nothing is halted.
+  let state = setConnectionPhase(foldAll('live', wires), 'open', 1_000);
+  assert.equal(selectHeader(state).connection.code, 'CONNECTED');
+
+  // The halt itself carries no wire event, so the frame is the only signal.
+  state = applyFrame(state, {
+    kind: 'fail_closed',
+    payload: { namespace: 'live', halted: true, reason: 'state_limit', detail: 'actors:4096' },
+    at_ms: 2_000,
+  });
+
+  const header = selectHeader(state);
+  assert.equal(header.halted, true);
+  assert.equal(header.connection.code, 'FAIL_CLOSED');
+  assert.equal(header.halt_reason, 'state_limit');
+  assert.equal(state.counters.halts, 1);
+  // Frozen, not erased: the desk that was on screen is still on screen.
+  assert.equal(header.desk_count, 1);
+  assert.equal(header.last_frame_at_ms, 2_000);
+});
+
+test('the halt frame respects namespace isolation and never echoes an unknown reason', () => {
+  const base = setConnectionPhase(createClientState('live'), 'open');
+
+  // A DEMO halt must not freeze the LIVE screen.
+  const foreign = applyFrame(base, {
+    kind: 'fail_closed',
+    payload: { namespace: 'demo', halted: true, reason: 'state_limit', detail: 'actors:1' },
+  });
+  assert.equal(selectHeader(foreign).halted, false);
+  assert.equal(foreign.counters.foreign, 1);
+  assert.equal(foreign.counters.halts, 0);
+
+  // An unrecognised reason still halts, but the screen invents no label for it.
+  const unknown = applyFrame(base, {
+    kind: 'fail_closed',
+    payload: { namespace: 'live', halted: true, reason: '<img src=x>', detail: 'whatever' },
+  });
+  const header = selectHeader(unknown);
+  assert.equal(header.halted, true);
+  assert.equal(header.halt_reason, null);
+  assert.equal(haltLabel(header.halt_reason), null);
+  assert.equal(haltLabel('state_limit:actors:4096'), haltLabel('state_limit'));
+  assert.equal(normalizeHaltReason('unsupported_schema:schema_version:7'), 'unsupported_schema');
+  assert.equal(normalizeHaltReason(null), null);
 });
 
 test('a disconnect is visible and does not erase what was already shown', () => {

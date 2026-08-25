@@ -10,24 +10,45 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { NamespaceStore } from '../src/collector/store.ts';
+import type { StoreOptions } from '../src/collector/store.ts';
 import { QuestServer } from '../src/server/server.ts';
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
-import { httpGet } from './helpers.ts';
+import { httpGet, makeEvent, openSse } from './helpers.ts';
 
-type Harness = { server: QuestServer; port: number; close: () => Promise<void> };
+type Harness = {
+  server: QuestServer;
+  port: number;
+  live: NamespaceStore;
+  demo: NamespaceStore;
+  close: () => Promise<void>;
+};
 
-async function startServer(): Promise<Harness> {
-  const live = new NamespaceStore({ namespace: 'live' });
+async function startServer(liveOptions: Partial<StoreOptions> = {}): Promise<Harness> {
+  const live = new NamespaceStore({ namespace: 'live', ...liveOptions });
   const demo = new NamespaceStore({ namespace: 'demo' });
   const server = new QuestServer({ stores: { live, demo }, heartbeatMs: 60_000 });
   const address = await server.listen(0);
   return {
     server,
     port: address.port,
+    live,
+    demo,
     close: async () => {
       await server.close();
     },
   };
+}
+
+/** Reads the payload of the last frame with the given event name. */
+function lastFrame(text: string, eventName: string): Record<string, unknown> | null {
+  const frames = text
+    .split('\n\n')
+    .slice(0, -1)
+    .filter((frame) => frame.includes(`event: ${eventName}`));
+  const frame = frames.at(-1);
+  if (frame === undefined) return null;
+  const line = frame.split('\n').find((part) => part.startsWith('data: '));
+  return line === undefined ? null : (JSON.parse(line.slice('data: '.length)) as Record<string, unknown>);
 }
 
 function assetText(pathname: string): string {
@@ -147,6 +168,111 @@ test('health reports that the UI now exists', async () => {
   } finally {
     await h.close();
   }
+});
+
+// ------------------------------------------------------- fail-closed halt ---
+
+test('a halt after connect reaches the already-connected client (unsupported schema)', async () => {
+  const h = await startServer({ failClosedOnUnsupportedSchema: true });
+  const client = await openSse(h.port, '/events/live');
+  try {
+    await client.waitFor((text) => text.includes('event: snapshot'));
+    assert.equal(lastFrame(client.text(), 'snapshot')?.halted, false);
+
+    // The halting line is refused, so it produces no wire event at all: without
+    // its own frame this client would keep reporting a healthy stream forever.
+    assert.equal(h.live.ingestObject(makeEvent({ schema_version: 7 })).status, 'halt');
+
+    await client.waitFor((text) => text.includes('event: fail_closed'));
+    assert.deepEqual(lastFrame(client.text(), 'fail_closed'), {
+      namespace: 'live',
+      halted: true,
+      reason: 'unsupported_schema',
+      detail: 'schema_version:7',
+    });
+    // The halt frame carries no `id:`, so it cannot move Last-Event-ID.
+    assert.equal(/event: fail_closed/.test(client.text()) && /id: .*\nevent: fail_closed/.test(client.text()), false);
+  } finally {
+    client.close();
+    await h.close();
+  }
+});
+
+test('a halt after connect reaches the already-connected client (state limit)', async () => {
+  const h = await startServer({ stateLimits: { max_actors: 1 } });
+  const client = await openSse(h.port, '/events/live');
+  try {
+    await client.waitFor((text) => text.includes('event: snapshot'));
+    assert.equal(h.live.ingestObject(makeEvent({ agent_id: 'main' })).status, 'accepted');
+    await client.waitFor((text) => text.includes('event: quest_event'));
+
+    assert.equal(h.live.ingestObject(makeEvent({ agent_id: 'second' })).status, 'halt');
+    await client.waitFor((text) => text.includes('event: fail_closed'));
+    assert.deepEqual(lastFrame(client.text(), 'fail_closed'), {
+      namespace: 'live',
+      halted: true,
+      reason: 'state_limit',
+      detail: 'actors:1',
+    });
+
+    // Fail closed stays closed, and says so only once.
+    assert.equal(h.live.ingestObject(makeEvent({ agent_id: 'third' })).status, 'rejected');
+    assert.equal(client.text().split('event: fail_closed').length - 1, 1);
+  } finally {
+    client.close();
+    await h.close();
+  }
+});
+
+test('the halt frame stays inside its namespace and reconnects still see it', async () => {
+  const h = await startServer({ failClosedOnUnsupportedSchema: true });
+  const liveClient = await openSse(h.port, '/events/live');
+  const demoClient = await openSse(h.port, '/events/demo');
+  try {
+    await liveClient.waitFor((text) => text.includes('event: snapshot'));
+    await demoClient.waitFor((text) => text.includes('event: snapshot'));
+
+    h.live.ingestObject(makeEvent({ schema_version: 7 }));
+    await liveClient.waitFor((text) => text.includes('event: fail_closed'));
+    assert.equal(demoClient.text().includes('fail_closed'), false, 'DEMO is untouched by a LIVE halt');
+
+    // A client that connects after the halt learns it from the snapshot.
+    const late = await openSse(h.port, '/events/live');
+    await late.waitFor((text) => text.includes('event: snapshot'));
+    const snapshot = lastFrame(late.text(), 'snapshot');
+    assert.equal(snapshot?.halted, true);
+    assert.equal(snapshot?.halt_reason, 'unsupported_schema:schema_version:7');
+    late.close();
+  } finally {
+    liveClient.close();
+    demoClient.close();
+    await h.close();
+  }
+});
+
+test('a disconnected client is unsubscribed from halts too', async () => {
+  const h = await startServer({ failClosedOnUnsupportedSchema: true });
+  try {
+    const client = await openSse(h.port, '/events/live');
+    await client.waitFor((text) => text.includes('event: snapshot'));
+    assert.equal(h.live.haltListeners.size, 1);
+    client.close();
+    // Wait for the server to observe the close before asserting the teardown.
+    for (let attempt = 0; attempt < 50 && h.live.haltListeners.size > 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(h.live.haltListeners.size, 0, 'the halt subscription is released with the stream');
+    assert.equal(h.live.listeners.size, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test('the app subscribes to the fail_closed frame it is sent', () => {
+  const app = assetText('/ui/quest-app.js');
+  assert.ok(app.includes("'fail_closed'"), 'the browser listens for the halt frame');
+  const view = assetText('/ui/quest-view.js');
+  assert.ok(view.includes("case 'fail_closed'"), 'the view model folds the halt frame');
 });
 
 test('the shipped assets contain no path, secret or external destination', () => {

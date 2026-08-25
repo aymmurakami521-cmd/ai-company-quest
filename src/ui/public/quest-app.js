@@ -19,6 +19,7 @@ import {
   applyFrame,
   createClientState,
   describeFreshness,
+  haltLabel,
   selectDesks,
   selectHeader,
   setConnectionPhase,
@@ -28,7 +29,7 @@ import {
 const NAMESPACES = ['live', 'demo'];
 
 /** Frame names that come from the documented SSE control contract. */
-const CONTROL_FRAMES = ['snapshot', 'replay_start', 'replay_end', 'stream_gap'];
+const CONTROL_FRAMES = ['snapshot', 'replay_start', 'replay_end', 'stream_gap', 'fail_closed'];
 
 const dom = {
   modeButtons: Array.from(document.querySelectorAll('[data-mode]')),
@@ -181,7 +182,10 @@ function renderBanner(header) {
   let message = null;
   let tone = 'info';
   if (header.halted) {
-    message = '取り込みが停止しています (fail-closed)。表示中のstateは停止時点のままです。';
+    const reason = haltLabel(header.halt_reason);
+    message =
+      '取り込みが停止しています (fail-closed)。表示中のstateは停止時点のままです。' +
+      (reason === null ? '' : `理由: ${reason}。`);
     tone = 'error';
   } else if (header.connection.state === 'error') {
     message = '接続が切れました。「再接続」を押すか、collectorが動いているか確認してください。';

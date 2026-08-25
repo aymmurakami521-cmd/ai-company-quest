@@ -100,8 +100,15 @@ bind hostは **設定できません**。常に `127.0.0.1` です。
 SSE frameの構造:
 
 - data frame … `id: <event_id>` / `event: quest_event` / `data: <wire event JSON>`
-- control frame … `event: snapshot` / `replay_start` / `replay_end` / `stream_gap`
+- control frame … `event: snapshot` / `replay_start` / `replay_end` / `stream_gap` / `fail_closed`
   （control frameは **`id:` を持ちません**。clientの `Last-Event-ID` を壊さないためです）
+
+`fail_closed` は、接続中にingestがhaltしたことを伝えるframeです。haltはeventを生まないため、
+これがないと接続済みclientはheartbeatを受け続けたまま「接続済み」を表示し続けてしまいます。
+payloadは `{ namespace, halted: true, reason, detail }` で、`reason` は
+`unsupported_schema` / `state_limit` の閉じた語彙、`detail` は `/health` の `halt_reason` と
+同じsanitized断片（`schema_version:<n>` または `<limit>:<max>`）です。stream内容は含みません。
+haltは一度だけ通知され、その後の接続では `snapshot` の `halted` / `halt_reason` から判定されます。
 
 ### 再接続とreplay
 
@@ -144,7 +151,8 @@ status labelはsanitized eventの自由記述なので、小文字化・token分
 未知のlabelは推測せず、reducerが持つ `active` にfallbackします。
 
 接続側は `未接続` / `接続中` / `接続済み` / `再接続中` / `切断・エラー` と、
-ingestがhaltしている場合の `取り込み停止 (fail-closed)` を表示します。
+ingestがhaltしている場合の `取り込み停止 (fail-closed)` を表示します。haltは接続中でも
+`fail_closed` frameで即座に伝わり、既知のreasonのみ日本語labelとしてbannerに添えます。
 `stream_gap` は黙って埋めず、明示bannerを出してから後続の `snapshot` で復旧します。
 
 ### 画面側の分離と境界
@@ -259,8 +267,8 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 - **UIはMVPです。** voice input、character editor、pathfinding・自由移動、Skills/MCP、
   cloud/web session、auth、analyticsはいずれも対象外です。
 - 画面は現在の状態を表示するだけで、履歴の巻き戻しや録画replayのUIはありません。
-- fail-closedの表示は接続時の `snapshot` に含まれる `halted` から判定します。接続したまま
-  ingestがhaltした場合、そのbannerは次の再接続まで出ません（`/health` には即時反映されます）。
+- fail-closedの表示は、接続時は `snapshot` の `halted`、接続中のhaltは `fail_closed` frameから
+  判定します。どちらの経路でも表示中のstateは消さず、停止時点のまま凍結して表示します。
 - 画面はDEMO fixtureで全状態を再現できますが、`state_limit` によるhaltはDEMOでは起こしません
   （DEMOを止めないため）。fail-closed表示自体はtestで検証しています。
 - 画面のレンダリングを検証する自動testはDOM contract（要素・selector・状態style・

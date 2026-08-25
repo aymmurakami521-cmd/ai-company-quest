@@ -62,9 +62,14 @@ export type ViewSession = {
   actor_keys: string[];
 };
 
+/** Closed vocabulary; mirrors `HaltReason` in `src/collector/store.ts`. */
+export type HaltReasonToken = 'unsupported_schema' | 'state_limit';
+
 export type ViewConnection = {
   phase: ConnectionPhase;
   halted: boolean;
+  /** Non-null only when the server named a reason this screen knows. */
+  halt_reason: HaltReasonToken | null;
   replaying: boolean;
   gap: { reason: string } | null;
   last_event_id: string | null;
@@ -98,6 +103,7 @@ export type ClientState = {
     foreign: number;
     snapshots: number;
     gaps: number;
+    halts: number;
   };
   log: ViewLogEntry[];
 };
@@ -105,13 +111,23 @@ export type ClientState = {
 export type SnapshotPayload = {
   namespace: string;
   halted: boolean;
+  halt_reason: string | null;
   last_ingest_seq: number;
   state: { actors?: Record<string, ViewActor>; sessions?: Record<string, ViewSession> };
+};
+
+/** The `fail_closed` control frame: ingestion stopped while this client was connected. */
+export type HaltPayload = {
+  namespace: string;
+  halted: true;
+  reason: HaltReasonToken;
+  detail: string;
 };
 
 export type Frame =
   | { kind: 'event'; payload: unknown; at_ms?: number }
   | { kind: 'snapshot'; payload: unknown; at_ms?: number }
+  | { kind: 'fail_closed'; payload: unknown; at_ms?: number }
   | { kind: 'replay_start'; payload?: unknown; at_ms?: number }
   | { kind: 'replay_end'; payload?: unknown; at_ms?: number }
   | { kind: 'stream_gap'; payload?: unknown; at_ms?: number }
@@ -138,6 +154,7 @@ export type Header = {
   namespace: string;
   connection: ConnectionVisual;
   halted: boolean;
+  halt_reason: HaltReasonToken | null;
   replaying: boolean;
   gap: { reason: string } | null;
   empty: boolean;
@@ -162,6 +179,9 @@ export declare function createClientState(namespace: string): ClientState;
 export declare function setConnectionPhase(state: ClientState, phase: string, atMs?: number | null): ClientState;
 export declare function applyEvent(state: ClientState, wire: unknown, atMs?: number | null): ClientState;
 export declare function applySnapshot(state: ClientState, payload: unknown, atMs?: number | null): ClientState;
+export declare function applyHalt(state: ClientState, payload: unknown, atMs?: number | null): ClientState;
+export declare function normalizeHaltReason(value: unknown): HaltReasonToken | null;
+export declare function haltLabel(reason: unknown): string | null;
 export declare function applyFrame(state: ClientState, frame: Frame): ClientState;
 export declare function selectDesks(state: ClientState): Desk[];
 export declare function selectHeader(state: ClientState): Header;

@@ -255,6 +255,7 @@ export class QuestServer {
     return {
       namespace,
       halted: store.stats.halted,
+      halt_reason: store.stats.halt_reason,
       last_ingest_seq: store.stats.last_ingest_seq,
       replay: {
         capacity: store.replay.capacity,
@@ -288,6 +289,18 @@ export class QuestServer {
       writeEvent(writer, wire);
     });
 
+    // A halt produces no wire event, so it gets its own control frame: without
+    // it an already-connected client would keep receiving heartbeats and would
+    // report a healthy stream forever after ingestion stopped.
+    const unsubscribeHalt = store.subscribeHalt((notice) => {
+      writeControl(writer, 'fail_closed', {
+        namespace: notice.namespace,
+        halted: true,
+        reason: notice.reason,
+        detail: notice.detail,
+      });
+    });
+
     const heartbeat = setInterval(() => {
       writer.write(': keep-alive\n\n');
     }, this.heartbeatMs);
@@ -296,6 +309,7 @@ export class QuestServer {
     cleanup = (): void => {
       clearInterval(heartbeat);
       unsubscribe();
+      unsubscribeHalt();
     };
     req.on('close', cleanup);
     res.on('close', cleanup);
