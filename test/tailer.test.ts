@@ -207,6 +207,66 @@ test('copy-truncation that regrows past the old offset is detected by content', 
   }
 });
 
+test('copy-truncation that regrows to exactly the old offset is detected by content', async () => {
+  const h = await harness();
+  try {
+    const original = 'aaaa\nbbbb\ncccc\n';
+    await writeFile(h.file, original);
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc']);
+    assert.equal(h.tailer.offset, original.length);
+
+    // Copy-truncate to exactly the length we stopped at: same inode, same size,
+    // different content, and nothing is appended afterwards. Size alone says
+    // "nothing happened" forever, so only the signature can catch this.
+    const replacement = 'new-1\nnew-2\nnn\n';
+    assert.equal(replacement.length, original.length, 'the replacement is byte-for-byte the same length');
+    await writeFile(h.file, replacement);
+    await h.tailer.pollOnce();
+
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc', 'new-1', 'new-2', 'nn'], 'the replacement is read whole');
+    assert.equal(h.tailer.stats.rotations, 0, 'the inode never changed');
+    assert.equal(h.tailer.stats.truncations, 1);
+    assert.ok(h.notices.some((notice) => notice.type === 'truncated'));
+
+    // Further idle polls must not replay it.
+    await h.tailer.pollOnce();
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc', 'new-1', 'new-2', 'nn'], 'no duplicate emission');
+    assert.equal(h.tailer.stats.truncations, 1, 'no repeated truncation');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('an unchanged file of unchanged size is not mistaken for a copy-truncate', async () => {
+  const h = await harness();
+  try {
+    const content = 'aaaa\nbbbb\ncccc\n';
+    await writeFile(h.file, content);
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc']);
+
+    // Rewritten in place with identical bytes, then simply left alone.
+    await writeFile(h.file, content);
+    await h.tailer.pollOnce();
+    await h.tailer.pollOnce();
+
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc'], 'no duplicate emission');
+    assert.equal(h.tailer.stats.truncations, 0, 'identical content is not a truncation');
+    assert.equal(h.tailer.stats.rotations, 0);
+    assert.equal(h.tailer.stats.errors, 0);
+    assert.ok(!h.notices.some((notice) => notice.type === 'truncated'));
+
+    // And appends after the rewrite still arrive exactly once.
+    await appendFile(h.file, 'dddd\n');
+    await h.tailer.pollOnce();
+    assert.deepEqual(h.lines, ['aaaa', 'bbbb', 'cccc', 'dddd']);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test('a file removed between stat() and open() is reported, not thrown', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'quest-tail-'));
   const file = join(dir, 'events.jsonl');

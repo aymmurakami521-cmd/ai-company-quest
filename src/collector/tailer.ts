@@ -10,7 +10,9 @@
  * - partial trailing line (buffered until its newline arrives)
  * - appends between polls
  * - rotation (inode change) and truncation, including copy-truncate that regrows
- *   past the previous offset between two polls (detected by content, not size)
+ *   to exactly the previous offset, or past it, between two polls: the check is
+ *   the content under the offset, never the size, so a replacement of identical
+ *   length is caught on the next poll rather than waiting for an append
  * - oversized lines (dropped up to the next newline, counted)
  * - the file not existing yet, disappearing, or being replaced between the
  *   `stat()` and the `open()` of the same poll
@@ -234,13 +236,21 @@ export class JsonlTailer {
         return;
       }
 
-      // Known file, unchanged length, nothing left to seed: there is provably
-      // nothing to read, so do not pay for an open.
+      // Nothing to read AND nothing that could disagree: no signature is held,
+      // so no content check is owed and an open would learn nothing.
+      //
+      // An unchanged length on its own is never enough. A copy-truncate can
+      // rewrite the file under the same inode to exactly the length we stopped
+      // at, and then never be appended to again; skipping the open here on size
+      // alone would leave those records unread for as long as the process runs.
+      // Whenever a signature exists it is re-checked against the file, however
+      // little the probe thinks has changed.
       if (
         this.inode !== null &&
         probe.ino === this.inode &&
         probe.size === this.offset &&
-        !this.needsSignatureSeed
+        !this.needsSignatureSeed &&
+        this.signature.length === 0
       ) {
         return;
       }

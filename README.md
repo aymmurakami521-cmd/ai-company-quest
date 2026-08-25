@@ -201,8 +201,10 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 - **UI未実装。** レトロオフィス画面、キャラクター描画、Canvas、Reactはまだありません。
 - `player` entityは初期stateにのみ存在し、eventからは絶対に変化しません（testで保証）。
 - rotation検出はinode変化に加え、offset直前64byteのsignature照合で行います。
-  同一inodeのcopy-truncate後にpoll間で旧offset以上へ再成長した場合も検出し、
-  新ファイルの先頭から読み直します（record途中からの誤読はしません）。
+  同一inodeのcopy-truncate後にpoll間で旧offsetと同一sizeまで再成長した場合も、
+  旧offset超へ再成長した場合も検出し、新ファイルの先頭から読み直します
+  （record途中からの誤読はしません）。sizeが変わらないpollでもsignatureは毎回照合するため、
+  検出のために追記を待つことはありません。
   新内容のoffset直前64byteが旧内容と完全一致する場合のみ検出できません。
   `QUEST_START_FROM=end` で途中から追い始めた場合も、初回pollでEOF直前のbyteを
   signatureとしてseedするため、その直後のcopy-truncateを検出できます。
