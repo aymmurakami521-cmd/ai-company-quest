@@ -28,6 +28,8 @@ export async function main(): Promise<number> {
 
   const live = new NamespaceStore({
     namespace: 'live',
+    // The external contract, stated once and never inferred from a payload.
+    inputContract: 'claude_hook_v2',
     failClosedOnUnsupportedSchema: true,
     replayCapacity: config.replayCapacity,
     dedupeCapacity: config.dedupeCapacity,
@@ -37,6 +39,9 @@ export async function main(): Promise<number> {
 
   const demo = new NamespaceStore({
     namespace: 'demo',
+    // DEMO fixtures are already normalized; they never pass through the external
+    // LIVE validator, and the external wire never reaches this store.
+    inputContract: 'internal_normalized',
     failClosedOnUnsupportedSchema: false,
     replayCapacity: config.replayCapacity,
     dedupeCapacity: config.dedupeCapacity,

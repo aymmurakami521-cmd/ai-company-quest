@@ -1,17 +1,31 @@
-# Sanitized event contract (schema_version = 2)
+# 内部normalized event model (schema_version = 2)
 
-Collectorが受理する唯一の入力形式です。1行1 JSON objectのJSONLで、
-producerは **sanitize済みの値だけ** を書き出します。
+reducer / store / SSE / 画面 / DEMO fixtureが共有する **内部の** 正規化形式です。
+1行1 JSON objectのflatなobjectで、値は全てsanitize済みです。
 
 正本は `src/domain/event.ts` と `src/domain/validate.ts` です。この文書と実装が
 食い違った場合は実装が正です。
+
+## これは外部wire契約ではありません
+
+外部LIVE入力はClaude Code Hookのrich/nested形式であり、この形とは **互換がありません**。
+同じ `schema_version: 2` を名乗る別契約なので、混同しないでください。
+
+- 外部LIVE wireとfield mapping → [live-wire-contract.md](live-wire-contract.md)
+- どちらの契約で読むかは `NamespaceStore` の `inputContract` が生成時に決めます。
+  payloadの形からの推測は **行いません**。
+- LIVE storeは `claude_hook_v2`、DEMO storeは `internal_normalized` です
+  （`src/live.ts`）。DEMO fixtureは外部validatorを迂回するのではなく、
+  最初からこの内部契約の入口を通ります。
 
 ## 互換性ルール
 
 - `schema_version` **のみ** が互換judgementのgateです。`2` 以外はLIVEでfail closed。
 - `sanitizer_version` は観測情報です。値が変わっても受理判定には使いません。
-- 契約keyは **常に全て存在** します。値が無い場合は明示的な `null` で、key欠落は拒否です。
-- 未知のkeyは検証時にdropされ、wireへは出ません（sanitizer側の前方互換のため）。
+- 必須keyは **常に全て存在** します。値が無い場合は明示的な `null` で、key欠落は拒否です。
+- optional keyは、model確定後に追加されたfieldです。存在すれば必須keyと同じ規則で
+  検証し、無ければ `null` へ正規化します（`OPTIONAL_KEYS`）。
+- 未知のkeyは検証時にdropされ、wireへは出ません（前方互換のため）。
 
 ## Keys
 
@@ -24,7 +38,8 @@ producerは **sanitize済みの値だけ** を書き出します。
 | `ts` | string | ISO-8601（`2026-01-01T00:00:00.000Z` 等） |
 | `event_type` | string | `[a-z][a-z0-9_]{0,63}` |
 | `agent_id` | string \| null | `[A-Za-z0-9._:-]{1,128}` |
-| `agent_role` | string \| null | 短いlabel。無ければ `null`（推測しない） |
+| `agent_role` | string \| null | 組織上のrole label。無ければ `null`（推測しない） |
+| `runtime_agent_type` | string \| null | optional key。Claude Codeが起動したruntime agent type。**roleではない**ので `agent_role` と入れ替えない |
 | `producer_seq` | number \| null | 診断用。順序判定には **使わない** |
 | `status` | string \| null | 短いlabel |
 | `tool_name` | string \| null | tool label（command lineではない） |
@@ -38,6 +53,7 @@ producerは **sanitize済みの値だけ** を書き出します。
 `tool_use` / `handoff` / `heartbeat`
 
 上記以外でも形式が正しければ受理し、reducerは解釈せず `counters.ignored` に計上します。
+外部wireのadapterが出す `internal_task`（Claude内部のtask bookkeeping）はこの経路に載ります。
 
 ## 禁止内容
 

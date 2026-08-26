@@ -21,12 +21,39 @@ import { DEFAULT_STATE_LIMITS, checkStateLimits, createInitialState, reduce } fr
 import { emptyRecord, ownProperty } from '../domain/record.ts';
 import type { RejectReason, ValidationResult } from '../domain/validate.ts';
 import { DEFAULT_MAX_LINE_BYTES, validateEventObject, validateLine } from '../domain/validate.ts';
+import type { HookWireRejectReason, HookWireResult } from '../domain/hookWire.ts';
+import { validateHookWireLine, validateHookWireObject } from '../domain/hookWire.ts';
+import type { HookAdapterRejectReason } from '../domain/hookAdapter.ts';
+import { adaptHookEvent } from '../domain/hookAdapter.ts';
 import type { WireEvent } from '../domain/wire.ts';
 import { toWireEvent } from '../domain/wire.ts';
 import { BoundedIdSet, ReplayBuffer } from './replayBuffer.ts';
 
-/** Why ingestion stopped for good. Details are sanitized, never stream content. */
-export type HaltReason = 'unsupported_schema' | 'state_limit';
+/**
+ * Which contract this store's input speaks.
+ *
+ * Chosen at construction time and never inferred from a payload. Both contracts
+ * carry `schema_version: 2` with incompatible shapes, so shape-sniffing would be
+ * exactly the ambiguity this option exists to remove.
+ *
+ * - `claude_hook_v2`: the external LIVE wire (`domain/hookWire.ts`), normalized
+ *   through `domain/hookAdapter.ts` before it reaches the reducer.
+ * - `internal_normalized`: the flat internal model (`domain/event.ts`) directly.
+ *   Used by DEMO fixtures, replay tooling and tests.
+ */
+export type InputContract = 'claude_hook_v2' | 'internal_normalized';
+
+/**
+ * Why ingestion stopped for good. Details are sanitized, never stream content.
+ *
+ * `producer_capacity` is the producer's own capacity marker: from that point the
+ * hook stopped recording, so what is served would silently stop matching the
+ * session. Halting says so instead.
+ */
+export type HaltReason = 'unsupported_schema' | 'state_limit' | 'producer_capacity';
+
+/** Every reason a line can be refused, across both input contracts. */
+export type StoreRejectReason = RejectReason | HookWireRejectReason | HookAdapterRejectReason | 'halted';
 
 /**
  * What a halt tells subscribers.
@@ -41,7 +68,7 @@ export type IngestOutcome =
   | { status: 'accepted'; wire: WireEvent; ingested: IngestedEvent }
   | { status: 'duplicate'; event_id: string }
   | { status: 'blank' }
-  | { status: 'rejected'; reason: RejectReason | 'halted'; detail: string }
+  | { status: 'rejected'; reason: StoreRejectReason; detail: string }
   | { status: 'halt'; reason: HaltReason; detail: string };
 
 export type IngestStats = {
@@ -64,6 +91,13 @@ export type ReplayLookup =
 
 export type StoreOptions = {
   namespace: Namespace;
+  /**
+   * Which contract the input speaks. Explicit, never sniffed from a payload.
+   * Defaults to the internal model so that fixtures, replay tooling and tests
+   * keep feeding normalized events directly; `live.ts` opts the LIVE store into
+   * `claude_hook_v2`.
+   */
+  inputContract?: InputContract;
   /** LIVE sets this: an unsupported schema halts ingestion instead of skipping lines. */
   failClosedOnUnsupportedSchema?: boolean;
   replayCapacity?: number;
@@ -83,6 +117,7 @@ export type HaltListener = (notice: HaltNotice) => void;
 
 export class NamespaceStore {
   readonly namespace: Namespace;
+  readonly inputContract: InputContract;
   readonly failClosedOnUnsupportedSchema: boolean;
   readonly maxLineBytes: number;
   readonly replay: ReplayBuffer;
@@ -103,6 +138,7 @@ export class NamespaceStore {
 
   constructor(options: StoreOptions) {
     this.namespace = options.namespace;
+    this.inputContract = options.inputContract ?? 'internal_normalized';
     this.failClosedOnUnsupportedSchema = options.failClosedOnUnsupportedSchema ?? options.namespace === 'live';
     this.maxLineBytes = options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
     this.replay = new ReplayBuffer(options.replayCapacity ?? DEFAULT_REPLAY_CAPACITY);
@@ -177,15 +213,17 @@ export class NamespaceStore {
     return { status: 'halt', reason, detail };
   }
 
-  /** Ingests one raw JSONL line. */
+  /** Ingests one raw JSONL line, under this store's configured input contract. */
   ingestLine(line: string): IngestOutcome {
     this.stats.lines_seen += 1;
     if (this.stats.halted) {
       this.countRejection('halted');
       return { status: 'rejected', reason: 'halted', detail: 'store:halted' };
     }
-    const result = validateLine(line, { maxLineBytes: this.maxLineBytes });
-    return this.applyValidation(result);
+    if (this.inputContract === 'claude_hook_v2') {
+      return this.applyHookWire(validateHookWireLine(line, { maxLineBytes: this.maxLineBytes }));
+    }
+    return this.applyValidation(validateLine(line, { maxLineBytes: this.maxLineBytes }));
   }
 
   /** Ingests an already-parsed object (demo fixtures, tests, replay tooling). */
@@ -195,7 +233,49 @@ export class NamespaceStore {
       this.countRejection('halted');
       return { status: 'rejected', reason: 'halted', detail: 'store:halted' };
     }
+    if (this.inputContract === 'claude_hook_v2') {
+      return this.applyHookWire(validateHookWireObject(raw));
+    }
     return this.applyValidation(validateEventObject(raw));
+  }
+
+  /**
+   * External LIVE path: validated wire -> allowlist adapter -> internal model.
+   *
+   * The adapter's output is deliberately passed back through the internal
+   * validator instead of being folded directly. That second gate is what keeps
+   * the content rules (paths, credentials, control characters, lengths) binding
+   * on everything the reducer, the SSE wire and the screen ever see, even if the
+   * mapping above were to change.
+   */
+  applyHookWire(result: HookWireResult): IngestOutcome {
+    if (!result.ok) {
+      if (result.reason === 'blank') {
+        this.stats.blank += 1;
+        return { status: 'blank' };
+      }
+      if (result.reason === 'unsupported_schema' && this.failClosedOnUnsupportedSchema) {
+        this.countRejection('unsupported_schema');
+        return this.halt('unsupported_schema', result.detail);
+      }
+      this.countRejection(result.reason);
+      return { status: 'rejected', reason: result.reason, detail: result.detail };
+    }
+
+    this.stats.dropped_producer_keys += result.dropped_keys.length;
+
+    const adapted = adaptHookEvent(result.wire, result.dropped_keys);
+    if (adapted.kind === 'reject') {
+      this.countRejection(adapted.reason);
+      return { status: 'rejected', reason: adapted.reason, detail: adapted.detail };
+    }
+    if (adapted.kind === 'capacity') {
+      // Not a business event: the producer says history stops here, so the
+      // stream is frozen and labelled rather than continued as if it were whole.
+      this.countRejection('producer_capacity');
+      return this.halt('producer_capacity', adapted.detail);
+    }
+    return this.applyValidation(validateEventObject(adapted.event));
   }
 
   applyValidation(result: ValidationResult): IngestOutcome {

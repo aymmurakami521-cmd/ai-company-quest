@@ -1,0 +1,345 @@
+/**
+ * The allowlist adapter: external hook wire -> internal normalized event.
+ *
+ * What is pinned here is the mapping itself - every row of the producer's known
+ * `hook_event` table, every field that is carried, and every field that is
+ * deliberately dropped rather than approximated.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { CONTRACT_KEYS } from '../src/domain/event.ts';
+import type { HookAdaptation } from '../src/domain/hookAdapter.ts';
+import { HOOK_CAPACITY_DETAIL, INTERNAL_TASK_EVENT_TYPE, adaptHookEvent } from '../src/domain/hookAdapter.ts';
+import type { HookWireEvent } from '../src/domain/hookWire.ts';
+import { validateEventObject } from '../src/domain/validate.ts';
+import { CAPACITY_MARKER, SAMPLE_POST_TOOL_USE, SAMPLE_SUBAGENT_START, makeHookEvent } from './hookFixtures.ts';
+
+/**
+ * Every fixture below is a complete row, so validation dropped nothing from it.
+ * The cases that do carry an unknown producer key pass their own list, which is
+ * what the adapter reads to decide whether a row is the capacity control row.
+ */
+function adapt(wire: HookWireEvent, droppedKeys: readonly string[] = []): HookAdaptation {
+  return adaptHookEvent(wire, droppedKeys);
+}
+
+/** The producer's table, restated here so a mapping change has to be deliberate. */
+const LIFECYCLE: ReadonlyArray<[string, string, string]> = [
+  ['SessionStart', 'session_start', 'started'],
+  ['SessionEnd', 'session_end', 'ok'],
+  ['SubagentStart', 'agent_start', 'active'],
+  ['SubagentStop', 'agent_stop', 'stopped'],
+  ['UserPromptSubmit', 'agent_start', 'active'],
+  ['Stop', 'agent_stop', 'stopped'],
+  ['StopFailure', 'agent_stop', 'error'],
+  ['PreToolUse', 'tool_use', 'started'],
+  ['PostToolUse', 'tool_use', 'ok'],
+  ['PostToolUseFailure', 'tool_use', 'error'],
+  ['PermissionRequest', 'agent_status', 'permission'],
+  ['PermissionDenied', 'agent_status', 'denied'],
+  ['Notification', 'agent_status', 'waiting'],
+  ['PreCompact', 'agent_status', 'started'],
+  ['TaskCreated', INTERNAL_TASK_EVENT_TYPE, 'started'],
+  ['TaskCompleted', INTERNAL_TASK_EVENT_TYPE, 'ok'],
+];
+
+test('every known hook_event maps to its documented event_type and status', () => {
+  for (const [hookEvent, eventType, status] of LIFECYCLE) {
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
+    assert.equal(adapted.kind, 'event', `${hookEvent} must normalize`);
+    if (adapted.kind !== 'event') continue;
+    assert.equal(adapted.event.event_type, eventType, `${hookEvent} event_type`);
+    assert.equal(adapted.event.status, status, `${hookEvent} status`);
+  }
+});
+
+test('every normalized event still passes the internal validator', () => {
+  for (const [hookEvent] of LIFECYCLE) {
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
+    if (adapted.kind !== 'event') {
+      assert.fail(`${hookEvent} must normalize`);
+      continue;
+    }
+    assert.equal(validateEventObject(adapted.event).ok, true, `${hookEvent} must survive the second gate`);
+  }
+});
+
+test('a normalized event carries exactly the internal contract keys', () => {
+  const adapted = adapt(SAMPLE_POST_TOOL_USE);
+  assert.equal(adapted.kind, 'event');
+  if (adapted.kind !== 'event') return;
+  assert.deepEqual(Object.keys(adapted.event).sort(), [...CONTRACT_KEYS].sort());
+});
+
+test('the published PostToolUse record maps field by field', () => {
+  const adapted = adapt(SAMPLE_POST_TOOL_USE);
+  assert.equal(adapted.kind, 'event');
+  if (adapted.kind !== 'event') return;
+  assert.deepEqual(adapted.event, {
+    schema_version: 2,
+    sanitizer_version: 3,
+    event_id: '3f2c9d10-8b41-4a7e-9c02-5f1d7a6b2e88',
+    session_id: 'sess-1',
+    ts: '2026-08-22T05:40:00.123Z',
+    event_type: 'tool_use',
+    // `agent.id` was null: the producer's identity rule makes that the session's
+    // main orchestrator, not an unattributed actor.
+    agent_id: 'main',
+    agent_role: null,
+    runtime_agent_type: null,
+    producer_seq: null,
+    status: 'ok',
+    tool_name: 'Bash',
+    duration_ms: 1234,
+    token_count: null,
+    summary: 'ターミナル処理を確認しました',
+  });
+});
+
+test('a runtime agent type is kept apart from the org role', () => {
+  const adapted = adapt(SAMPLE_SUBAGENT_START);
+  assert.equal(adapted.kind, 'event');
+  if (adapted.kind !== 'event') return;
+  assert.equal(adapted.event.runtime_agent_type, 'backend-engineer');
+  assert.equal(adapted.event.agent_role, null, 'a runtime agent type is not an org role');
+  assert.equal(adapted.event.agent_id, 'agent-1');
+});
+
+test('the producer emits no sequence and no token accounting, so neither is invented', () => {
+  const adapted = adapt(makeHookEvent({ hook_event: 'PostToolUse' }));
+  assert.equal(adapted.kind, 'event');
+  if (adapted.kind !== 'event') return;
+  assert.equal(adapted.event.producer_seq, null);
+  assert.equal(adapted.event.token_count, null);
+});
+
+// -------------------------------------------------------------- attribution ---
+
+test('a null session_id is refused instead of being given a sentinel', () => {
+  const adapted = adapt(makeHookEvent({ session_id: null }));
+  assert.equal(adapted.kind, 'reject');
+  if (adapted.kind !== 'reject') return;
+  assert.equal(adapted.reason, 'unattributable');
+  assert.equal(adapted.detail, 'session_id:null');
+});
+
+test('a null session_id is refused for every known hook_event, deterministically', () => {
+  for (const [hookEvent] of LIFECYCLE) {
+    for (const attempt of [0, 1]) {
+      const adapted = adapt(makeHookEvent({ hook_event: hookEvent, session_id: null }));
+      assert.equal(adapted.kind, 'reject', `${hookEvent} attempt ${attempt}`);
+      if (adapted.kind === 'reject') assert.equal(adapted.reason, 'unattributable');
+    }
+  }
+});
+
+test('a subagent lifecycle row without a subagent is refused, never folded onto main', () => {
+  for (const hookEvent of ['SubagentStart', 'SubagentStop']) {
+    const adapted = adapt(
+      makeHookEvent({ hook_event: hookEvent, agent: { id: null, type: null, parent_session_id: null } }),
+    );
+    assert.equal(adapted.kind, 'reject', `${hookEvent} with no subagent must be refused`);
+    if (adapted.kind !== 'reject') continue;
+    assert.equal(adapted.reason, 'identity_conflict');
+    assert.equal(adapted.detail, 'agent.id:required_for_subagent_event');
+  }
+});
+
+test('a main-orchestrator lifecycle row carrying a subagent id is refused', () => {
+  for (const hookEvent of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'StopFailure']) {
+    const adapted = adapt(
+      makeHookEvent({
+        hook_event: hookEvent,
+        agent: { id: 'agent-1', type: 'backend-engineer', parent_session_id: null },
+      }),
+    );
+    assert.equal(adapted.kind, 'reject', `${hookEvent} must not be attributed to a subagent`);
+    if (adapted.kind !== 'reject') continue;
+    assert.equal(adapted.reason, 'identity_conflict');
+    assert.equal(adapted.detail, 'agent.id:not_allowed_for_main_event');
+  }
+});
+
+test('rows either actor can emit keep both attributions', () => {
+  const shared = [
+    'PreToolUse',
+    'PostToolUse',
+    'PostToolUseFailure',
+    'PermissionRequest',
+    'PermissionDenied',
+    'Notification',
+    'PreCompact',
+    'TaskCreated',
+    'TaskCompleted',
+  ];
+  for (const hookEvent of shared) {
+    const main = adapt(makeHookEvent({ hook_event: hookEvent }));
+    assert.equal(main.kind, 'event', `${hookEvent} must map for the orchestrator`);
+    if (main.kind === 'event') assert.equal(main.event.agent_id, 'main');
+
+    const subagent = adapt(
+      makeHookEvent({
+        hook_event: hookEvent,
+        agent: { id: 'agent-1', type: 'backend-engineer', parent_session_id: null },
+      }),
+    );
+    assert.equal(subagent.kind, 'event', `${hookEvent} must map for a subagent`);
+    if (subagent.kind !== 'event') continue;
+    assert.equal(subagent.event.agent_id, 'agent-1');
+    assert.equal(subagent.event.runtime_agent_type, 'backend-engineer');
+    assert.equal(subagent.event.agent_role, null, 'a runtime agent type is never an org role');
+  }
+});
+
+test('the valid main and subagent lifecycle rows still map', () => {
+  const main = adapt(makeHookEvent({ hook_event: 'SessionStart' }));
+  assert.equal(main.kind, 'event');
+  if (main.kind === 'event') {
+    assert.equal(main.event.agent_id, 'main');
+    assert.equal(main.event.event_type, 'session_start');
+    assert.equal(main.event.runtime_agent_type, null);
+  }
+
+  const subagent = adapt(makeHookEvent({ hook_event: 'SubagentStop' }));
+  assert.equal(subagent.kind, 'event');
+  if (subagent.kind === 'event') {
+    assert.equal(subagent.event.agent_id, 'agent-1');
+    assert.equal(subagent.event.event_type, 'agent_stop');
+    assert.equal(subagent.event.status, 'stopped');
+  }
+});
+
+// ------------------------------------------------------------------ capacity ---
+
+test('the capacity marker becomes a control signal, never a business event', () => {
+  const adapted = adapt(CAPACITY_MARKER);
+  assert.equal(adapted.kind, 'capacity');
+  if (adapted.kind !== 'capacity') return;
+  assert.equal(adapted.detail, HOOK_CAPACITY_DETAIL);
+  assert.equal(adapted.detail.includes(CAPACITY_MARKER.activity.label), false, 'no label leaks into the detail');
+});
+
+test('a null hook_event that is not the capacity marker is refused', () => {
+  const partial = adapt(
+    makeHookEvent({
+      hook_event: null,
+      activity: { kind: 'capacity', facility: 'portal', label: '記録容量の上限に達しました' },
+      outcome: { status: 'ok', duration_ms: null, is_interrupt: null, error_kind: null, denial_kind: null },
+    }),
+  );
+  assert.equal(partial.kind, 'reject');
+  if (partial.kind === 'reject') {
+    assert.equal(partial.reason, 'unsupported_hook_event');
+    assert.equal(partial.detail, 'hook_event:null_not_capacity_marker');
+  }
+
+  // A null hook event with an ordinary activity is not a control row either.
+  const plainNull = adapt(
+    makeHookEvent({
+      hook_event: null,
+      activity: { kind: 'session', facility: 'desk', label: 'セッションが開始されました' },
+      outcome: { status: 'started', duration_ms: null, is_interrupt: null, error_kind: null, denial_kind: null },
+    }),
+  );
+  assert.equal(plainNull.kind, 'reject');
+  if (plainNull.kind === 'reject') assert.equal(plainNull.detail, 'hook_event:null_not_capacity_marker');
+});
+
+test('only the complete control row is adapted into a halt', () => {
+  // The adapter decides what stops LIVE, so it asks for the whole marker shape
+  // rather than the fields that make it recognisable. Each row here carries the
+  // exact control tuple and one report the producer's marker never makes.
+  const reporting: ReadonlyArray<[string, Partial<typeof CAPACITY_MARKER>]> = [
+    ['session_id', { session_id: 'sess-1' }],
+    ['prompt_id', { prompt_id: 'prompt-1' }],
+    ['agent.id', { agent: { id: 'agent-1', type: null, parent_session_id: null } }],
+    ['agent.type', { agent: { id: null, type: 'backend-engineer', parent_session_id: null } }],
+    ['session.source', { session: { source: 'startup', end_reason: null } }],
+    ['session.end_reason', { session: { source: null, end_reason: 'clear' } }],
+    ['tool.name', { tool: { name: 'Bash', category: null, mcp_server: null, tool_use_id: null } }],
+    ['tool.category', { tool: { name: null, category: 'exec', mcp_server: null, tool_use_id: null } }],
+    ['tool.mcp_server', { tool: { name: null, category: null, mcp_server: 'github', tool_use_id: null } }],
+    ['tool.tool_use_id', { tool: { name: null, category: null, mcp_server: null, tool_use_id: 'tool-1' } }],
+    ['skill', { skill: { name: 'deploy', source: null } }],
+    ['task', { task: { id: 'task-1' } }],
+    ['outcome.duration_ms', { outcome: { ...CAPACITY_MARKER.outcome, duration_ms: 1234 } }],
+    ['outcome.is_interrupt', { outcome: { ...CAPACITY_MARKER.outcome, is_interrupt: true } }],
+    ['outcome.error_kind', { outcome: { ...CAPACITY_MARKER.outcome, error_kind: 'rate_limit' } }],
+    ['outcome.denial_kind', { outcome: { ...CAPACITY_MARKER.outcome, denial_kind: 'other' } }],
+    ['workspace.repo_id', { workspace: { repo_id: '0123abcd', bucket: null } }],
+    ['workspace.bucket', { workspace: { repo_id: null, bucket: 'scripts' } }],
+  ];
+
+  for (const [path, override] of reporting) {
+    const adapted = adapt({ ...CAPACITY_MARKER, ...override });
+    assert.equal(adapted.kind, 'reject', `a marker reporting ${path} must not halt LIVE`);
+    if (adapted.kind === 'reject') {
+      assert.equal(adapted.reason, 'unsupported_hook_event', path);
+      assert.equal(adapted.detail, 'hook_event:null_not_capacity_marker', path);
+    }
+  }
+
+  assert.equal(adapt(CAPACITY_MARKER).kind, 'capacity', 'the complete marker still halts');
+});
+
+test('a control row that came with an unknown producer key is not adapted into a halt', () => {
+  // The marker is built from constants, so a key this repository does not model
+  // is proof the line is not it. The record alone cannot show that - the key was
+  // dropped in validation - which is why the adapter is told what was dropped.
+  const dropped = [['extra_field'], ['agent.extra_field'], ['outcome.extra_field'], ['first_extra', 'second_extra']];
+  for (const droppedKeys of dropped) {
+    const adapted = adapt(CAPACITY_MARKER, droppedKeys);
+    assert.equal(adapted.kind, 'reject', `${droppedKeys.join(',')} must not halt LIVE`);
+    if (adapted.kind === 'reject') {
+      assert.equal(adapted.reason, 'unsupported_hook_event');
+      assert.equal(adapted.detail, 'hook_event:null_not_capacity_marker');
+      for (const key of droppedKeys) {
+        assert.equal(adapted.detail.includes(key), false, 'the detail names the rule, not the key');
+      }
+    }
+  }
+
+  assert.equal(adapt(CAPACITY_MARKER, []).kind, 'capacity', 'a complete marker with nothing dropped still halts');
+});
+
+test('a known hook_event carrying capacity signals is an undefined shape, so it is refused', () => {
+  const mixedStatus = adapt(
+    makeHookEvent({
+      hook_event: 'PostToolUse',
+      outcome: { status: 'limit_reached', duration_ms: null, is_interrupt: null, error_kind: null, denial_kind: null },
+    }),
+  );
+  assert.equal(mixedStatus.kind, 'reject');
+  if (mixedStatus.kind === 'reject') assert.equal(mixedStatus.detail, 'hook_event:capacity_shape_conflict');
+
+  const mixedKind = adapt(
+    makeHookEvent({
+      hook_event: 'PostToolUse',
+      activity: { kind: 'capacity', facility: 'portal', label: '記録容量の上限に達しました' },
+    }),
+  );
+  assert.equal(mixedKind.kind, 'reject');
+  if (mixedKind.kind === 'reject') assert.equal(mixedKind.detail, 'hook_event:capacity_shape_conflict');
+});
+
+// ------------------------------------------------------------------- unknown ---
+
+test('a hook_event outside the known table is refused, not guessed at', () => {
+  for (const hookEvent of ['SessionPaused', 'PostToolUseRetry', 'Stopped', 'sessionstart']) {
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
+    assert.equal(adapted.kind, 'reject', `${hookEvent} must be refused`);
+    if (adapted.kind !== 'reject') continue;
+    assert.equal(adapted.reason, 'unsupported_hook_event');
+    assert.equal(adapted.detail, 'hook_event:not_in_known_table');
+    assert.equal(adapted.detail.includes(hookEvent), false, 'the detail names the rule, not the value');
+  }
+});
+
+test('a hook_event that names an Object.prototype member is just an unknown value', () => {
+  for (const hookEvent of ['constructor', 'toString', 'valueOf']) {
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
+    assert.equal(adapted.kind, 'reject', `${hookEvent} must not resolve through the prototype chain`);
+  }
+});

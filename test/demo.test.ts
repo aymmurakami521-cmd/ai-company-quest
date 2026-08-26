@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 
 import { NamespaceStore } from '../src/collector/store.ts';
 import { DEMO_EVENTS, seedDemoStore } from '../src/demo/fixtures.ts';
-import type { SanitizedEvent } from '../src/domain/event.ts';
+import { CONTRACT_KEYS } from '../src/domain/event.ts';
 import { loadConfig } from '../src/config.ts';
 import { QuestServer } from '../src/server/server.ts';
 import { httpGet, openSse } from './helpers.ts';
@@ -185,27 +185,14 @@ test('no fixture value carries a raw prompt, command, path or credential', () =>
 });
 
 test('the fixtures only ever use whitelisted, sanitized event fields', () => {
-  const allowed = new Set<keyof SanitizedEvent>([
-    'schema_version',
-    'sanitizer_version',
-    'event_id',
-    'session_id',
-    'ts',
-    'event_type',
-    'agent_id',
-    'agent_role',
-    'producer_seq',
-    'status',
-    'tool_name',
-    'duration_ms',
-    'token_count',
-    'summary',
-  ]);
+  // Derived from the model itself, so a new contract key cannot leave this
+  // check silently pinned to a stale list.
+  const allowed = new Set<string>(CONTRACT_KEYS);
   for (const event of DEMO_EVENTS) {
     for (const key of Object.keys(event)) {
-      assert.ok(allowed.has(key as keyof SanitizedEvent), `unexpected fixture field '${key}'`);
+      assert.ok(allowed.has(key), `unexpected fixture field '${key}'`);
     }
-    assert.equal(event.schema_version, 2, 'the demo uses schema v2, like LIVE');
+    assert.equal(event.schema_version, 2, 'the demo uses the internal normalized model, version 2');
   }
 });
 

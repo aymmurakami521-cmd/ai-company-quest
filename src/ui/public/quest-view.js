@@ -108,6 +108,7 @@ const CONNECTION_VISUALS = Object.freeze({
 const HALT_LABELS = Object.freeze({
   unsupported_schema: '未対応のschema versionを検出しました',
   state_limit: 'stateの上限に到達しました',
+  producer_capacity: '記録側の容量上限に達し、以降の履歴が欠落しています',
 });
 
 /**
