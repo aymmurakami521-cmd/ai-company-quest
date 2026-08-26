@@ -292,6 +292,41 @@ test('the guard still refuses a fork head branch before any write token exists',
     "needs.guard.outputs.allowed == 'true'");
 });
 
+test('the fork decision reaches the write-token job unbroken', () => {
+  // The two checks above verify the ends of the chain -- the step that decides
+  // and the `if` that consumes -- but not the wire between them. With
+  // `jobs.guard.outputs.allowed` rewritten to a constant, to another step, or
+  // to another output, both of those still pass while a fork gets a write
+  // token. Pin every link instead: the deciding step, the output it publishes
+  // under, the job dependency, and the expression that reads it back.
+  const guard = asMapping(JOBS['guard'], 'jobs.guard');
+  const deciding = asSequence(guard['steps'], 'jobs.guard.steps')
+    .map((step, i) => asMapping(step, `jobs.guard.steps[${i}]`))
+    .filter(
+      (step) =>
+        typeof step['run'] === 'string' && /echo "allowed=\$\{?allowed\}?"/.test(step['run']),
+    );
+  assert.equal(deciding.length, 1, 'exactly one guard step may publish the fork decision');
+  const decidingId = asScalar(deciding[0]?.['id'], 'the deciding step has no id');
+
+  // Exact match, not a substring: `${{ 'true' }}` or a reference to any other
+  // step or output has to fail here.
+  assert.equal(
+    asScalar(asMapping(guard['outputs'], 'jobs.guard.outputs')['allowed'], 'guard.outputs.allowed'),
+    `\${{ steps.${decidingId}.outputs.allowed }}`,
+  );
+
+  // `needs.guard.*` only resolves while the dependency stands; drop it and the
+  // gate reads as empty rather than as a refusal.
+  const claude = asMapping(JOBS['claude'], 'jobs.claude');
+  const needs = claude['needs'];
+  assert.deepEqual(Array.isArray(needs) ? needs : [asScalar(needs, 'jobs.claude.needs')], ['guard']);
+  assert.equal(
+    asScalar(claude['if'], 'jobs.claude.if'),
+    "needs.guard.outputs.allowed == 'true'",
+  );
+});
+
 test('only the named Codex bot is allowed through as a non-human actor', () => {
   const steps = asSequence(asMapping(JOBS['claude'], 'jobs.claude')['steps'], 'jobs.claude.steps');
   const action = steps
