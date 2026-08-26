@@ -5,8 +5,12 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  # opened only. The guard reads the trigger phrase out of the issue body and
+  # title and never looks at the assignee, so re-firing on the assign event
+  # re-evaluates the exact same input and starts a second, duplicate run.
+  # Re-requests go through the issue_comment path.
   issues:
-    types: [opened, assigned]
+    types: [opened]
   pull_request_review:
     types: [submitted]
 
