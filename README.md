@@ -437,6 +437,8 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 - **本repoはruntime actor（Claude Code session）単位のofficeです。** 組織snapshot、部署、
   社長室フロア、未所属・共用施設といったフロア構成、固定の社員rosterは実装していません。
   `selectDesks` が席を決めるのはcollectorが解決したactorだけで、役職も配属も推測しません。
+  これらを実装する前に決めるべき責務境界・入力契約・停止条件・未決事項は
+  [`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) に記録しています（設計記録のみ・実装なし）。
 - **人間playerはserverの `state.player` entityからのみ描画します。** `QUEST_PLAYER_NAME`
   で決まる1人だけで、`snapshot` frameが名前を運んできて初めて表示されます（それまでは
   非表示で、人物を捏造しません）。AI社員とは別のactorとして扱い、社員一覧にも在席数にも
