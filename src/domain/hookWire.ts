@@ -469,9 +469,17 @@ export const HOOK_CAPACITY_NULL_FIELDS: readonly string[] = CAPACITY_FIXED_NULL.
  * near miss at the wire, and `hookAdapter.ts` asks this same question before it
  * turns a row into a halt, so the two can never disagree about what stops the
  * stream.
+ *
+ * `droppedKeys` is the second half of the shape, and it is a required argument
+ * rather than an optional one on purpose: a modelled record cannot say what the
+ * producer *also* sent, and a caller that could forget to pass it would be free
+ * to halt on a row this predicate never saw in full. An unknown key anywhere is
+ * a row the pinned `limit_marker_event` cannot emit - it is built from a fixed
+ * set of constants - so a candidate carrying one is not the control row.
  */
-export function isHookCapacityRow(wire: HookWireEvent): boolean {
+export function isHookCapacityRow(wire: HookWireEvent, droppedKeys: readonly string[]): boolean {
   return (
+    droppedKeys.length === 0 &&
     wire.hook_event === null &&
     wire.activity.kind === HOOK_CAPACITY_ACTIVITY.kind &&
     wire.activity.facility === HOOK_CAPACITY_ACTIVITY.facility &&
@@ -672,7 +680,7 @@ function toolActivityContract(
  * is mapped, so an unknown event can never reach the reducer, the wire or the
  * screen through this gap.
  */
-function checkActivityContract(wire: HookWireEvent): void {
+function checkActivityContract(wire: HookWireEvent, dropped: readonly string[]): void {
   // `tool.mcp_server` is not an independent field: the producer computes it from
   // the sanitized tool name with `RE_MCP_SERVER` and emits null for every name
   // that does not match. Any other pairing - a plain tool carrying a server, an
@@ -686,7 +694,7 @@ function checkActivityContract(wire: HookWireEvent): void {
 
   // The capacity control row. It is the only shape with a null `hook_event`.
   if (wire.hook_event === null) {
-    checkCapacityContract(wire);
+    checkCapacityContract(wire, dropped);
     return;
   }
 
@@ -715,9 +723,19 @@ function checkActivityContract(wire: HookWireEvent): void {
  * LIVE namespace stops folding and the rest of the session is lost. That is why
  * a one-field difference is a per-line rejection here rather than a control
  * signal - a rejected line costs one row, a wrong halt costs the session.
+ *
+ * "Every field it fixes" includes the ones it does not have. An unknown key is
+ * dropped rather than refused everywhere else in this module, because a business
+ * row from a newer producer must still fold - but a dropped key would otherwise
+ * let a row become the marker by being rebuilt without the very thing that made
+ * it impossible. Strictness is therefore scoped to this control boundary alone:
+ * unknown keys stay forward-compatible on every ordinary row.
  */
-function checkCapacityContract(wire: HookWireEvent): void {
+function checkCapacityContract(wire: HookWireEvent, dropped: readonly string[]): void {
   compareActivity(HOOK_CAPACITY_ACTIVITY, wire, 'capacity');
+  // The path is fixed, not the key that was dropped: a producer-chosen key name
+  // is content, and a rejection detail never carries content.
+  if (dropped.length > 0) reject('contract_mismatch', 'dropped_keys:unknown_key_for_capacity');
   for (const [path, read] of CAPACITY_FIXED_NULL) {
     if (read(wire) !== null) reject('contract_mismatch', `${path}:expected_null_for_capacity`);
   }
@@ -891,7 +909,16 @@ function buildWireEvent(raw: unknown): { wire: HookWireEvent; dropped_keys: stri
   // combination rule can see every modelled field. It runs after per-field
   // validation on purpose: an unsafe or malformed value is still reported as
   // such, not as a mismatch. The record is discarded when this throws.
-  checkActivityContract(wire);
+  checkActivityContract(wire, dropped);
+
+  // Backstop on the one decision that can stop the stream. A null `hook_event`
+  // is only ever the capacity control row, so a row that reaches here with one
+  // must satisfy the very predicate `hookAdapter.ts` halts on. Asking it here
+  // means the wire cannot accept a candidate the adapter would then read as a
+  // marker on evidence the wire never checked.
+  if (wire.hook_event === null && !isHookCapacityRow(wire, dropped)) {
+    reject('contract_mismatch', 'hook_event:incomplete_capacity_row');
+  }
 
   return { wire, dropped_keys: dropped };
 }

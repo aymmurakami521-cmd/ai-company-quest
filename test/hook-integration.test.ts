@@ -605,6 +605,58 @@ test('a capacity row that reports anything does not stop the session', async () 
   assert.equal(halting.stats.accepted, 1, 'nothing after the real marker is read');
 });
 
+test('a capacity row carrying an unknown key does not stop the session either', async () => {
+  // The same automation-stoppage boundary as above, reached from outside the
+  // modelled fields: an unknown key is dropped in validation, so a row rebuilt
+  // without it would otherwise be indistinguishable from the real marker.
+  const nested = ['producer', 'agent', 'session', 'tool', 'activity', 'outcome', 'workspace'] as const;
+  const carrying: ReadonlyArray<Record<string, unknown>> = [
+    { extra_field: 'near-miss' },
+    ...nested.map((path) => ({
+      [path]: { ...(CAPACITY_MARKER[path] as Record<string, unknown>), extra_field: 'near-miss' },
+    })),
+  ];
+
+  const store = liveStore();
+  await ingestThroughTailer(store, [
+    ...carrying.map((override, index) =>
+      JSON.stringify({ ...CAPACITY_MARKER, ...override, event_id: hookEventId(200 + index) }),
+    ),
+    // The point of refusing rather than halting: what follows still folds.
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(240), hook_event: 'SessionStart' })),
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(241), hook_event: 'PostToolUse' })),
+  ]);
+
+  assert.equal(store.halted, false, 'an unknown key on a marker-shaped row may not halt LIVE');
+  assert.equal(store.stats.rejected_by_reason['contract_mismatch'], carrying.length);
+  assert.equal(store.stats.rejected_by_reason['producer_capacity'], undefined);
+  assert.equal(store.stats.accepted, 2, 'the business rows after the refused lines still folded');
+  assert.equal(JSON.stringify(store.state).includes('near-miss'), false, 'nothing it carried reaches the state');
+
+  // An ordinary row from a newer producer is still forward compatible: the key
+  // is dropped and counted, and the row folds.
+  const forward = liveStore();
+  await ingestThroughTailer(forward, [
+    JSON.stringify({
+      ...makeHookEvent({ event_id: hookEventId(250), hook_event: 'SessionStart' }),
+      future_top_level: 'ignored',
+    }),
+  ]);
+  assert.equal(forward.stats.accepted, 1, 'strictness is scoped to the control row');
+  assert.equal(forward.stats.dropped_producer_keys, 1);
+
+  // And the exact marker still is the control signal.
+  const halting = liveStore();
+  await ingestThroughTailer(halting, [
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(260), hook_event: 'SessionStart' })),
+    JSON.stringify(CAPACITY_MARKER),
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(261), hook_event: 'PostToolUse' })),
+  ]);
+  assert.equal(halting.halted, true);
+  assert.equal(halting.stats.halt_reason, 'producer_capacity:producer:limit_reached');
+  assert.equal(halting.stats.accepted, 1, 'nothing after the real marker is read');
+});
+
 test('what a refused capacity row reported never reaches the state, /health or the screen', async () => {
   const live = liveStore();
   const demo = new NamespaceStore({ namespace: 'demo' });

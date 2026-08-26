@@ -259,6 +259,7 @@ labelがstate / SSE / 画面へ届く経路は存在しません。
 | outcome残り | `duration_ms` / `is_interrupt` / `error_kind` / `denial_kind` すべて `null` |
 | workspace | `workspace.repo_id: null` / `workspace.bucket: null` |
 | 全行共通 | `agent.parent_session_id: null` / `truncated: false` |
+| 未modelled key | top-level / nestedを問わず **1つも無い**（dropが1件でもあればmarkerではない） |
 
 `schema_version` / `sanitizer_version` / `event_id` / `ts` / `producer` は業務行と同じく
 通常検証します（markerも実値を持ちます）。`sanitizer_version` はここでも
@@ -279,8 +280,20 @@ labelがstate / SSE / 画面へ届く経路は存在しません。
 rejectしても後続の正当な業務行はそのままingestされます。
 haltするのは正本と完全一致したmarkerだけです。
 
-判定は `isHookCapacityRow`（`src/domain/hookWire.ts`）が唯一の定義で、
-wire検証もadapterのhalt判定も同じ関数を参照します。
+未modelled keyだけは、この行と業務行で扱いが逆になります。業務行では
+将来のproducerと前方互換であるためにdropしてingestを続けますが、marker候補では
+**dropした時点でmarkerではない** と判定します。dropは記録を残さず行を作り直すため、
+そのまま許すと「不可能な行が、不可能にしている当のkeyを外されてmarkerになる」
+経路ができ、1行でsession以降が失われます。厳格化はこのcontrol境界だけに閉じます。
+rejectのdetailは `dropped_keys:unknown_key_for_capacity` で、
+**dropされたkey名も値も含みません**（key名自体がproducer由来のcontentのため）。
+
+判定は `isHookCapacityRow(wire, droppedKeys)`（`src/domain/hookWire.ts`）が唯一の定義で、
+wire検証もadapterのhalt判定も同じ関数を参照します。`droppedKeys` は省略可能ではなく
+**必須引数** です。modelled recordだけでは「producerが他に何を送ったか」を示せないため、
+渡し忘れられる形にしておくと、wireが見ていない証拠でadapterがhaltできてしまいます。
+検証の最後には `hook_event: null` の行がこの述語を満たすことを再確認し、
+満たさなければ `contract_mismatch:hook_event:incomplete_capacity_row` でrejectします。
 
 ## reject / halt の一覧
 

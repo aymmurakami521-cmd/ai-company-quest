@@ -10,9 +10,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CONTRACT_KEYS } from '../src/domain/event.ts';
+import type { HookAdaptation } from '../src/domain/hookAdapter.ts';
 import { HOOK_CAPACITY_DETAIL, INTERNAL_TASK_EVENT_TYPE, adaptHookEvent } from '../src/domain/hookAdapter.ts';
+import type { HookWireEvent } from '../src/domain/hookWire.ts';
 import { validateEventObject } from '../src/domain/validate.ts';
 import { CAPACITY_MARKER, SAMPLE_POST_TOOL_USE, SAMPLE_SUBAGENT_START, makeHookEvent } from './hookFixtures.ts';
+
+/**
+ * Every fixture below is a complete row, so validation dropped nothing from it.
+ * The cases that do carry an unknown producer key pass their own list, which is
+ * what the adapter reads to decide whether a row is the capacity control row.
+ */
+function adapt(wire: HookWireEvent, droppedKeys: readonly string[] = []): HookAdaptation {
+  return adaptHookEvent(wire, droppedKeys);
+}
 
 /** The producer's table, restated here so a mapping change has to be deliberate. */
 const LIFECYCLE: ReadonlyArray<[string, string, string]> = [
@@ -36,7 +47,7 @@ const LIFECYCLE: ReadonlyArray<[string, string, string]> = [
 
 test('every known hook_event maps to its documented event_type and status', () => {
   for (const [hookEvent, eventType, status] of LIFECYCLE) {
-    const adapted = adaptHookEvent(makeHookEvent({ hook_event: hookEvent }));
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
     assert.equal(adapted.kind, 'event', `${hookEvent} must normalize`);
     if (adapted.kind !== 'event') continue;
     assert.equal(adapted.event.event_type, eventType, `${hookEvent} event_type`);
@@ -46,7 +57,7 @@ test('every known hook_event maps to its documented event_type and status', () =
 
 test('every normalized event still passes the internal validator', () => {
   for (const [hookEvent] of LIFECYCLE) {
-    const adapted = adaptHookEvent(makeHookEvent({ hook_event: hookEvent }));
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
     if (adapted.kind !== 'event') {
       assert.fail(`${hookEvent} must normalize`);
       continue;
@@ -56,14 +67,14 @@ test('every normalized event still passes the internal validator', () => {
 });
 
 test('a normalized event carries exactly the internal contract keys', () => {
-  const adapted = adaptHookEvent(SAMPLE_POST_TOOL_USE);
+  const adapted = adapt(SAMPLE_POST_TOOL_USE);
   assert.equal(adapted.kind, 'event');
   if (adapted.kind !== 'event') return;
   assert.deepEqual(Object.keys(adapted.event).sort(), [...CONTRACT_KEYS].sort());
 });
 
 test('the published PostToolUse record maps field by field', () => {
-  const adapted = adaptHookEvent(SAMPLE_POST_TOOL_USE);
+  const adapted = adapt(SAMPLE_POST_TOOL_USE);
   assert.equal(adapted.kind, 'event');
   if (adapted.kind !== 'event') return;
   assert.deepEqual(adapted.event, {
@@ -88,7 +99,7 @@ test('the published PostToolUse record maps field by field', () => {
 });
 
 test('a runtime agent type is kept apart from the org role', () => {
-  const adapted = adaptHookEvent(SAMPLE_SUBAGENT_START);
+  const adapted = adapt(SAMPLE_SUBAGENT_START);
   assert.equal(adapted.kind, 'event');
   if (adapted.kind !== 'event') return;
   assert.equal(adapted.event.runtime_agent_type, 'backend-engineer');
@@ -97,7 +108,7 @@ test('a runtime agent type is kept apart from the org role', () => {
 });
 
 test('the producer emits no sequence and no token accounting, so neither is invented', () => {
-  const adapted = adaptHookEvent(makeHookEvent({ hook_event: 'PostToolUse' }));
+  const adapted = adapt(makeHookEvent({ hook_event: 'PostToolUse' }));
   assert.equal(adapted.kind, 'event');
   if (adapted.kind !== 'event') return;
   assert.equal(adapted.event.producer_seq, null);
@@ -107,7 +118,7 @@ test('the producer emits no sequence and no token accounting, so neither is inve
 // -------------------------------------------------------------- attribution ---
 
 test('a null session_id is refused instead of being given a sentinel', () => {
-  const adapted = adaptHookEvent(makeHookEvent({ session_id: null }));
+  const adapted = adapt(makeHookEvent({ session_id: null }));
   assert.equal(adapted.kind, 'reject');
   if (adapted.kind !== 'reject') return;
   assert.equal(adapted.reason, 'unattributable');
@@ -117,7 +128,7 @@ test('a null session_id is refused instead of being given a sentinel', () => {
 test('a null session_id is refused for every known hook_event, deterministically', () => {
   for (const [hookEvent] of LIFECYCLE) {
     for (const attempt of [0, 1]) {
-      const adapted = adaptHookEvent(makeHookEvent({ hook_event: hookEvent, session_id: null }));
+      const adapted = adapt(makeHookEvent({ hook_event: hookEvent, session_id: null }));
       assert.equal(adapted.kind, 'reject', `${hookEvent} attempt ${attempt}`);
       if (adapted.kind === 'reject') assert.equal(adapted.reason, 'unattributable');
     }
@@ -126,7 +137,7 @@ test('a null session_id is refused for every known hook_event, deterministically
 
 test('a subagent lifecycle row without a subagent is refused, never folded onto main', () => {
   for (const hookEvent of ['SubagentStart', 'SubagentStop']) {
-    const adapted = adaptHookEvent(
+    const adapted = adapt(
       makeHookEvent({ hook_event: hookEvent, agent: { id: null, type: null, parent_session_id: null } }),
     );
     assert.equal(adapted.kind, 'reject', `${hookEvent} with no subagent must be refused`);
@@ -138,7 +149,7 @@ test('a subagent lifecycle row without a subagent is refused, never folded onto 
 
 test('a main-orchestrator lifecycle row carrying a subagent id is refused', () => {
   for (const hookEvent of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'StopFailure']) {
-    const adapted = adaptHookEvent(
+    const adapted = adapt(
       makeHookEvent({
         hook_event: hookEvent,
         agent: { id: 'agent-1', type: 'backend-engineer', parent_session_id: null },
@@ -164,11 +175,11 @@ test('rows either actor can emit keep both attributions', () => {
     'TaskCompleted',
   ];
   for (const hookEvent of shared) {
-    const main = adaptHookEvent(makeHookEvent({ hook_event: hookEvent }));
+    const main = adapt(makeHookEvent({ hook_event: hookEvent }));
     assert.equal(main.kind, 'event', `${hookEvent} must map for the orchestrator`);
     if (main.kind === 'event') assert.equal(main.event.agent_id, 'main');
 
-    const subagent = adaptHookEvent(
+    const subagent = adapt(
       makeHookEvent({
         hook_event: hookEvent,
         agent: { id: 'agent-1', type: 'backend-engineer', parent_session_id: null },
@@ -183,7 +194,7 @@ test('rows either actor can emit keep both attributions', () => {
 });
 
 test('the valid main and subagent lifecycle rows still map', () => {
-  const main = adaptHookEvent(makeHookEvent({ hook_event: 'SessionStart' }));
+  const main = adapt(makeHookEvent({ hook_event: 'SessionStart' }));
   assert.equal(main.kind, 'event');
   if (main.kind === 'event') {
     assert.equal(main.event.agent_id, 'main');
@@ -191,7 +202,7 @@ test('the valid main and subagent lifecycle rows still map', () => {
     assert.equal(main.event.runtime_agent_type, null);
   }
 
-  const subagent = adaptHookEvent(makeHookEvent({ hook_event: 'SubagentStop' }));
+  const subagent = adapt(makeHookEvent({ hook_event: 'SubagentStop' }));
   assert.equal(subagent.kind, 'event');
   if (subagent.kind === 'event') {
     assert.equal(subagent.event.agent_id, 'agent-1');
@@ -203,7 +214,7 @@ test('the valid main and subagent lifecycle rows still map', () => {
 // ------------------------------------------------------------------ capacity ---
 
 test('the capacity marker becomes a control signal, never a business event', () => {
-  const adapted = adaptHookEvent(CAPACITY_MARKER);
+  const adapted = adapt(CAPACITY_MARKER);
   assert.equal(adapted.kind, 'capacity');
   if (adapted.kind !== 'capacity') return;
   assert.equal(adapted.detail, HOOK_CAPACITY_DETAIL);
@@ -211,7 +222,7 @@ test('the capacity marker becomes a control signal, never a business event', () 
 });
 
 test('a null hook_event that is not the capacity marker is refused', () => {
-  const partial = adaptHookEvent(
+  const partial = adapt(
     makeHookEvent({
       hook_event: null,
       activity: { kind: 'capacity', facility: 'portal', label: '記録容量の上限に達しました' },
@@ -225,7 +236,7 @@ test('a null hook_event that is not the capacity marker is refused', () => {
   }
 
   // A null hook event with an ordinary activity is not a control row either.
-  const plainNull = adaptHookEvent(
+  const plainNull = adapt(
     makeHookEvent({
       hook_event: null,
       activity: { kind: 'session', facility: 'desk', label: 'セッションが開始されました' },
@@ -262,7 +273,7 @@ test('only the complete control row is adapted into a halt', () => {
   ];
 
   for (const [path, override] of reporting) {
-    const adapted = adaptHookEvent({ ...CAPACITY_MARKER, ...override });
+    const adapted = adapt({ ...CAPACITY_MARKER, ...override });
     assert.equal(adapted.kind, 'reject', `a marker reporting ${path} must not halt LIVE`);
     if (adapted.kind === 'reject') {
       assert.equal(adapted.reason, 'unsupported_hook_event', path);
@@ -270,11 +281,31 @@ test('only the complete control row is adapted into a halt', () => {
     }
   }
 
-  assert.equal(adaptHookEvent(CAPACITY_MARKER).kind, 'capacity', 'the complete marker still halts');
+  assert.equal(adapt(CAPACITY_MARKER).kind, 'capacity', 'the complete marker still halts');
+});
+
+test('a control row that came with an unknown producer key is not adapted into a halt', () => {
+  // The marker is built from constants, so a key this repository does not model
+  // is proof the line is not it. The record alone cannot show that - the key was
+  // dropped in validation - which is why the adapter is told what was dropped.
+  const dropped = [['extra_field'], ['agent.extra_field'], ['outcome.extra_field'], ['first_extra', 'second_extra']];
+  for (const droppedKeys of dropped) {
+    const adapted = adapt(CAPACITY_MARKER, droppedKeys);
+    assert.equal(adapted.kind, 'reject', `${droppedKeys.join(',')} must not halt LIVE`);
+    if (adapted.kind === 'reject') {
+      assert.equal(adapted.reason, 'unsupported_hook_event');
+      assert.equal(adapted.detail, 'hook_event:null_not_capacity_marker');
+      for (const key of droppedKeys) {
+        assert.equal(adapted.detail.includes(key), false, 'the detail names the rule, not the key');
+      }
+    }
+  }
+
+  assert.equal(adapt(CAPACITY_MARKER, []).kind, 'capacity', 'a complete marker with nothing dropped still halts');
 });
 
 test('a known hook_event carrying capacity signals is an undefined shape, so it is refused', () => {
-  const mixedStatus = adaptHookEvent(
+  const mixedStatus = adapt(
     makeHookEvent({
       hook_event: 'PostToolUse',
       outcome: { status: 'limit_reached', duration_ms: null, is_interrupt: null, error_kind: null, denial_kind: null },
@@ -283,7 +314,7 @@ test('a known hook_event carrying capacity signals is an undefined shape, so it 
   assert.equal(mixedStatus.kind, 'reject');
   if (mixedStatus.kind === 'reject') assert.equal(mixedStatus.detail, 'hook_event:capacity_shape_conflict');
 
-  const mixedKind = adaptHookEvent(
+  const mixedKind = adapt(
     makeHookEvent({
       hook_event: 'PostToolUse',
       activity: { kind: 'capacity', facility: 'portal', label: '記録容量の上限に達しました' },
@@ -297,7 +328,7 @@ test('a known hook_event carrying capacity signals is an undefined shape, so it 
 
 test('a hook_event outside the known table is refused, not guessed at', () => {
   for (const hookEvent of ['SessionPaused', 'PostToolUseRetry', 'Stopped', 'sessionstart']) {
-    const adapted = adaptHookEvent(makeHookEvent({ hook_event: hookEvent }));
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
     assert.equal(adapted.kind, 'reject', `${hookEvent} must be refused`);
     if (adapted.kind !== 'reject') continue;
     assert.equal(adapted.reason, 'unsupported_hook_event');
@@ -308,7 +339,7 @@ test('a hook_event outside the known table is refused, not guessed at', () => {
 
 test('a hook_event that names an Object.prototype member is just an unknown value', () => {
   for (const hookEvent of ['constructor', 'toString', 'valueOf']) {
-    const adapted = adaptHookEvent(makeHookEvent({ hook_event: hookEvent }));
+    const adapted = adapt(makeHookEvent({ hook_event: hookEvent }));
     assert.equal(adapted.kind, 'reject', `${hookEvent} must not resolve through the prototype chain`);
   }
 });

@@ -127,9 +127,14 @@ export const MAIN_ONLY_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
  * a line permanently halts LIVE ingestion, so it must be the same shape the wire
  * contract enforces, not a looser summary of it. A row that only resembles the
  * marker is refused below like any other undefined shape.
+ *
+ * `droppedKeys` comes from the same validation that produced `wire`. The control
+ * row is built from constants, so a producer key this repository does not model
+ * is proof the line is not it - and a modelled record alone cannot show that,
+ * because the unmodelled key is exactly what validation left behind.
  */
-export function isCapacityMarker(wire: HookWireEvent): boolean {
-  return isHookCapacityRow(wire);
+export function isCapacityMarker(wire: HookWireEvent, droppedKeys: readonly string[]): boolean {
+  return isHookCapacityRow(wire, droppedKeys);
 }
 
 /**
@@ -139,11 +144,14 @@ export function isCapacityMarker(wire: HookWireEvent): boolean {
  * decides meaning, not shape. Its output is validated again by the internal
  * validator before anything is folded, so a mapping bug cannot bypass the
  * content rules that protect the wire and the screen.
+ *
+ * `droppedKeys` is that validation's other half, and is required for the same
+ * reason it is required by `isCapacityMarker`.
  */
-export function adaptHookEvent(wire: HookWireEvent): HookAdaptation {
+export function adaptHookEvent(wire: HookWireEvent, droppedKeys: readonly string[]): HookAdaptation {
   // Capacity first: it is the only shape in which `hook_event` may be null, and
   // it must never be read as an ordinary event.
-  if (isCapacityMarker(wire)) return { kind: 'capacity', detail: HOOK_CAPACITY_DETAIL };
+  if (isCapacityMarker(wire, droppedKeys)) return { kind: 'capacity', detail: HOOK_CAPACITY_DETAIL };
 
   if (wire.hook_event === null) {
     return { kind: 'reject', reason: 'unsupported_hook_event', detail: 'hook_event:null_not_capacity_marker' };

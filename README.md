@@ -315,6 +315,7 @@ replay buffer、subscriber listのいずれも共有しません。
 | `schema_version` が2以外（LIVE） | ingestを即時halt。以降の行は全て拒否し、`/health` は `fail_closed` |
 | producerのcapacity marker（LIVE） | ingestを即時halt（`producer_capacity`）。markerは正本 `limit_marker_event` の **全フィールド**（固定activity tuple / identity / session / tool / skill / task / outcome残り / workspace すべて `null`）と完全一致した行だけです。markerは業務eventとして畳み込まず、履歴欠落を固定文言で表示 |
 | capacity markerの近似行（LIVE） | **haltしない**。1フィールドでも報告している行はその行だけ拒否（`contract_mismatch`）し、後続の正当な業務行はingestを継続。1行のmalformedがsession以降の履歴全体を失わせないため |
+| capacity marker形の行が未modelled keyを持つ（LIVE） | **haltしない**。top-level / nestedを問わずdropが1件でもあればmarkerではないと判定し、その行だけ拒否（`contract_mismatch`）。detailにkey名も値も含めない。業務行の未modelled keyは従来どおりdropしてingestを継続（前方互換は業務行のみ） |
 | state保持上限に到達（LIVE / DEMO両方） | ingestを即時halt。上限超過のeventは適用せず、既存stateは削除も置換もしない |
 | `producer.kind` / `producer.env` 不一致（LIVE） | その行だけ拒否（`unsupported_producer`） |
 | `session_id` が `null`（LIVE） | その行だけ拒否（`unattributable`）。sentinelは作らない |

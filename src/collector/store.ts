@@ -264,7 +264,7 @@ export class NamespaceStore {
 
     this.stats.dropped_producer_keys += result.dropped_keys.length;
 
-    const adapted = adaptHookEvent(result.wire);
+    const adapted = adaptHookEvent(result.wire, result.dropped_keys);
     if (adapted.kind === 'reject') {
       this.countRejection(adapted.reason);
       return { status: 'rejected', reason: adapted.reason, detail: adapted.detail };

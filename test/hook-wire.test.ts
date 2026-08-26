@@ -908,7 +908,7 @@ test('a capacity row that reports anything at all is not the control row', () =>
     'every fixed-null field of the marker needs a case',
   );
 
-  assert.equal(isHookCapacityRow(CAPACITY_MARKER), true, 'the pinned marker is the control row');
+  assert.equal(isHookCapacityRow(CAPACITY_MARKER, []), true, 'the pinned marker is the control row');
 
   for (const { path, override, detail } of CAPACITY_NULL_CASES) {
     const row = { ...CAPACITY_MARKER, ...override };
@@ -919,7 +919,7 @@ test('a capacity row that reports anything at all is not the control row', () =>
       assert.equal(result.detail, detail, path);
     }
     // The same shape is not a halt either, whichever way it is asked.
-    assert.equal(isHookCapacityRow(row), false, `${path} must not read as the control row`);
+    assert.equal(isHookCapacityRow(row, []), false, `${path} must not read as the control row`);
   }
 });
 
@@ -937,7 +937,7 @@ test('a capacity row is refused for a mixture of reports, and for a partial reco
     assert.equal(mixedResult.reason, 'contract_mismatch');
     assert.equal(mixedResult.detail, 'prompt_id:expected_null_for_capacity', 'the first fixed field decides');
   }
-  assert.equal(isHookCapacityRow(mixed), false);
+  assert.equal(isHookCapacityRow(mixed, []), false);
 
   // The two fields that are fixed for *every* row are still caught by their own
   // per-field rules, so they never reach the capacity comparison.
@@ -957,7 +957,68 @@ test('a capacity row is refused for a mixture of reports, and for a partial reco
   const otherSanitizer = { ...CAPACITY_MARKER, sanitizer_version: 99 };
   const sanitizerResult = validateHookWireObject(otherSanitizer);
   assert.equal(sanitizerResult.ok, true, 'sanitizer_version never gates acceptance');
-  assert.equal(isHookCapacityRow(otherSanitizer), true);
+  assert.equal(isHookCapacityRow(otherSanitizer, []), true);
+});
+
+/**
+ * Every object the capacity control row actually carries. `skill` and `task` are
+ * absent because the marker reports them as null, so there is no nested object
+ * on it for an unknown key to hide in.
+ */
+const CAPACITY_NESTED_OBJECTS = ['producer', 'agent', 'session', 'tool', 'activity', 'outcome', 'workspace'] as const;
+
+test('a capacity row that carries an unknown key is not the control row', () => {
+  // A key this repository does not model is dropped, not refused - that is what
+  // keeps an ordinary row from a newer producer foldable. The consequence for a
+  // control row is the opposite: it would be rebuilt without the very key that
+  // made it impossible, and then halt the session. So the marker is the one
+  // shape where an unknown key is a rejection.
+  const cases: ReadonlyArray<[string, Record<string, unknown>]> = [
+    ['a top-level key', { ...CAPACITY_MARKER, extra_field: 'near-miss' }],
+    ...CAPACITY_NESTED_OBJECTS.map(
+      (path): [string, Record<string, unknown>] => [
+        `a key in ${path}`,
+        {
+          ...CAPACITY_MARKER,
+          [path]: { ...(CAPACITY_MARKER[path] as Record<string, unknown>), extra_field: 'near-miss' },
+        },
+      ],
+    ),
+  ];
+
+  for (const [name, row] of cases) {
+    const result = validateHookWireObject(row);
+    assert.equal(result.ok, false, `a marker carrying ${name} must be refused`);
+    if (!result.ok) {
+      assert.equal(result.reason, 'contract_mismatch', name);
+      // The path is the rule, not the key: a producer-chosen name is content.
+      assert.equal(result.detail, 'dropped_keys:unknown_key_for_capacity', name);
+      assert.equal(result.detail.includes('extra_field'), false, `${name} must not name the key`);
+      assert.equal(result.detail.includes('near-miss'), false, `${name} must not name the value`);
+    }
+  }
+
+  // Same answer from the predicate the adapter halts on, whichever way it is
+  // asked: the modelled record alone cannot show what the producer also sent.
+  assert.equal(isHookCapacityRow(CAPACITY_MARKER, ['extra_field']), false, 'a dropped key is not the control row');
+  assert.equal(isHookCapacityRow(CAPACITY_MARKER, ['outcome.extra_field']), false, 'nested is no different');
+  assert.equal(isHookCapacityRow(CAPACITY_MARKER, []), true, 'the complete marker still is');
+});
+
+test('an unknown key still folds on an ordinary row, so the producer can move ahead', () => {
+  // Strictness is scoped to the control boundary. A business row from a newer
+  // producer keeps the forward compatibility the rest of this module grants it.
+  for (const hookEvent of ['SessionStart', 'PostToolUse', 'SubagentStart']) {
+    const row: Record<string, unknown> = {
+      ...makeHookEvent({ hook_event: hookEvent }),
+      future_top_level: 'ignored',
+      workspace: { repo_id: '0123abcd', bucket: null, future_nested: 'ignored' },
+    };
+    const result = validateHookWireObject(row);
+    assert.equal(result.ok, true, `${hookEvent} must still be accepted`);
+    if (!result.ok) continue;
+    assert.deepEqual(result.dropped_keys.sort(), ['future_top_level', 'workspace.future_nested'], hookEvent);
+  }
 });
 
 test('a refused capacity row never names the value it reported', () => {
