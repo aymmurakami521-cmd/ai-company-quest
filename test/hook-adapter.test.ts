@@ -236,6 +236,43 @@ test('a null hook_event that is not the capacity marker is refused', () => {
   if (plainNull.kind === 'reject') assert.equal(plainNull.detail, 'hook_event:null_not_capacity_marker');
 });
 
+test('only the complete control row is adapted into a halt', () => {
+  // The adapter decides what stops LIVE, so it asks for the whole marker shape
+  // rather than the fields that make it recognisable. Each row here carries the
+  // exact control tuple and one report the producer's marker never makes.
+  const reporting: ReadonlyArray<[string, Partial<typeof CAPACITY_MARKER>]> = [
+    ['session_id', { session_id: 'sess-1' }],
+    ['prompt_id', { prompt_id: 'prompt-1' }],
+    ['agent.id', { agent: { id: 'agent-1', type: null, parent_session_id: null } }],
+    ['agent.type', { agent: { id: null, type: 'backend-engineer', parent_session_id: null } }],
+    ['session.source', { session: { source: 'startup', end_reason: null } }],
+    ['session.end_reason', { session: { source: null, end_reason: 'clear' } }],
+    ['tool.name', { tool: { name: 'Bash', category: null, mcp_server: null, tool_use_id: null } }],
+    ['tool.category', { tool: { name: null, category: 'exec', mcp_server: null, tool_use_id: null } }],
+    ['tool.mcp_server', { tool: { name: null, category: null, mcp_server: 'github', tool_use_id: null } }],
+    ['tool.tool_use_id', { tool: { name: null, category: null, mcp_server: null, tool_use_id: 'tool-1' } }],
+    ['skill', { skill: { name: 'deploy', source: null } }],
+    ['task', { task: { id: 'task-1' } }],
+    ['outcome.duration_ms', { outcome: { ...CAPACITY_MARKER.outcome, duration_ms: 1234 } }],
+    ['outcome.is_interrupt', { outcome: { ...CAPACITY_MARKER.outcome, is_interrupt: true } }],
+    ['outcome.error_kind', { outcome: { ...CAPACITY_MARKER.outcome, error_kind: 'rate_limit' } }],
+    ['outcome.denial_kind', { outcome: { ...CAPACITY_MARKER.outcome, denial_kind: 'other' } }],
+    ['workspace.repo_id', { workspace: { repo_id: '0123abcd', bucket: null } }],
+    ['workspace.bucket', { workspace: { repo_id: null, bucket: 'scripts' } }],
+  ];
+
+  for (const [path, override] of reporting) {
+    const adapted = adaptHookEvent({ ...CAPACITY_MARKER, ...override });
+    assert.equal(adapted.kind, 'reject', `a marker reporting ${path} must not halt LIVE`);
+    if (adapted.kind === 'reject') {
+      assert.equal(adapted.reason, 'unsupported_hook_event', path);
+      assert.equal(adapted.detail, 'hook_event:null_not_capacity_marker', path);
+    }
+  }
+
+  assert.equal(adaptHookEvent(CAPACITY_MARKER).kind, 'capacity', 'the complete marker still halts');
+});
+
 test('a known hook_event carrying capacity signals is an undefined shape, so it is refused', () => {
   const mixedStatus = adaptHookEvent(
     makeHookEvent({

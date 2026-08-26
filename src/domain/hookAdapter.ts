@@ -27,6 +27,7 @@ import type { SanitizedEvent } from './event.ts';
 import { SUPPORTED_SCHEMA_VERSION } from './event.ts';
 import { MAIN_AGENT_ID } from './actor.ts';
 import type { HookWireEvent } from './hookWire.ts';
+import { isHookCapacityRow } from './hookWire.ts';
 
 /**
  * Normalized type for a Claude-internal task event. It is deliberately outside
@@ -119,9 +120,16 @@ export const MAIN_ONLY_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
   'StopFailure',
 ]);
 
-/** True for the producer's capacity marker: a null hook event, kind and status. */
+/**
+ * True only for the producer's complete capacity control row.
+ *
+ * Deferred to `hookWire.ts` rather than restated: this predicate decides whether
+ * a line permanently halts LIVE ingestion, so it must be the same shape the wire
+ * contract enforces, not a looser summary of it. A row that only resembles the
+ * marker is refused below like any other undefined shape.
+ */
 export function isCapacityMarker(wire: HookWireEvent): boolean {
-  return wire.hook_event === null && wire.activity.kind === 'capacity' && wire.outcome.status === 'limit_reached';
+  return isHookCapacityRow(wire);
 }
 
 /**

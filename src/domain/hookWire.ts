@@ -407,8 +407,9 @@ export function hookToolClass(toolName: string | null): HookToolClass {
 }
 
 /**
- * The producer's capacity marker, in full. It is a control row, not an event:
- * `hook_event` is null and the identity fields are null with it.
+ * The activity tuple of the producer's capacity marker. It is a control row,
+ * not an event: `hook_event` is null, and so is everything else a real event
+ * would report. See `HOOK_CAPACITY_NULL_FIELDS` for the rest of the shape.
  */
 export const HOOK_CAPACITY_ACTIVITY: HookActivityContract = {
   kind: 'capacity',
@@ -416,6 +417,71 @@ export const HOOK_CAPACITY_ACTIVITY: HookActivityContract = {
   label: '本日の記録上限に達しました',
   status: 'limit_reached',
 };
+
+/**
+ * Every remaining field the producer's `limit_marker_event` fixes to null.
+ *
+ * The capacity row is not an ordinary record that happens to be about capacity:
+ * it is a control signal that *permanently halts LIVE ingestion*, so it is the
+ * one shape where a partial match must not be tolerated. The pinned producer
+ * (`aymmurakami521-cmd/ai-company@3306b2b3c07a17a7d1de2c66e6669f0e6bb02a2f`,
+ * `limit_marker_event`) builds the record from constants: it reports no session,
+ * no prompt, no agent, no session transition, no tool, no skill, no task, no
+ * timing and no workspace. A row that carries any of them is a row the producer
+ * cannot emit, and stopping the stream on it would turn one malformed line into
+ * the permanent loss of everything after it.
+ *
+ * `agent.parent_session_id` (always null) and `truncated` (always false) are not
+ * listed: they are fixed for *every* row and already enforced field by field.
+ * `schema_version`, `sanitizer_version`, `event_id`, `ts` and `producer` are
+ * likewise validated exactly as they are on a business row - the marker carries
+ * real ones. `sanitizer_version` in particular stays observational here, as it
+ * is everywhere else.
+ */
+const CAPACITY_FIXED_NULL: readonly (readonly [string, (wire: HookWireEvent) => unknown])[] = [
+  ['session_id', (wire) => wire.session_id],
+  ['prompt_id', (wire) => wire.prompt_id],
+  ['agent.id', (wire) => wire.agent.id],
+  ['agent.type', (wire) => wire.agent.type],
+  ['session.source', (wire) => wire.session.source],
+  ['session.end_reason', (wire) => wire.session.end_reason],
+  ['tool.name', (wire) => wire.tool.name],
+  ['tool.category', (wire) => wire.tool.category],
+  ['tool.mcp_server', (wire) => wire.tool.mcp_server],
+  ['tool.tool_use_id', (wire) => wire.tool.tool_use_id],
+  ['skill', (wire) => wire.skill],
+  ['task', (wire) => wire.task],
+  ['outcome.duration_ms', (wire) => wire.outcome.duration_ms],
+  ['outcome.is_interrupt', (wire) => wire.outcome.is_interrupt],
+  ['outcome.error_kind', (wire) => wire.outcome.error_kind],
+  ['outcome.denial_kind', (wire) => wire.outcome.denial_kind],
+  ['workspace.repo_id', (wire) => wire.workspace.repo_id],
+  ['workspace.bucket', (wire) => wire.workspace.bucket],
+];
+
+/** The paths of `CAPACITY_FIXED_NULL`, so a test can pin what the rule covers. */
+export const HOOK_CAPACITY_NULL_FIELDS: readonly string[] = CAPACITY_FIXED_NULL.map(([path]) => path);
+
+/**
+ * True only for the producer's complete capacity control row.
+ *
+ * This is the single definition of that shape. `checkActivityContract` refuses a
+ * near miss at the wire, and `hookAdapter.ts` asks this same question before it
+ * turns a row into a halt, so the two can never disagree about what stops the
+ * stream.
+ */
+export function isHookCapacityRow(wire: HookWireEvent): boolean {
+  return (
+    wire.hook_event === null &&
+    wire.activity.kind === HOOK_CAPACITY_ACTIVITY.kind &&
+    wire.activity.facility === HOOK_CAPACITY_ACTIVITY.facility &&
+    wire.activity.label === HOOK_CAPACITY_ACTIVITY.label &&
+    wire.outcome.status === HOOK_CAPACITY_ACTIVITY.status &&
+    wire.agent.parent_session_id === null &&
+    wire.truncated === false &&
+    CAPACITY_FIXED_NULL.every(([, read]) => read(wire) === null)
+  );
+}
 
 /** Producer-side identifier charset (`session_id`, `prompt_id`, `agent.id`, `tool.name`). */
 const HOOK_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -562,21 +628,6 @@ function checkEnum<T extends string>(value: unknown, path: string, allowed: read
   return found;
 }
 
-/** What `checkActivityContract` compares an incoming row against. */
-type ActivitySeen = {
-  hookEvent: string | null;
-  toolName: string | null;
-  toolCategory: HookToolCategory | null;
-  toolMcpServer: string | null;
-  kind: HookActivityKind;
-  facility: HookFacility;
-  label: string;
-  status: HookOutcomeStatus | null;
-  sessionId: string | null;
-  agentId: string | null;
-  agentType: string | null;
-};
-
 /**
  * Resolves the one activity tuple the producer emits for a tool row.
  *
@@ -621,7 +672,7 @@ function toolActivityContract(
  * is mapped, so an unknown event can never reach the reducer, the wire or the
  * screen through this gap.
  */
-function checkActivityContract(seen: ActivitySeen): void {
+function checkActivityContract(wire: HookWireEvent): void {
   // `tool.mcp_server` is not an independent field: the producer computes it from
   // the sanitized tool name with `RE_MCP_SERVER` and emits null for every name
   // that does not match. Any other pairing - a plain tool carrying a server, an
@@ -629,42 +680,57 @@ function checkActivityContract(seen: ActivitySeen): void {
   // `mcp__` prefix presented as MCP - is a row the producer cannot emit, so it
   // is refused here rather than classified. This holds for every row, tool or
   // not: a non-tool event reports no tool, and therefore no server.
-  if (seen.toolMcpServer !== hookMcpServer(seen.toolName)) {
+  if (wire.tool.mcp_server !== hookMcpServer(wire.tool.name)) {
     reject('contract_mismatch', 'tool.mcp_server:not_derived_from_name');
   }
 
-  // The capacity control row. It is the only shape with a null `hook_event`, and
-  // it is only that row if every one of its fixed fields matches.
-  if (seen.hookEvent === null) {
-    compareActivity(HOOK_CAPACITY_ACTIVITY, seen, 'capacity');
-    if (seen.sessionId !== null) reject('contract_mismatch', 'session_id:expected_null_for_capacity');
-    if (seen.agentId !== null) reject('contract_mismatch', 'agent.id:expected_null_for_capacity');
-    if (seen.agentType !== null) reject('contract_mismatch', 'agent.type:expected_null_for_capacity');
+  // The capacity control row. It is the only shape with a null `hook_event`.
+  if (wire.hook_event === null) {
+    checkCapacityContract(wire);
     return;
   }
 
-  const phase = HOOK_TOOL_PHASES.get(seen.hookEvent);
+  const phase = HOOK_TOOL_PHASES.get(wire.hook_event);
   if (phase !== undefined) {
     // The producer always classifies a tool row, even one whose tool it does not
     // know, so the category is required. The *name* is not: an absent name is
     // the producer's own `idle / desk` fallback.
-    if (seen.toolCategory === null) reject('contract_mismatch', 'tool.category:required_for_tool_event');
-    compareActivity(toolActivityContract(phase, seen.toolCategory, seen.toolName), seen, 'tool');
+    if (wire.tool.category === null) reject('contract_mismatch', 'tool.category:required_for_tool_event');
+    compareActivity(toolActivityContract(phase, wire.tool.category, wire.tool.name), wire, 'tool');
     return;
   }
 
-  const fixed = HOOK_FIXED_ACTIVITY.get(seen.hookEvent);
+  const fixed = HOOK_FIXED_ACTIVITY.get(wire.hook_event);
   // Unknown event: no tuple to compare against. The adapter refuses it.
   if (fixed === undefined) return;
-  compareActivity(fixed, seen, 'event');
+  compareActivity(fixed, wire, 'event');
+}
+
+/**
+ * Refuses anything that is not the producer's complete capacity control row.
+ *
+ * A null `hook_event` is only ever the capacity marker, and the marker is built
+ * from constants, so *every* field it fixes has to match. The consequence of
+ * accepting a near miss is not a mis-rendered desk but a permanent halt: the
+ * LIVE namespace stops folding and the rest of the session is lost. That is why
+ * a one-field difference is a per-line rejection here rather than a control
+ * signal - a rejected line costs one row, a wrong halt costs the session.
+ */
+function checkCapacityContract(wire: HookWireEvent): void {
+  compareActivity(HOOK_CAPACITY_ACTIVITY, wire, 'capacity');
+  for (const [path, read] of CAPACITY_FIXED_NULL) {
+    if (read(wire) !== null) reject('contract_mismatch', `${path}:expected_null_for_capacity`);
+  }
 }
 
 /** Field-by-field comparison. The detail names the field and the rule only. */
-function compareActivity(expected: HookActivityContract, seen: ActivitySeen, scope: string): void {
-  if (seen.kind !== expected.kind) reject('contract_mismatch', `activity.kind:not_fixed_for_${scope}`);
-  if (seen.facility !== expected.facility) reject('contract_mismatch', `activity.facility:not_fixed_for_${scope}`);
-  if (seen.label !== expected.label) reject('contract_mismatch', `activity.label:not_fixed_for_${scope}`);
-  if (seen.status !== expected.status) reject('contract_mismatch', `outcome.status:not_fixed_for_${scope}`);
+function compareActivity(expected: HookActivityContract, wire: HookWireEvent, scope: string): void {
+  if (wire.activity.kind !== expected.kind) reject('contract_mismatch', `activity.kind:not_fixed_for_${scope}`);
+  if (wire.activity.facility !== expected.facility) {
+    reject('contract_mismatch', `activity.facility:not_fixed_for_${scope}`);
+  }
+  if (wire.activity.label !== expected.label) reject('contract_mismatch', `activity.label:not_fixed_for_${scope}`);
+  if (wire.outcome.status !== expected.status) reject('contract_mismatch', `outcome.status:not_fixed_for_${scope}`);
 }
 
 /**
@@ -795,22 +861,6 @@ function buildWireEvent(raw: unknown): { wire: HookWireEvent; dropped_keys: stri
   // There is no rule for interpreting a partial event, so it fails closed.
   if (own(raw, 'truncated') !== false) reject('invalid_format', 'truncated:expected_false');
 
-  // Last, because it correlates fields that must each be well formed first: an
-  // unsafe or malformed value is still reported as such, not as a mismatch.
-  checkActivityContract({
-    hookEvent,
-    toolName,
-    toolCategory,
-    toolMcpServer,
-    kind: activityKind,
-    facility: activityFacility,
-    label: activityLabel,
-    status: outcomeStatus,
-    sessionId,
-    agentId,
-    agentType,
-  });
-
   const wire: HookWireEvent = {
     schema_version: schemaVersion,
     sanitizer_version: sanitizerVersion,
@@ -836,6 +886,12 @@ function buildWireEvent(raw: unknown): { wire: HookWireEvent; dropped_keys: stri
     workspace: { repo_id: repoId, bucket },
     truncated: false,
   };
+
+  // Last, and over the assembled record rather than a hand-picked subset, so a
+  // combination rule can see every modelled field. It runs after per-field
+  // validation on purpose: an unsafe or malformed value is still reported as
+  // such, not as a mismatch. The record is discarded when this throws.
+  checkActivityContract(wire);
 
   return { wire, dropped_keys: dropped };
 }

@@ -245,11 +245,24 @@ labelがstate / SSE / 画面へ届く経路は存在しません。
 
 ## capacity marker
 
-正本が定義する **容量上限marker** は、次の形の行 **だけ** です。
+正本の `limit_marker_event` は定数だけから組み立てられます。したがって
+**容量上限marker** は、次の形を **すべて** 満たす行 **だけ** です。
 
-`hook_event: null` / `session_id: null` / `agent.id: null` / `agent.type: null` /
-`activity.kind: "capacity"` / `activity.facility: "desk"` /
-`activity.label: "本日の記録上限に達しました"` / `outcome.status: "limit_reached"`
+| 位置 | 固定値 |
+|---|---|
+| activity tuple | `capacity` / `desk` / `本日の記録上限に達しました` / `limit_reached` |
+| identity | `session_id: null` / `prompt_id: null` / `agent.id: null` / `agent.type: null` |
+| `hook_event` | `null` |
+| session | `session.source: null` / `session.end_reason: null` |
+| tool | `tool.name` / `category` / `mcp_server` / `tool_use_id` すべて `null` |
+| skill / task | `skill: null` / `task: null` |
+| outcome残り | `duration_ms` / `is_interrupt` / `error_kind` / `denial_kind` すべて `null` |
+| workspace | `workspace.repo_id: null` / `workspace.bucket: null` |
+| 全行共通 | `agent.parent_session_id: null` / `truncated: false` |
+
+`schema_version` / `sanitizer_version` / `event_id` / `ts` / `producer` は業務行と同じく
+通常検証します（markerも実値を持ちます）。`sanitizer_version` はここでも
+**observational** で、受理を左右しません。
 
 これは業務eventではありません。「ここから履歴が欠落する」という事実なので、
 **fail-closed control** として扱います。
@@ -259,9 +272,15 @@ labelがstate / SSE / 画面へ届く経路は存在しません。
 - SSEは `fail_closed` frameを送り、`/health` は `fail_closed` になります
 - 画面は閉じた語彙の **固定文言** だけを表示します（marker本文は表示しません）
 
-`hook_event: null` でこの形に **1つでも** 一致しない行（facilityやlabelが違うものを含む）、
-既知の `hook_event` にcapacity signalが混ざった行は、定義の無い形なので **その行をreject** します。
+`hook_event: null` でこの形に **1フィールドでも** 一致しない行、
+既知の `hook_event` にcapacity signalが混ざった行は、定義の無い形なので
+**その行だけをreject** します。marker近似行がhaltを起こすと、1行のmalformedが
+**そのsession以降の履歴全体の喪失** になるため、近似はrejectの側に倒します。
+rejectしても後続の正当な業務行はそのままingestされます。
 haltするのは正本と完全一致したmarkerだけです。
+
+判定は `isHookCapacityRow`（`src/domain/hookWire.ts`）が唯一の定義で、
+wire検証もadapterのhalt判定も同じ関数を参照します。
 
 ## reject / halt の一覧
 

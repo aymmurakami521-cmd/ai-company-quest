@@ -10,8 +10,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { HookFacility, HookToolCategory } from '../src/domain/hookWire.ts';
+import type { HookFacility, HookToolCategory, HookWireEvent } from '../src/domain/hookWire.ts';
 import {
+  HOOK_CAPACITY_NULL_FIELDS,
   HOOK_FIXED_ACTIVITY,
   HOOK_MCP_TOOL_CLASS,
   HOOK_POST_TOOL_LABELS,
@@ -26,6 +27,7 @@ import {
   HOOK_WIRE_KEYS,
   hookMcpServer,
   hookToolClass,
+  isHookCapacityRow,
   validateHookWireLine,
   validateHookWireObject,
 } from '../src/domain/hookWire.ts';
@@ -807,6 +809,168 @@ test("the capacity control row is accepted only in the producer's exact shape", 
     if (!result.ok) {
       assert.equal(result.reason, 'contract_mismatch');
       assert.equal(result.detail, detail);
+    }
+  }
+});
+
+/**
+ * One near miss per field the producer's `limit_marker_event` fixes to null.
+ *
+ * The marker is the only row that permanently halts LIVE ingestion, so it is
+ * checked field by field rather than by the handful of fields that make it
+ * recognisable. The table below is asserted to cover the module's own list, so a
+ * field added to the contract without a case here fails this test.
+ */
+const CAPACITY_NULL_CASES: ReadonlyArray<{ path: string; override: Partial<HookWireEvent>; detail: string }> = [
+  { path: 'session_id', override: { session_id: 'sess-1' }, detail: 'session_id:expected_null_for_capacity' },
+  { path: 'prompt_id', override: { prompt_id: 'prompt-1' }, detail: 'prompt_id:expected_null_for_capacity' },
+  {
+    path: 'agent.id',
+    override: { agent: { id: 'agent-1', type: null, parent_session_id: null } },
+    detail: 'agent.id:expected_null_for_capacity',
+  },
+  {
+    path: 'agent.type',
+    override: { agent: { id: null, type: 'backend-engineer', parent_session_id: null } },
+    detail: 'agent.type:expected_null_for_capacity',
+  },
+  {
+    path: 'session.source',
+    override: { session: { source: 'startup', end_reason: null } },
+    detail: 'session.source:expected_null_for_capacity',
+  },
+  {
+    path: 'session.end_reason',
+    override: { session: { source: null, end_reason: 'clear' } },
+    detail: 'session.end_reason:expected_null_for_capacity',
+  },
+  {
+    path: 'tool.name',
+    override: { tool: { name: 'Bash', category: null, mcp_server: null, tool_use_id: null } },
+    detail: 'tool.name:expected_null_for_capacity',
+  },
+  {
+    path: 'tool.category',
+    override: { tool: { name: null, category: 'exec', mcp_server: null, tool_use_id: null } },
+    detail: 'tool.category:expected_null_for_capacity',
+  },
+  {
+    path: 'tool.mcp_server',
+    override: { tool: { name: null, category: null, mcp_server: 'github', tool_use_id: null } },
+    // A server with no name to derive it from is refused by the MCP correlation
+    // rule first. Either way the row is a content-free `contract_mismatch` and
+    // never a halt, which is what this case exists to pin.
+    detail: 'tool.mcp_server:not_derived_from_name',
+  },
+  {
+    path: 'tool.tool_use_id',
+    override: { tool: { name: null, category: null, mcp_server: null, tool_use_id: 'tool-1' } },
+    detail: 'tool.tool_use_id:expected_null_for_capacity',
+  },
+  { path: 'skill', override: { skill: { name: 'deploy', source: null } }, detail: 'skill:expected_null_for_capacity' },
+  { path: 'task', override: { task: { id: 'task-1' } }, detail: 'task:expected_null_for_capacity' },
+  {
+    path: 'outcome.duration_ms',
+    override: { outcome: { ...CAPACITY_MARKER.outcome, duration_ms: 1234 } },
+    detail: 'outcome.duration_ms:expected_null_for_capacity',
+  },
+  {
+    path: 'outcome.is_interrupt',
+    override: { outcome: { ...CAPACITY_MARKER.outcome, is_interrupt: true } },
+    detail: 'outcome.is_interrupt:expected_null_for_capacity',
+  },
+  {
+    path: 'outcome.error_kind',
+    override: { outcome: { ...CAPACITY_MARKER.outcome, error_kind: 'rate_limit' } },
+    detail: 'outcome.error_kind:expected_null_for_capacity',
+  },
+  {
+    path: 'outcome.denial_kind',
+    override: { outcome: { ...CAPACITY_MARKER.outcome, denial_kind: 'other' } },
+    detail: 'outcome.denial_kind:expected_null_for_capacity',
+  },
+  {
+    path: 'workspace.repo_id',
+    override: { workspace: { repo_id: '0123abcd', bucket: null } },
+    detail: 'workspace.repo_id:expected_null_for_capacity',
+  },
+  {
+    path: 'workspace.bucket',
+    override: { workspace: { repo_id: null, bucket: 'scripts' } },
+    detail: 'workspace.bucket:expected_null_for_capacity',
+  },
+];
+
+test('a capacity row that reports anything at all is not the control row', () => {
+  assert.deepEqual(
+    CAPACITY_NULL_CASES.map((testCase) => testCase.path),
+    [...HOOK_CAPACITY_NULL_FIELDS],
+    'every fixed-null field of the marker needs a case',
+  );
+
+  assert.equal(isHookCapacityRow(CAPACITY_MARKER), true, 'the pinned marker is the control row');
+
+  for (const { path, override, detail } of CAPACITY_NULL_CASES) {
+    const row = { ...CAPACITY_MARKER, ...override };
+    const result = validateHookWireObject(row);
+    assert.equal(result.ok, false, `a marker reporting ${path} must be refused`);
+    if (!result.ok) {
+      assert.equal(result.reason, 'contract_mismatch', path);
+      assert.equal(result.detail, detail, path);
+    }
+    // The same shape is not a halt either, whichever way it is asked.
+    assert.equal(isHookCapacityRow(row), false, `${path} must not read as the control row`);
+  }
+});
+
+test('a capacity row is refused for a mixture of reports, and for a partial record', () => {
+  // Several fields at once: still one content-free rejection, still not a halt.
+  const mixed: HookWireEvent = {
+    ...CAPACITY_MARKER,
+    prompt_id: 'prompt-1',
+    task: { id: 'task-1' },
+    workspace: { repo_id: '0123abcd', bucket: 'scripts' },
+  };
+  const mixedResult = validateHookWireObject(mixed);
+  assert.equal(mixedResult.ok, false);
+  if (!mixedResult.ok) {
+    assert.equal(mixedResult.reason, 'contract_mismatch');
+    assert.equal(mixedResult.detail, 'prompt_id:expected_null_for_capacity', 'the first fixed field decides');
+  }
+  assert.equal(isHookCapacityRow(mixed), false);
+
+  // The two fields that are fixed for *every* row are still caught by their own
+  // per-field rules, so they never reach the capacity comparison.
+  for (const [override, reason, detail] of [
+    [{ agent: { id: null, type: null, parent_session_id: 'sess-0' } }, 'invalid_format', 'agent.parent_session_id:expected_null'],
+    [{ truncated: true }, 'invalid_format', 'truncated:expected_false'],
+  ] as ReadonlyArray<[Record<string, unknown>, string, string]>) {
+    const result = validateHookWireObject({ ...CAPACITY_MARKER, ...override });
+    assert.equal(result.ok, false, detail);
+    if (!result.ok) {
+      assert.equal(result.reason, reason);
+      assert.equal(result.detail, detail);
+    }
+  }
+
+  // `sanitizer_version` stays observational: the marker is still the marker.
+  const otherSanitizer = { ...CAPACITY_MARKER, sanitizer_version: 99 };
+  const sanitizerResult = validateHookWireObject(otherSanitizer);
+  assert.equal(sanitizerResult.ok, true, 'sanitizer_version never gates acceptance');
+  assert.equal(isHookCapacityRow(otherSanitizer), true);
+});
+
+test('a refused capacity row never names the value it reported', () => {
+  const row = {
+    ...CAPACITY_MARKER,
+    session_id: 'sess-secret-1',
+    workspace: { repo_id: 'repo-secret', bucket: 'bucket-secret' },
+  };
+  const result = validateHookWireObject(row);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    for (const value of ['sess-secret-1', 'repo-secret', 'bucket-secret', CAPACITY_MARKER.activity.label]) {
+      assert.equal(result.detail.includes(value), false, `the detail must not carry ${value}`);
     }
   }
 });

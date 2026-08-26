@@ -552,6 +552,103 @@ test('only the exact capacity row halts LIVE; a near miss is refused line by lin
   assert.equal(halting.stats.halt_reason, 'producer_capacity:producer:limit_reached');
 });
 
+test('a capacity row that reports anything does not stop the session', async () => {
+  // One near miss per field the producer's marker fixes to null. Each of these
+  // is a null-hook row the producer cannot emit; reading any of them as the
+  // control signal would end the session's history at that line.
+  const reporting: ReadonlyArray<Record<string, unknown>> = [
+    { session_id: 'sess-1' },
+    { prompt_id: 'prompt-1' },
+    { agent: { id: 'agent-1', type: null, parent_session_id: null } },
+    { agent: { id: null, type: 'backend-engineer', parent_session_id: null } },
+    { session: { source: 'startup', end_reason: null } },
+    { session: { source: null, end_reason: 'clear' } },
+    { tool: { name: 'Bash', category: null, mcp_server: null, tool_use_id: null } },
+    { tool: { name: null, category: 'exec', mcp_server: null, tool_use_id: null } },
+    { tool: { name: null, category: null, mcp_server: 'github', tool_use_id: null } },
+    { tool: { name: null, category: null, mcp_server: null, tool_use_id: 'tool-1' } },
+    { skill: { name: 'deploy', source: null } },
+    { task: { id: 'task-1' } },
+    { outcome: { ...CAPACITY_MARKER.outcome, duration_ms: 1234 } },
+    { outcome: { ...CAPACITY_MARKER.outcome, is_interrupt: true } },
+    { outcome: { ...CAPACITY_MARKER.outcome, error_kind: 'rate_limit' } },
+    { outcome: { ...CAPACITY_MARKER.outcome, denial_kind: 'other' } },
+    { workspace: { repo_id: '0123abcd', bucket: null } },
+    { workspace: { repo_id: null, bucket: 'scripts' } },
+  ];
+
+  const store = liveStore();
+  await ingestThroughTailer(store, [
+    ...reporting.map((override, index) =>
+      JSON.stringify({ ...CAPACITY_MARKER, ...override, event_id: hookEventId(120 + index) }),
+    ),
+    // A business row after every one of them still ingests, which is the whole
+    // point: a malformed control line costs one row, not the rest of the session.
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(160), hook_event: 'SessionStart' })),
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(161), hook_event: 'PostToolUse' })),
+  ]);
+
+  assert.equal(store.halted, false, 'no near miss may halt LIVE');
+  assert.equal(store.stats.rejected_by_reason['contract_mismatch'], reporting.length);
+  assert.equal(store.stats.rejected_by_reason['producer_capacity'], undefined);
+  assert.equal(store.stats.accepted, 2, 'the business rows after the refused lines still folded');
+
+  // Only the complete marker is the control signal, and it still is.
+  const halting = liveStore();
+  await ingestThroughTailer(halting, [
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(170), hook_event: 'SessionStart' })),
+    JSON.stringify(CAPACITY_MARKER),
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(171), hook_event: 'PostToolUse' })),
+  ]);
+  assert.equal(halting.halted, true);
+  assert.equal(halting.stats.halt_reason, 'producer_capacity:producer:limit_reached');
+  assert.equal(halting.stats.accepted, 1, 'nothing after the real marker is read');
+});
+
+test('what a refused capacity row reported never reaches the state, /health or the screen', async () => {
+  const live = liveStore();
+  const demo = new NamespaceStore({ namespace: 'demo' });
+  const server = new QuestServer({ stores: { live, demo }, heartbeatMs: 60_000 });
+  const address = await server.listen(0);
+
+  try {
+    const sse = await openSse(address.port, '/events/live');
+    await sse.waitFor((text) => text.includes('event: snapshot'));
+
+    await ingestThroughTailer(live, [
+      JSON.stringify(makeHookEvent({ event_id: hookEventId(180), hook_event: 'SessionStart' })),
+      // A null-hook row dressed as the marker, carrying content it must not
+      // publish and a session it must not attribute itself to.
+      JSON.stringify({
+        ...CAPACITY_MARKER,
+        event_id: hookEventId(181),
+        session_id: 'sess-leaked-1',
+        skill: { name: 'leaked-skill-name', source: null },
+        workspace: { repo_id: 'leaked-repo', bucket: 'leaked-bucket' },
+      }),
+      JSON.stringify(makeHookEvent({ event_id: hookEventId(182), hook_event: 'PostToolUse' })),
+    ]);
+
+    assert.equal(live.halted, false, 'the near miss must not freeze the stream');
+    assert.equal(live.stats.accepted, 2);
+
+    const health = await httpGet(address.port, '/health');
+    const client = foldClient(sse.text());
+    const served = JSON.stringify(live.state);
+    for (const value of ['sess-leaked-1', 'leaked-skill-name', 'leaked-repo', 'leaked-bucket']) {
+      assert.equal(sse.text().includes(value), false, `${value} must not reach the SSE wire`);
+      assert.equal(health.body.includes(value), false, `${value} must not reach /health`);
+      assert.equal(served.includes(value), false, `${value} must not reach the reduced state`);
+      assert.equal(JSON.stringify(client).includes(value), false, `${value} must not reach the screen`);
+    }
+    assert.equal(selectHeader(client).halted, false);
+
+    sse.close();
+  } finally {
+    await server.close();
+  }
+});
+
 // ------------------------------------------------------------- LIVE vs DEMO ---
 
 test('DEMO keeps its own contract, and the two stores never share one', async () => {
