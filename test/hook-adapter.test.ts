@@ -124,6 +124,82 @@ test('a null session_id is refused for every known hook_event, deterministically
   }
 });
 
+test('a subagent lifecycle row without a subagent is refused, never folded onto main', () => {
+  for (const hookEvent of ['SubagentStart', 'SubagentStop']) {
+    const adapted = adaptHookEvent(
+      makeHookEvent({ hook_event: hookEvent, agent: { id: null, type: null, parent_session_id: null } }),
+    );
+    assert.equal(adapted.kind, 'reject', `${hookEvent} with no subagent must be refused`);
+    if (adapted.kind !== 'reject') continue;
+    assert.equal(adapted.reason, 'identity_conflict');
+    assert.equal(adapted.detail, 'agent.id:required_for_subagent_event');
+  }
+});
+
+test('a main-orchestrator lifecycle row carrying a subagent id is refused', () => {
+  for (const hookEvent of ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop', 'StopFailure']) {
+    const adapted = adaptHookEvent(
+      makeHookEvent({
+        hook_event: hookEvent,
+        agent: { id: 'agent-1', type: 'backend-engineer', parent_session_id: null },
+      }),
+    );
+    assert.equal(adapted.kind, 'reject', `${hookEvent} must not be attributed to a subagent`);
+    if (adapted.kind !== 'reject') continue;
+    assert.equal(adapted.reason, 'identity_conflict');
+    assert.equal(adapted.detail, 'agent.id:not_allowed_for_main_event');
+  }
+});
+
+test('rows either actor can emit keep both attributions', () => {
+  const shared = [
+    'PreToolUse',
+    'PostToolUse',
+    'PostToolUseFailure',
+    'PermissionRequest',
+    'PermissionDenied',
+    'Notification',
+    'PreCompact',
+    'TaskCreated',
+    'TaskCompleted',
+  ];
+  for (const hookEvent of shared) {
+    const main = adaptHookEvent(makeHookEvent({ hook_event: hookEvent }));
+    assert.equal(main.kind, 'event', `${hookEvent} must map for the orchestrator`);
+    if (main.kind === 'event') assert.equal(main.event.agent_id, 'main');
+
+    const subagent = adaptHookEvent(
+      makeHookEvent({
+        hook_event: hookEvent,
+        agent: { id: 'agent-1', type: 'backend-engineer', parent_session_id: null },
+      }),
+    );
+    assert.equal(subagent.kind, 'event', `${hookEvent} must map for a subagent`);
+    if (subagent.kind !== 'event') continue;
+    assert.equal(subagent.event.agent_id, 'agent-1');
+    assert.equal(subagent.event.runtime_agent_type, 'backend-engineer');
+    assert.equal(subagent.event.agent_role, null, 'a runtime agent type is never an org role');
+  }
+});
+
+test('the valid main and subagent lifecycle rows still map', () => {
+  const main = adaptHookEvent(makeHookEvent({ hook_event: 'SessionStart' }));
+  assert.equal(main.kind, 'event');
+  if (main.kind === 'event') {
+    assert.equal(main.event.agent_id, 'main');
+    assert.equal(main.event.event_type, 'session_start');
+    assert.equal(main.event.runtime_agent_type, null);
+  }
+
+  const subagent = adaptHookEvent(makeHookEvent({ hook_event: 'SubagentStop' }));
+  assert.equal(subagent.kind, 'event');
+  if (subagent.kind === 'event') {
+    assert.equal(subagent.event.agent_id, 'agent-1');
+    assert.equal(subagent.event.event_type, 'agent_stop');
+    assert.equal(subagent.event.status, 'stopped');
+  }
+});
+
 // ------------------------------------------------------------------ capacity ---
 
 test('the capacity marker becomes a control signal, never a business event', () => {
@@ -148,7 +224,14 @@ test('a null hook_event that is not the capacity marker is refused', () => {
     assert.equal(partial.detail, 'hook_event:null_not_capacity_marker');
   }
 
-  const plainNull = adaptHookEvent(makeHookEvent({ hook_event: null }));
+  // A null hook event with an ordinary activity is not a control row either.
+  const plainNull = adaptHookEvent(
+    makeHookEvent({
+      hook_event: null,
+      activity: { kind: 'session', facility: 'desk', label: 'セッションが開始されました' },
+      outcome: { status: 'started', duration_ms: null, is_interrupt: null, error_kind: null, denial_kind: null },
+    }),
+  );
   assert.equal(plainNull.kind, 'reject');
   if (plainNull.kind === 'reject') assert.equal(plainNull.detail, 'hook_event:null_not_capacity_marker');
 });

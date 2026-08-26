@@ -60,7 +60,7 @@ top-level keyは **常に全て存在** します。値が無い場合は明示�
 | `tool` | object | `{name, category, mcp_server, tool_use_id}` |
 | `skill` | object \| null | `{name:string, source:null}` |
 | `task` | object \| null | `{id:string\|null}` |
-| `activity` | object | `{kind, facility, label}`（全て非null） |
+| `activity` | object | `{kind, facility, label}`（全て非null）。**下の固定tupleと完全一致のみ受理** |
 | `outcome` | object | `{status, duration_ms, is_interrupt, error_kind, denial_kind}` |
 | `workspace` | object | `{repo_id, bucket}` |
 | `truncated` | boolean | `false` 固定（`true` はfail-closed） |
@@ -78,7 +78,7 @@ top-level keyは **常に全て存在** します。値が無い場合は明示�
 | `session_id` | `session_id` | **非nullのみ**。`null` は行ごとreject |
 | `ts` | `ts` | そのまま |
 | `event_type` | `hook_event` | 下のlifecycle table |
-| `agent_id` | `agent.id` | `null` のときのみ `"main"`（正本の同定規則 `{session_id}:main`） |
+| `agent_id` | `agent.id` | `null` のときのみ `"main"`（正本の同定規則 `{session_id}:main`）。**identity不整合の行には適用しない**（下表） |
 | `agent_role` | — | 常に `null`。roleはActorDirectoryだけが与える |
 | `runtime_agent_type` | `agent.type` | そのまま保持。**roleではない**ため `agent_role` へ入れない |
 | `producer_seq` | — | 常に `null`（producerはsequenceを出さない） |
@@ -86,7 +86,7 @@ top-level keyは **常に全て存在** します。値が無い場合は明示�
 | `tool_name` | `tool.name` | そのまま |
 | `duration_ms` | `outcome.duration_ms` | そのまま（0..86400000の整数） |
 | `token_count` | — | 常に `null`（producerはtoken情報を出さない） |
-| `summary` | `activity.label` | producerの固定文言表の値。内部validatorのunsafe scanを通す |
+| `summary` | `activity.label` | producerの固定文言表と **完全一致した値のみ**（下表）。内部validatorのunsafe scanも通す |
 
 ### lifecycle table（`hook_event` → `event_type` / `status`）
 
@@ -117,6 +117,66 @@ hookの結果を表す語彙で、内部の `status` はデスクの状態を表
 Claude内部のbookkeepingであり業務taskではないため、reducerは解釈せず
 `counters.ignored` に計上します。
 
+### 固定activity tuple（`activity.label` はsanitized free textではない）
+
+`activity.label` は外部からの文字列で **唯一画面に出るもの**（内部 `summary`）です。
+長さ・control文字・unsafe patternのcheckだけでは「無害に見える任意の文」（生promptや
+command片）が通ってしまうため、正本の **固定文言表と完全一致** することを要求します。
+labelは単独では判定せず、`activity.kind` / `activity.facility` / `outcome.status` と
+**組で** 一致する必要があります（別eventや別categoryの正しいlabelも拒否されます）。
+
+| `hook_event` | `activity.kind` | `activity.facility` | `activity.label` | `outcome.status` |
+|---|---|---|---|---|
+| `SessionStart` | `session` | `desk` | セッションが開始されました | `started` |
+| `SessionEnd` | `session` | `desk` | セッションが終了しました | `ok` |
+| `SubagentStart` | `delegate` | `meeting` | 専門Agentが起動しました | `started` |
+| `SubagentStop` | `delegate` | `meeting` | 専門Agentの処理が終了しました | `ok` |
+| `UserPromptSubmit` | `idle` | `desk` | イベントを記録しました | `started` |
+| `Stop` | `session` | `desk` | 応答処理が終了しました | `ok` |
+| `StopFailure` | `session` | `desk` | APIエラーで応答が終了しました | `error` |
+| `PermissionRequest` | `permission` | `desk` | 権限確認が発生しました | `waiting` |
+| `PermissionDenied` | `permission` | `desk` | 自動モードで実行が許可されませんでした | `auto_denied` |
+| `Notification` | `session` | `desk` | 通知が発生しました | `waiting` |
+| `PreCompact` | `session` | `desk` | コンテキスト整理が開始されました | `started` |
+| `TaskCreated` | `task` | `desk` | 内部タスクが作成されました | `started` |
+| `TaskCompleted` | `task` | `desk` | 内部タスクが完了しました | `ok` |
+
+tool eventは **検証済みの** `tool.category` / `tool.name` とphaseから一意に決まります。
+`tool.category` と `tool.name` は非nullが必須です（`activity.kind` = category）。
+
+| `tool.category` | `facility` | `PreToolUse`（`started`） | `PostToolUse`（`ok`） |
+|---|---|---|---|
+| `read` | `shelf` | 資料を確認中 | 資料の参照を確認しました |
+| `write` | `desk` | 作業内容を編集中 | 変更処理を確認しました |
+| `exec` | `terminal` | コマンドを実行中 | ターミナル処理を確認しました |
+| `search` | `search-terminal` | 情報を検索中 | 検索処理を確認しました |
+| `mcp` | `antenna` | 外部サービスと通信中 | 外部サービスとの通信を確認しました |
+| `delegate` | `meeting` | 担当者に作業を依頼中 | 委任処理を確認しました |
+| `skill` | `portal` | 手順書を実行中 | 手順書の実行を確認しました |
+| `idle` | `desk` | 作業中 | ツール処理を確認しました |
+
+`tool.name` が `WebSearch` / `WebFetch` の場合のみ、labelは category ではなく名前で決まります
+（`外部資料を調査中` / `外部調査の完了を確認しました`）。`PostToolUseFailure` は category に依らず
+`ツール処理が失敗しました`（`error`）です。
+
+known table外の `hook_event` には固定tupleがありません。これは意図的で、
+そのeventは `hookAdapter.ts` が `unsupported_hook_event` として **mapping前にreject** するため、
+labelがstate / SSE / 画面へ届く経路は存在しません。
+
+### `hook_event` と agent identityの整合（adapter, mapping前）
+
+`agent.id` が `null` のときの `"main"` は正本の同定規則ですが、**適用できる行は決まっています**。
+
+| `hook_event` | 許される identity |
+|---|---|
+| `SubagentStart` / `SubagentStop` | `agent.id` **非null必須**（subagent自身のlifecycle） |
+| `SessionStart` / `SessionEnd` / `UserPromptSubmit` / `Stop` / `StopFailure` | `agent.id` **null必須**（sessionとmainの行） |
+| tool / permission / notification / precompact / task | どちらでも可（`null` は `"main"`） |
+
+違反した行は `identity_conflict` でrejectします。`agent.id: null` の `SubagentStart` を
+`"main"` として畳み込むと、orchestratorのデスクが動いた上に本来のsubagentが消えるためです。
+`agent.type` からroleを推定しないことは従来どおりです（`agent_role` は常に `null`）。
+
 ## dropするfield（受け皿が無いもの）
 
 意味を保てる受け皿が内部modelに無いため、**近似せずdrop** します。raw objectのspreadは
@@ -133,8 +193,11 @@ Claude内部のbookkeepingであり業務taskではないため、reducerは解�
 
 ## capacity marker
 
-`hook_event: null` かつ `activity.kind: "capacity"` かつ `outcome.status: "limit_reached"`
-の3点が揃った行は、正本が定義する **容量上限marker** です。
+正本が定義する **容量上限marker** は、次の形の行 **だけ** です。
+
+`hook_event: null` / `session_id: null` / `agent.id: null` / `agent.type: null` /
+`activity.kind: "capacity"` / `activity.facility: "desk"` /
+`activity.label: "本日の記録上限に達しました"` / `outcome.status: "limit_reached"`
 
 これは業務eventではありません。「ここから履歴が欠落する」という事実なので、
 **fail-closed control** として扱います。
@@ -144,8 +207,9 @@ Claude内部のbookkeepingであり業務taskではないため、reducerは解�
 - SSEは `fail_closed` frameを送り、`/health` は `fail_closed` になります
 - 画面は閉じた語彙の **固定文言** だけを表示します（marker本文は表示しません）
 
-`hook_event: null` でこの3点が揃わない行、既知の `hook_event` にcapacity signalが
-混ざった行は、定義の無い形なので **reject** します。
+`hook_event: null` でこの形に **1つでも** 一致しない行（facilityやlabelが違うものを含む）、
+既知の `hook_event` にcapacity signalが混ざった行は、定義の無い形なので **その行をreject** します。
+haltするのは正本と完全一致したmarkerだけです。
 
 ## reject / halt の一覧
 
@@ -159,11 +223,14 @@ Claude内部のbookkeepingであり業務taskではないため、reducerは解�
 | 値域外・pattern不一致・`truncated:true` | その行をreject | `invalid_format` |
 | 長さ超過 | その行をreject | `field_too_long` |
 | 絶対path・shell command・credential様の文字列 | その行をreject | `unsafe_content` |
+| 固定activity tuple不一致・capacity marker不一致 | その行をreject | `contract_mismatch` |
 | `session_id: null` | その行をreject（sentinelを作らない） | `unattributable` |
 | known table外・`null`（非marker）の `hook_event` | その行をreject | `unsupported_hook_event` |
+| `hook_event` と agent identityの矛盾 | その行をreject | `identity_conflict` |
 
 reject detailは **field名とrule名だけ** です。失敗した値は含めません
-（例 `activity.label:posix_path`、`hook_event:not_in_known_table`）。
+（例 `activity.label:posix_path`、`activity.label:not_fixed_for_event`、
+`agent.id:required_for_subagent_event`、`hook_event:not_in_known_table`）。
 
 ## 保存・表示・logしないもの
 

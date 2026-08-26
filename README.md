@@ -313,11 +313,13 @@ replay buffer、subscriber listのいずれも共有しません。
 |------|------|
 | `QUEST_INPUT_PATH` 未設定 | LIVEを起動しない（exit 1） |
 | `schema_version` が2以外（LIVE） | ingestを即時halt。以降の行は全て拒否し、`/health` は `fail_closed` |
-| producerのcapacity marker（LIVE） | ingestを即時halt（`producer_capacity`）。markerは業務eventとして畳み込まず、履歴欠落を固定文言で表示 |
+| producerのcapacity marker（LIVE） | ingestを即時halt（`producer_capacity`）。正本と完全一致した行だけがmarkerで、markerは業務eventとして畳み込まず、履歴欠落を固定文言で表示 |
 | state保持上限に到達（LIVE / DEMO両方） | ingestを即時halt。上限超過のeventは適用せず、既存stateは削除も置換もしない |
 | `producer.kind` / `producer.env` 不一致（LIVE） | その行だけ拒否（`unsupported_producer`） |
 | `session_id` が `null`（LIVE） | その行だけ拒否（`unattributable`）。sentinelは作らない |
 | known table外の `hook_event`（LIVE） | その行だけ拒否（`unsupported_hook_event`）。意味を推測しない |
+| `activity` が正本の固定tupleと不一致（LIVE） | その行だけ拒否（`contract_mismatch`）。`activity.label` は自由記述として受理しない |
+| `hook_event` とagent identityの矛盾（LIVE） | その行だけ拒否（`identity_conflict`）。`agent.id: null` を無条件に `main` としない |
 | malformed JSON / 契約key欠落 / 型不一致 | その行だけ拒否・理由別に計数 |
 | 行がoversized | 破棄・計数（次のnewlineまでskip） |
 | 絶対path・shell command・credential様の文字列 | その行を拒否（修復や部分redactはしない） |

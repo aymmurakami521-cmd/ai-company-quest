@@ -43,7 +43,12 @@ export type HookAdapterRejectReason =
   /** `session_id` was null: the row cannot be attributed to a session. */
   | 'unattributable'
   /** `hook_event` is outside the known table, or the capacity shape is mixed. */
-  | 'unsupported_hook_event';
+  | 'unsupported_hook_event'
+  /**
+   * The event and the agent identity disagree: a subagent lifecycle row with no
+   * subagent, or a main-orchestrator lifecycle row carrying a subagent id.
+   */
+  | 'identity_conflict';
 
 export type HookAdaptation =
   | { kind: 'event'; event: SanitizedEvent }
@@ -91,6 +96,29 @@ export const HOOK_EVENT_LIFECYCLE: ReadonlyMap<string, Lifecycle> = new Map<stri
   ['TaskCompleted', { event_type: INTERNAL_TASK_EVENT_TYPE, status: 'ok' }],
 ]);
 
+/**
+ * Rows the producer only emits for a subagent. They describe that subagent's
+ * own lifecycle, so a null `agent.id` is not "the orchestrator" here - it is a
+ * row whose subject is missing.
+ */
+export const SUBAGENT_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set(['SubagentStart', 'SubagentStop']);
+
+/**
+ * Rows the producer only emits for the session's main orchestrator. The session
+ * lifecycle and the prompt/response cycle belong to the session itself, so a
+ * subagent id on one of them is a contradiction rather than an attribution.
+ *
+ * Everything else (tool use, permission, notification, compaction, internal
+ * tasks) is emitted by either, and keeps the canonical `main` fallback.
+ */
+export const MAIN_ONLY_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set([
+  'SessionStart',
+  'SessionEnd',
+  'UserPromptSubmit',
+  'Stop',
+  'StopFailure',
+]);
+
 /** True for the producer's capacity marker: a null hook event, kind and status. */
 export function isCapacityMarker(wire: HookWireEvent): boolean {
   return wire.hook_event === null && wire.activity.kind === 'capacity' && wire.outcome.status === 'limit_reached';
@@ -131,6 +159,18 @@ export function adaptHookEvent(wire: HookWireEvent): HookAdaptation {
     return { kind: 'reject', reason: 'unattributable', detail: 'session_id:null' };
   }
 
+  // Identity before mapping. The `main` fallback below is an identity rule of
+  // the producer contract, and it only holds where the contract says the row can
+  // be the orchestrator's: applying it to a subagent lifecycle row with a
+  // missing id would move the orchestrator's desk and lose the subagent
+  // entirely, which is worse than not rendering the row at all.
+  if (SUBAGENT_LIFECYCLE_EVENTS.has(wire.hook_event) && wire.agent.id === null) {
+    return { kind: 'reject', reason: 'identity_conflict', detail: 'agent.id:required_for_subagent_event' };
+  }
+  if (MAIN_ONLY_LIFECYCLE_EVENTS.has(wire.hook_event) && wire.agent.id !== null) {
+    return { kind: 'reject', reason: 'identity_conflict', detail: 'agent.id:not_allowed_for_main_event' };
+  }
+
   const event: SanitizedEvent = {
     schema_version: SUPPORTED_SCHEMA_VERSION,
     sanitizer_version: wire.sanitizer_version,
@@ -140,7 +180,8 @@ export function adaptHookEvent(wire: HookWireEvent): HookAdaptation {
     event_type: lifecycle.event_type,
     // The producer identifies the main orchestrator as `{session_id}:main` and
     // leaves `agent.id` null for it. That is an identity rule from the contract,
-    // not an inference about what the agent is.
+    // not an inference about what the agent is - and the check above has already
+    // established that this row is one the rule may be applied to.
     agent_id: wire.agent.id ?? MAIN_AGENT_ID,
     // Never from `agent.type`. A runtime agent type is not an org role, and this
     // codebase does not invent roles; the actor directory is the only source.

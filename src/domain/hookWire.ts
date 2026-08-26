@@ -18,6 +18,9 @@
  *   `null`. Values outside the documented domains are fail-closed.
  * - `producer.kind` / `producer.env` are checked explicitly. A payload that does
  *   not announce itself as a local Claude Code hook is refused outright.
+ * - `activity` is NOT free-form sanitized text. The producer emits a fixed tuple
+ *   per event, and this module accepts only that tuple; see
+ *   `HOOK_FIXED_ACTIVITY` and `checkActivityContract`.
  * - The returned object is built key by key. Producer objects are never spread,
  *   so a field this module does not model cannot reach any consumer.
  * - Rejection details name a field path and a rule. They never contain a value.
@@ -95,7 +98,13 @@ export type HookWireRejectReason =
   | 'type_error'
   | 'invalid_format'
   | 'field_too_long'
-  | 'unsafe_content';
+  | 'unsafe_content'
+  /**
+   * Every field is individually well formed, but the combination is not one the
+   * producer emits: an activity tuple that does not belong to this event, or a
+   * capacity marker that is not the producer's capacity marker.
+   */
+  | 'contract_mismatch';
 
 export type HookWireResult =
   | { ok: true; wire: HookWireEvent; dropped_keys: string[] }
@@ -192,6 +201,135 @@ export const HOOK_DENIAL_KINDS: readonly HookDenialKind[] = [
   'unevaluable',
   'other',
 ];
+
+// ------------------------------------------------- the fixed activity table ---
+
+/**
+ * The producer's fixed activity tuple for one event.
+ *
+ * `activity.label` is the only external string that becomes user-visible, so it
+ * is not treated as sanitized free text: the producer picks it from a closed
+ * phrase table, and this consumer accepts nothing else. A label is therefore
+ * only ever accepted together with the `kind`, `facility` and `outcome.status`
+ * it is emitted with, which also rules out a valid phrase copied onto a
+ * different event or a different tool category.
+ */
+export type HookActivityContract = {
+  kind: HookActivityKind;
+  facility: HookFacility;
+  label: string;
+  status: HookOutcomeStatus;
+};
+
+/**
+ * The fixed tuple of every non-tool `hook_event`, from the pinned producer
+ * (`aymmurakami521-cmd/ai-company@3306b2b3c07a17a7d1de2c66e6669f0e6bb02a2f`).
+ *
+ * `UserPromptSubmit` carries the producer's generic fallback tuple: it reports
+ * no tool, so the producer labels it with its default phrase rather than a
+ * tool phrase.
+ *
+ * A `Map`, not an object literal: the key is stream content and a lookup must
+ * never answer with an inherited `Object.prototype` member.
+ */
+export const HOOK_FIXED_ACTIVITY: ReadonlyMap<string, HookActivityContract> = new Map<string, HookActivityContract>([
+  ['SessionStart', { kind: 'session', facility: 'desk', label: 'セッションが開始されました', status: 'started' }],
+  ['SessionEnd', { kind: 'session', facility: 'desk', label: 'セッションが終了しました', status: 'ok' }],
+  ['SubagentStart', { kind: 'delegate', facility: 'meeting', label: '専門Agentが起動しました', status: 'started' }],
+  ['SubagentStop', { kind: 'delegate', facility: 'meeting', label: '専門Agentの処理が終了しました', status: 'ok' }],
+  ['UserPromptSubmit', { kind: 'idle', facility: 'desk', label: 'イベントを記録しました', status: 'started' }],
+  ['Stop', { kind: 'session', facility: 'desk', label: '応答処理が終了しました', status: 'ok' }],
+  ['StopFailure', { kind: 'session', facility: 'desk', label: 'APIエラーで応答が終了しました', status: 'error' }],
+  ['PermissionRequest', { kind: 'permission', facility: 'desk', label: '権限確認が発生しました', status: 'waiting' }],
+  [
+    'PermissionDenied',
+    { kind: 'permission', facility: 'desk', label: '自動モードで実行が許可されませんでした', status: 'auto_denied' },
+  ],
+  ['Notification', { kind: 'session', facility: 'desk', label: '通知が発生しました', status: 'waiting' }],
+  ['PreCompact', { kind: 'session', facility: 'desk', label: 'コンテキスト整理が開始されました', status: 'started' }],
+  ['TaskCreated', { kind: 'task', facility: 'desk', label: '内部タスクが作成されました', status: 'started' }],
+  ['TaskCompleted', { kind: 'task', facility: 'desk', label: '内部タスクが完了しました', status: 'ok' }],
+]);
+
+/** The three tool phases and the `outcome.status` each one is emitted with. */
+export const HOOK_TOOL_PHASES: ReadonlyMap<string, 'pre' | 'post' | 'failure'> = new Map<
+  string,
+  'pre' | 'post' | 'failure'
+>([
+  ['PreToolUse', 'pre'],
+  ['PostToolUse', 'post'],
+  ['PostToolUseFailure', 'failure'],
+]);
+
+const TOOL_PHASE_STATUS: Record<'pre' | 'post' | 'failure', HookOutcomeStatus> = {
+  pre: 'started',
+  post: 'ok',
+  failure: 'error',
+};
+
+/** Producer label for a tool call that has just started, by tool category. */
+export const HOOK_PRE_TOOL_LABELS: ReadonlyMap<HookToolCategory, string> = new Map<HookToolCategory, string>([
+  ['read', '資料を確認中'],
+  ['write', '作業内容を編集中'],
+  ['exec', 'コマンドを実行中'],
+  ['search', '情報を検索中'],
+  ['mcp', '外部サービスと通信中'],
+  ['delegate', '担当者に作業を依頼中'],
+  ['skill', '手順書を実行中'],
+  ['idle', '作業中'],
+]);
+
+/** Producer label for a tool call that has completed, by tool category. */
+export const HOOK_POST_TOOL_LABELS: ReadonlyMap<HookToolCategory, string> = new Map<HookToolCategory, string>([
+  ['read', '資料の参照を確認しました'],
+  ['write', '変更処理を確認しました'],
+  ['exec', 'ターミナル処理を確認しました'],
+  ['search', '検索処理を確認しました'],
+  ['mcp', '外部サービスとの通信を確認しました'],
+  ['delegate', '委任処理を確認しました'],
+  ['skill', '手順書の実行を確認しました'],
+  ['idle', 'ツール処理を確認しました'],
+]);
+
+/** A failed tool call is labelled by the failure alone, not by its category. */
+export const HOOK_TOOL_FAILURE_LABEL = 'ツール処理が失敗しました';
+
+/** The two web research tools, which the producer labels by name, not category. */
+export const HOOK_RESEARCH_TOOL_NAMES: readonly string[] = ['WebSearch', 'WebFetch'];
+export const HOOK_RESEARCH_PRE_LABEL = '外部資料を調査中';
+export const HOOK_RESEARCH_POST_LABEL = '外部調査の完了を確認しました';
+
+/**
+ * Where a tool category is performed in the office.
+ *
+ * The producer emits `activity.facility` as a function of the tool category. The
+ * two records published verbatim with the contract pin `exec -> terminal` and
+ * `delegate -> meeting`; the remaining rows are the only assignment of the
+ * closed facility vocabulary that is consistent with them and with the fixed
+ * non-tool tuples above. A row whose facility disagrees is refused rather than
+ * folded, so a producer-side change shows up as a content-free rejection.
+ */
+export const HOOK_TOOL_FACILITY: ReadonlyMap<HookToolCategory, HookFacility> = new Map<HookToolCategory, HookFacility>([
+  ['read', 'shelf'],
+  ['write', 'desk'],
+  ['exec', 'terminal'],
+  ['search', 'search-terminal'],
+  ['mcp', 'antenna'],
+  ['delegate', 'meeting'],
+  ['skill', 'portal'],
+  ['idle', 'desk'],
+]);
+
+/**
+ * The producer's capacity marker, in full. It is a control row, not an event:
+ * `hook_event` is null and the identity fields are null with it.
+ */
+export const HOOK_CAPACITY_ACTIVITY: HookActivityContract = {
+  kind: 'capacity',
+  facility: 'desk',
+  label: '本日の記録上限に達しました',
+  status: 'limit_reached',
+};
 
 /** Producer-side identifier charset (`session_id`, `prompt_id`, `agent.id`, `tool.name`). */
 const HOOK_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -338,6 +476,95 @@ function checkEnum<T extends string>(value: unknown, path: string, allowed: read
   return found;
 }
 
+/** What `checkActivityContract` compares an incoming row against. */
+type ActivitySeen = {
+  hookEvent: string | null;
+  toolName: string | null;
+  toolCategory: HookToolCategory | null;
+  kind: HookActivityKind;
+  facility: HookFacility;
+  label: string;
+  status: HookOutcomeStatus | null;
+  sessionId: string | null;
+  agentId: string | null;
+  agentType: string | null;
+};
+
+/**
+ * Resolves the one activity tuple the producer emits for a tool row.
+ *
+ * Everything it reads has already been validated: `tool.category` is a member of
+ * the closed category vocabulary and `tool.name` matched the identifier charset.
+ * Nothing here is derived from an unvalidated value.
+ */
+function toolActivityContract(
+  phase: 'pre' | 'post' | 'failure',
+  category: HookToolCategory,
+  toolName: string,
+): HookActivityContract {
+  const facility = HOOK_TOOL_FACILITY.get(category);
+  // Unreachable: the map covers `HOOK_TOOL_CATEGORIES` exactly, and a test pins
+  // that. Fail closed anyway rather than assert a value into existence.
+  if (facility === undefined) return reject('contract_mismatch', 'tool.category:no_facility');
+
+  const isResearch = HOOK_RESEARCH_TOOL_NAMES.includes(toolName);
+  let label: string | undefined;
+  if (phase === 'failure') label = HOOK_TOOL_FAILURE_LABEL;
+  else if (phase === 'pre') label = isResearch ? HOOK_RESEARCH_PRE_LABEL : HOOK_PRE_TOOL_LABELS.get(category);
+  else label = isResearch ? HOOK_RESEARCH_POST_LABEL : HOOK_POST_TOOL_LABELS.get(category);
+  if (label === undefined) return reject('contract_mismatch', 'tool.category:no_label');
+
+  return { kind: category, facility, label, status: TOOL_PHASE_STATUS[phase] };
+}
+
+/**
+ * Rejects any row whose activity is not the tuple the producer emits for it.
+ *
+ * This is the trust boundary for the one external string that becomes visible
+ * (`activity.label` -> internal `summary`). Per-field validation earlier in this
+ * module can only say that a string is bounded, control-free and free of unsafe
+ * markers - which an arbitrary sentence also is. Comparing the whole tuple
+ * against the producer's fixed table is what stops such a sentence, and it also
+ * stops a genuine producer phrase pasted onto a different event or category.
+ *
+ * A `hook_event` outside the producer's known table has no tuple here on
+ * purpose: `hookAdapter.ts` owns that table and refuses the row before anything
+ * is mapped, so an unknown event can never reach the reducer, the wire or the
+ * screen through this gap.
+ */
+function checkActivityContract(seen: ActivitySeen): void {
+  // The capacity control row. It is the only shape with a null `hook_event`, and
+  // it is only that row if every one of its fixed fields matches.
+  if (seen.hookEvent === null) {
+    compareActivity(HOOK_CAPACITY_ACTIVITY, seen, 'capacity');
+    if (seen.sessionId !== null) reject('contract_mismatch', 'session_id:expected_null_for_capacity');
+    if (seen.agentId !== null) reject('contract_mismatch', 'agent.id:expected_null_for_capacity');
+    if (seen.agentType !== null) reject('contract_mismatch', 'agent.type:expected_null_for_capacity');
+    return;
+  }
+
+  const phase = HOOK_TOOL_PHASES.get(seen.hookEvent);
+  if (phase !== undefined) {
+    if (seen.toolCategory === null) reject('contract_mismatch', 'tool.category:required_for_tool_event');
+    if (seen.toolName === null) reject('contract_mismatch', 'tool.name:required_for_tool_event');
+    compareActivity(toolActivityContract(phase, seen.toolCategory, seen.toolName), seen, 'tool');
+    return;
+  }
+
+  const fixed = HOOK_FIXED_ACTIVITY.get(seen.hookEvent);
+  // Unknown event: no tuple to compare against. The adapter refuses it.
+  if (fixed === undefined) return;
+  compareActivity(fixed, seen, 'event');
+}
+
+/** Field-by-field comparison. The detail names the field and the rule only. */
+function compareActivity(expected: HookActivityContract, seen: ActivitySeen, scope: string): void {
+  if (seen.kind !== expected.kind) reject('contract_mismatch', `activity.kind:not_fixed_for_${scope}`);
+  if (seen.facility !== expected.facility) reject('contract_mismatch', `activity.facility:not_fixed_for_${scope}`);
+  if (seen.label !== expected.label) reject('contract_mismatch', `activity.label:not_fixed_for_${scope}`);
+  if (seen.status !== expected.status) reject('contract_mismatch', `outcome.status:not_fixed_for_${scope}`);
+}
+
 /**
  * Validates an already-parsed object against the external hook contract.
  *
@@ -465,6 +692,21 @@ function buildWireEvent(raw: unknown): { wire: HookWireEvent; dropped_keys: stri
   // `truncated: true` would mean the producer already lost part of the record.
   // There is no rule for interpreting a partial event, so it fails closed.
   if (own(raw, 'truncated') !== false) reject('invalid_format', 'truncated:expected_false');
+
+  // Last, because it correlates fields that must each be well formed first: an
+  // unsafe or malformed value is still reported as such, not as a mismatch.
+  checkActivityContract({
+    hookEvent,
+    toolName,
+    toolCategory,
+    kind: activityKind,
+    facility: activityFacility,
+    label: activityLabel,
+    status: outcomeStatus,
+    sessionId,
+    agentId,
+    agentType,
+  });
 
   const wire: HookWireEvent = {
     schema_version: schemaVersion,

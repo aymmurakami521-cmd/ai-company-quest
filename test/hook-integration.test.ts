@@ -237,6 +237,87 @@ test('a refused line publishes a reason and a field, never the value that failed
   assert.equal(store.halted, false, 'one bad line must not freeze the stream');
 });
 
+test('an arbitrary label never reaches the state, the wire, /health or the screen', async () => {
+  const live = liveStore();
+  const demo = new NamespaceStore({ namespace: 'demo' });
+  const server = new QuestServer({ stores: { live, demo }, heartbeatMs: 60_000 });
+  const address = await server.listen(0);
+
+  // Control-free, no absolute path, no credential, under the length bound: the
+  // shape a raw prompt or a command echoed into a label would have.
+  const arbitrary = 'echo the customer discussion';
+
+  try {
+    const sse = await openSse(address.port, '/events/live');
+    await sse.waitFor((text) => text.includes('event: snapshot'));
+
+    await ingestThroughTailer(live, [
+      JSON.stringify({
+        ...makeHookEvent({ event_id: hookEventId(81), hook_event: 'PostToolUse' }),
+        activity: { kind: 'exec', facility: 'terminal', label: arbitrary },
+      }),
+      // A second row whose label is a real producer phrase, but from another
+      // event. A valid phrase is still not valid here.
+      JSON.stringify({
+        ...makeHookEvent({ event_id: hookEventId(82), hook_event: 'SessionStart' }),
+        activity: { kind: 'session', facility: 'desk', label: 'セッションが終了しました' },
+      }),
+      JSON.stringify(makeHookEvent({ event_id: hookEventId(83), hook_event: 'SessionStart' })),
+    ]);
+    await sse.waitFor((text) => text.includes(hookEventId(83)));
+
+    assert.equal(live.stats.accepted, 1, 'only the well formed row was folded');
+    assert.equal(live.stats.rejected_by_reason['contract_mismatch'], 2);
+    assert.equal(live.halted, false, 'a mismatched label is a per-line rejection');
+
+    const health = await httpGet(address.port, '/health');
+    const client = foldClient(sse.text());
+    for (const surface of [sse.text(), health.body, JSON.stringify(live.state), JSON.stringify(client)]) {
+      assert.equal(surface.includes(arbitrary), false, 'the arbitrary label must not be published');
+      assert.equal(surface.includes('セッションが終了しました'), false, 'the misplaced phrase must not be published');
+    }
+    // And the rejection accounting names the rule, never the value.
+    assert.equal(JSON.stringify(live.stats).includes(arbitrary), false);
+
+    sse.close();
+  } finally {
+    await server.close();
+  }
+});
+
+test('an identity conflict is refused end to end, and moves no desk', async () => {
+  const store = liveStore();
+  await ingestThroughTailer(store, [
+    // A subagent lifecycle row with no subagent: it must not become the desk of
+    // the main orchestrator.
+    JSON.stringify(
+      makeHookEvent({
+        event_id: hookEventId(91),
+        hook_event: 'SubagentStart',
+        agent: { id: null, type: null, parent_session_id: null },
+      }),
+    ),
+    // A main-only row carrying a subagent id.
+    JSON.stringify(
+      makeHookEvent({
+        event_id: hookEventId(92),
+        hook_event: 'Stop',
+        agent: { id: 'agent-1', type: 'backend-engineer', parent_session_id: null },
+      }),
+    ),
+    // The valid pair still folds: one main desk, one subagent desk.
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(93), hook_event: 'SessionStart' })),
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(94), hook_event: 'SubagentStart' })),
+  ]);
+
+  assert.equal(store.stats.rejected_by_reason['identity_conflict'], 2);
+  assert.equal(store.stats.accepted, 2);
+  assert.deepEqual(Object.keys(store.state.actors).sort(), ['sess-1:agent-1', 'sess-1:main']);
+  assert.equal(store.state.actors['sess-1:main']?.is_main_orchestrator, true);
+  assert.equal(store.state.actors['sess-1:agent-1']?.active, true);
+  assert.equal(store.halted, false);
+});
+
 // --------------------------------------------------------------- fail closed ---
 
 test('an unattributable record is refused, and never becomes a desk', async () => {
@@ -324,6 +405,42 @@ test('the capacity marker freezes the stream and is announced as a fixed phrase'
   } finally {
     await server.close();
   }
+});
+
+test('only the exact capacity row halts LIVE; a near miss is refused line by line', async () => {
+  const store = liveStore();
+  await ingestThroughTailer(store, [
+    // Right kind and status, wrong facility.
+    JSON.stringify({
+      ...CAPACITY_MARKER,
+      event_id: hookEventId(101),
+      activity: { kind: 'capacity', facility: 'portal', label: CAPACITY_MARKER.activity.label },
+    }),
+    // Right kind, facility and status, a label the producer does not emit.
+    JSON.stringify({
+      ...CAPACITY_MARKER,
+      event_id: hookEventId(102),
+      activity: { kind: 'capacity', facility: 'desk', label: '記録容量の上限に達しました' },
+    }),
+    // A capacity row that claims a session and a subagent.
+    JSON.stringify({
+      ...CAPACITY_MARKER,
+      event_id: hookEventId(103),
+      session_id: 'sess-1',
+      agent: { id: 'agent-1', type: null, parent_session_id: null },
+    }),
+    JSON.stringify(makeHookEvent({ event_id: hookEventId(104), hook_event: 'SessionStart' })),
+  ]);
+
+  assert.equal(store.halted, false, 'a near miss must not be read as the capacity marker');
+  assert.equal(store.stats.rejected_by_reason['contract_mismatch'], 3);
+  assert.equal(store.stats.accepted, 1, 'the stream continued past the refused rows');
+
+  // The real marker, on the other hand, still stops everything.
+  const halting = liveStore();
+  await ingestThroughTailer(halting, [JSON.stringify(CAPACITY_MARKER)]);
+  assert.equal(halting.halted, true);
+  assert.equal(halting.stats.halt_reason, 'producer_capacity:producer:limit_reached');
 });
 
 // ------------------------------------------------------------- LIVE vs DEMO ---
