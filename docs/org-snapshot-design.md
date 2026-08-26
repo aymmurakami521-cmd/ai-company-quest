@@ -8,6 +8,8 @@ Phase 2の未達条件2つについて、**実装せずに責務境界だけを�
 | 2 | 15名の固定着席 | **未実装** |
 
 この文書はコードを変更しません。新しいwire schema、API、SSE event、runtime挙動も定義しません。
+**新規の内部API名・field名・関数名も決めません**（仮称も置きません）。未実装の要素は役割だけを書き、
+名称は§4.1の確認結果と実装PR（§5）で決めます。既存の名称・`file:line` は事実として引用します。
 **「既存事実」「設計判断」「未決事項」「次PR候補」を混ぜない**ことがこの文書の目的です。
 実装とこの文書が食い違った場合は、常に実装（`src/`）が正です。
 
@@ -97,27 +99,33 @@ producerが未知keyを送っても wire には出ません（`src/domain/wire.t
 したがって **§1.5 の player と同じ構造**を採ります。
 
 ```
-[event stream]                    [org snapshot]              [human player]
-sanitized JSONL                   静的設定 (未決 §4)          QUEST_PLAYER_NAME
-   ↓ validate/adapter                ↓ 読み取り1回               ↓ 起動時1回
-   ↓ reduce (pure)                   ↓                          ↓
-state.actors / state.sessions     state.org (新規・未実装)    state.player
-   ↓                                 ↓                          ↓
-selectDesks()                     selectOrg() (新規・未実装)  selectPlayer()
-   ↓                                 ↓                          ↓
-           buildWorld() ── 3入力を合成して1つのWorldにする
+[event stream]                  [org snapshot]                    [human player]
+sanitized JSONL                 静的設定 (未決 §4)                QUEST_PLAYER_NAME
+   ↓ validate/adapter              ↓ 読み取り1回                     ↓ 起動時1回
+   ↓ reduce (pure)                 ↓                                 ↓
+state.actors / state.sessions   検証済みorg snapshotの保持先        state.player
+                                (QuestStateの独立field・新規)
+   ↓                               ↓                                 ↓
+selectDesks()                   org snapshotのprojection層          selectPlayer()
+                                (新規)
+   ↓                               ↓                                 ↓
+        buildWorld() ── 3入力を合成して1つのWorldにする
 ```
 
 **3つは合流地点まで混ざらない。** 合流するのはprojection層（`buildWorld`）だけで、
 reducerでは合流しません。
+
+図の左右列は既存実装の名称です（§1）。中央列は**役割だけ**を示します。
+**新規要素のfield名・関数名・schema・DOM構造はこの文書では決めません**（仮称も置きません）。
+入力形式は§4.1の確認結果に依存し、名称は実装PR（§5 PR-2 / PR-3）で決めます。
 
 ### 2.2 責務の割り当て
 
 | 層 | 責務 | 責務**でない**もの |
 |----|------|------------------|
 | ai-company側 `company/org.yaml`（**外部repo・未確認 §4.1**） | 部署・社員・配属の正本 | 席座標、描画、runtime状態 |
-| Quest collector | org snapshotを**そのまま**読み取り、検証して `QuestState` の独立fieldへ置く | org情報の合成・補完・推測、eventからのorg導出 |
-| `reduce`（`src/domain/reducer.ts`） | org fieldに**触らない**（`player` と同じくreferenceで持ち回る） | org fieldの更新 |
+| Quest collector | org snapshotを**そのまま**読み取り、検証して `QuestState` の独立fieldへ置く（field名は実装PRで決める） | org情報の合成・補完・推測、eventからのorg導出 |
+| `reduce`（`src/domain/reducer.ts`） | org snapshotの保持fieldに**触らない**（`player` と同じくreferenceで持ち回る） | org snapshotの保持fieldの更新 |
 | projection（`quest-view.js`） | actor（動的）と roster（静的）の**突き合わせ**。突き合わない側はそのまま公開する | 突き合わせ失敗の穴埋め |
 | layout（`quest-world.js`） | roster順から決定論的に座標を決める | 誰がいるかの判断 |
 | canvas（`quest-canvas.js`） | 渡された矩形を塗るだけ | 一切の判断 |
@@ -143,7 +151,7 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 - **縮退は必ず可視化する。** org snapshotが不在・拒否のまま現行表示へ縮退した事実を利用者へ示せない状態を作らない。
   したがって **org-backed UIは、縮退状態を閉じた語彙で示す表示契約と同じPR以降でのみ有効化する**（順序制約 → §5）。
   表示契約が入るまでは、読み取り・検証・状態保持まで実装してもUIはorg非対応のまま据え置く
-- org fieldにも明示上限を置き、`DEFAULT_STATE_LIMITS` と同じくstateが持つ（bounded memory）
+- org snapshotの保持fieldにも明示上限を置き、`DEFAULT_STATE_LIMITS` と同じくstateが持つ（bounded memory）
 - 拒否理由は field名 + rule名のみ。社員名・部署名をhalt reasonへ入れない
 - LIVE/DEMO分離は不変。org snapshotも namespace ごとに独立したinstanceとする
 - loopback-only、CORS header無し、Host allowlist、`textContent` 経由のみのDOM挿入は不変
@@ -159,7 +167,7 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 | authoritative source | ai-company側の org 定義（`company/org.yaml` 想定。**実在・形式ともに未確認 → §4.1**） |
 | 必要入力 | 区画の**識別子と順序**のみ。部署id、表示名、区画種別（部署 / 社長室 / 未所属 / 共用施設）、並び順 |
 | 入力に**含めない**もの | 座標、pixel、幅、色。layoutはQuest側が決める（§2.2） |
-| consumer | ① `selectOrg()`（新規・未実装）が区画一覧を projection する ② `buildWorld()` が区画ごとにroom矩形を割り当てる ③ DOMの社員一覧が区画ごとにgroup化する |
+| consumer | ① org snapshotのprojection層（新規・未実装。関数名は決めない）が区画一覧を projection する ② `buildWorld()` が区画ごとにroom矩形を割り当てる ③ DOMの社員一覧が区画ごとにgroup化する |
 | DOM/canvasの正本関係 | **不変**: DOMが正本、canvasは `aria-hidden` の装飾層（`README.md:271-273`）。区画名・所属はDOM側にも必ず出る |
 | fail-closed時の挙動 | org snapshotが読めない / 検証に落ちる → **org機能を持たない現行の単一room表示へ縮退**し、閉じた語彙で明示。部分的な区画を描いたり、欠けた部署を推測で補ったりしない。event ingestはhaltさせない（org不在はstreamの健全性と無関係）。**この明示が実装される前にorg-backed UIを有効化しない**（§2.4の順序制約・§5） |
 | 決定論的layout | 区画の描画順は**snapshotの宣言順のみ**で決める。hash・時刻・乱数・actor数を使わない。同じsnapshot + 同じviewport → 同じ座標 |
@@ -173,7 +181,7 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 | authoritative source | 同上のorg定義の社員roster（**未確認 → §4.1**）。15という数はrosterの結果であって、**定数として焼き込まない**（§4.3） |
 | 必要入力 | 社員ごとに: 安定した社員識別子、表示名、所属区画id、区画内の並び順、runtime actorとの照合key |
 | 照合keyの候補 | `ActorDirectory` のkey体系（`actorKeyOf(session_id, agent_id)` またはbare `agent_id`、`src/domain/actor.ts:40`）を**そのまま流用する**のが既存事実に最も近い。ただし `session_id` はrun毎に変わるため、固定rosterが持てるのは実質bare `agent_id` 側のみ → **§4.2 未決** |
-| consumer | ① roster projection（新規・未実装） ② `selectDesks` 相当が roster席 × actor状態を突き合わせる ③ `buildWorld` がroster順から席座標を決める |
+| consumer | ① roster projection（新規・未実装。関数名は決めない） ② `selectDesks` 相当が roster席 × actor状態を突き合わせる ③ `buildWorld` がroster順から席座標を決める |
 | 席番号の意味の変更 | 現行 `seat` は「並べ替え後のactor index+1」（`quest-view.js:640-643`）で**動く**。固定着席では席はrosterに属し、actorの増減で動かない。これは既存の `seat` の意味を変えるため、置き換えではなく**別fieldとして導入**すべき（§4.4） |
 | fail-closed時の挙動 | roster不在・検証失敗 → **現行の動的着席へ縮退**し、閉じた語彙で明示。roster社員を推測で生成しない。1件でも不正なら部分適用せずroster全体を不採用にする（部分rosterは「誰がいないのか」を誤って伝えるため）。**この明示が実装される前にroster-backed UIを有効化しない**（§2.4の順序制約・§5） |
 | 未対応actorの扱い | roster外actorは未所属区画へ（§2.3）。**捨てない**。捨てるとstreamの事実と表示が食い違う |
@@ -265,13 +273,13 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 
 - **前提**: なし
 - **成果契約**: §4.1〜§4.7 の未決事項に対する**確認結果**をこの文書へ追記する。org定義が実在するなら、そのkeyと値域を「観測した事実」として記録する。§4.1〜§4.6 は外部事実の確認、**§4.7 は事実確認（現行 `BANNER_CODES` が単一codeであること）に基づく設計判断**で、「既存bannerの語彙を1増やす / 別の閉じた語彙のstatus面を置く」のどちらを採るかと、その判断基準（閉じた語彙のみ・自由記述なし・stream状態を隠さない）をこの文書で確定する
-- **対象外**: schema定義、code変更、環境変数追加、**§4.7で採る側の具体的なcode名・文言・DOM構造**（PR-3の実装範囲）
+- **対象外**: schema定義、code変更、環境変数追加、**新規のfield名・関数名**（PR-2 / PR-3の実装範囲）、**§4.7で採る側の具体的なcode名・文言・DOM構造**（PR-3の実装範囲）
 - **完了判定**: §4.1〜§4.7 の未決事項がすべて「確認済み」「設計判断済み」「実在しないため対象外」のいずれかに変わっている
 
 ### PR-2: org snapshot読み取りと検証（分類B: code、runtime影響あり）
 
 - **前提**: PR-1
-- **成果契約**: org snapshotを読み、`src/domain/validate.ts` と同等の禁止内容checkを通し、検証失敗時はfail closed（org機能のみ無効、ingestはhaltさせない）。`QuestState` へ**独立fieldとして**置く。`reduce` は触らない。あわせて **採用 / 不在 / 拒否のいずれであるかを閉じた語彙で読み取れる状態**を同じ独立fieldに保持する（拒否理由は field名 + rule名のみ・§2.4）。表示面の選択は§4.7の結論に従う
+- **成果契約**: org snapshotを読み、`src/domain/validate.ts` と同等の禁止内容checkを通し、検証失敗時はfail closed（org機能のみ無効、ingestはhaltさせない）。`QuestState` へ**独立fieldとして**置く（**field名はこのPRで決める**。この文書では固定しない）。`reduce` は触らない。あわせて **採用 / 不在 / 拒否のいずれであるかを閉じた語彙で読み取れる状態**を同じ独立fieldに保持する（拒否理由は field名 + rule名のみ・§2.4）。表示面の選択は§4.7の結論に従う
 - **対象外**: UI（org非対応の現行表示のまま据え置く）、layout、wire schema変更、SSE frame追加
 - **完了判定**: 不正なsnapshotが1件でもあればorg全体を不採用にするtestが通る。採用/不在/拒否の状態が閉じた語彙で読めるtestが通る。既存のingest系testが全て不変。**UIの描画結果が現行と一致する**（このPRではorg-backed UIを有効化しない）
 
@@ -280,7 +288,7 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 **最初のorg-backed UI consumerであるため、縮退表示契約をこのPRに同梱します**（§2.4順序制約・§4.7）。
 
 - **前提**: PR-2（§4.7 の決定はPR-1で確定済み）
-- **成果契約**: §2.3 の3規則を純粋関数として実装。対応actor不在のroster社員に状態を捏造せず、roster外actorを未所属へ置く。DOM側の社員一覧に区画groupingを反映。**同時に**、PR-2が保持する採用/不在/拒否の状態を閉じた語彙で表示し、org非採用時は現行表示へ縮退したことを利用者へ示す。stream側の状態表示を隠さない
+- **成果契約**: §2.3 の3規則を純粋関数として実装（**関数名・DOM構造・表示codeはこのPRで決める**。この文書では固定しない）。対応actor不在のroster社員に状態を捏造せず、roster外actorを未所属へ置く。DOM側の社員一覧に区画groupingを反映。**同時に**、PR-2が保持する採用/不在/拒否の状態を閉じた語彙で表示し、org非採用時は現行表示へ縮退したことを利用者へ示す。stream側の状態表示を隠さない
 - **対象外**: canvas layout、席座標、自由記述メッセージ
 - **完了判定**: §3.2 の検証方法 ④⑤⑥⑦ と §3.1 検証方法 ③ が通る。org拒否時に無言で現行表示へ落ちるcaseがtestで再現できない
 
