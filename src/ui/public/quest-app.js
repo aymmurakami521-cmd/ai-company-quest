@@ -29,6 +29,7 @@ import {
   selectDesks,
   selectHeader,
   setConnectionPhase,
+  setSelectedActor,
   visualForState,
 } from './quest-view.js';
 
@@ -149,12 +150,29 @@ function renderLegend() {
   }
 }
 
+/**
+ * The desk projection currently in the DOM.
+ *
+ * A rendered select button carries only its position in this array, never an
+ * `actor_key`: identifiers off the wire reach the DOM as `textContent` and
+ * nothing else, and the two are always replaced together, so the position
+ * cannot go stale.
+ */
+let renderedDesks = [];
+
 function renderDesks(desks) {
+  renderedDesks = desks;
   dom.desks.replaceChildren();
-  for (const desk of desks) {
+  desks.forEach((desk, index) => {
     const node = dom.deskTemplate.content.cloneNode(true);
     const item = node.querySelector('.desk');
     item.dataset.state = desk.visual.state;
+    item.dataset.selected = String(desk.selected);
+    const select = node.querySelector('.desk__select');
+    select.dataset.deskIndex = String(index);
+    // The state is exposed as `aria-pressed`, so it is never carried by the
+    // border colour alone.
+    select.setAttribute('aria-pressed', String(desk.selected));
     text(node, '.desk__seat', `#${desk.seat}`);
     text(node, '.desk__agent', desk.display_name);
     const badge = node.querySelector('.desk__badge');
@@ -168,7 +186,7 @@ function renderDesks(desks) {
     text(node, '.desk__session', desk.session_id);
     text(node, '.desk__ts', desk.last_event_ts ?? '—');
     dom.desks.append(node);
-  }
+  });
 }
 
 function renderLog(entries) {
@@ -337,6 +355,27 @@ for (const button of dom.modeButtons) {
 
 dom.reconnect.addEventListener('click', () => {
   connect(state.namespace);
+});
+
+/**
+ * Selecting a colleague.
+ *
+ * One listener on the list rather than one per seat, so an office of any size
+ * costs the same. The event is a `click`, which a native <button> also fires for
+ * Enter and Space - that is what makes every desk selectable with the keyboard
+ * alone, with no key handler and no focus management of our own.
+ *
+ * Selecting the selected desk again clears it, which is what `aria-pressed`
+ * already promises a toggle button does.
+ */
+dom.desks.addEventListener('click', (event) => {
+  // A click inside the button lands on one of its spans, so the control is
+  // found by walking up rather than by comparing the target.
+  const button = event.target.closest('[data-action="select-desk"]');
+  if (button === null) return;
+  const desk = renderedDesks[Number(button.dataset.deskIndex)];
+  if (desk === undefined) return;
+  setState(setSelectedActor(state, desk.selected ? null : desk.actor_key));
 });
 
 window.addEventListener('hashchange', () => {

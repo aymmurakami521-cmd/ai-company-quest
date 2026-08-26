@@ -98,6 +98,7 @@ function desk(seat: number, state: ActorVisualState, overrides: Partial<Desk> = 
     last_tool: null,
     last_event_ts: null,
     event_count: 1,
+    selected: false,
     visual: visualForState(state),
     ...overrides,
   };

@@ -97,7 +97,10 @@ const banner = new FakeElement('banner', [
 
 const elements = new Map<string, FakeElement | FakeTemplate>([
   ['banner', banner],
-  ['desk-template', new FakeTemplate(['desk', 'desk__badge', 'desk__seat', 'desk__agent', 'desk__symbol'])],
+  [
+    'desk-template',
+    new FakeTemplate(['desk', 'desk__select', 'desk__badge', 'desk__seat', 'desk__agent', 'desk__symbol']),
+  ],
   ['log-template', new FakeTemplate(['log__row', 'log__symbol', 'log__seq', 'log__ts', 'log__actor'])],
   ['legend-template', new FakeTemplate(['legend__row', 'legend__symbol', 'legend__label', 'legend__code'])],
 ]);

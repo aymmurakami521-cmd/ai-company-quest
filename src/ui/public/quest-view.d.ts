@@ -99,6 +99,8 @@ export type ClientState = {
   actors: Record<string, ViewActor>;
   last_ingest_seq: number;
   last_event_ts: string | null;
+  /** `actor_key` of the seat the operator selected, or `null`. Always one that is seated. */
+  selected_actor_key: string | null;
   counters: {
     applied: number;
     ignored: number;
@@ -149,6 +151,8 @@ export type Desk = {
   last_tool: string | null;
   last_event_ts: string | null;
   event_count: number;
+  /** True for the one desk `selected_actor_key` points at. */
+  selected: boolean;
   visual: ActorVisual;
 };
 
@@ -203,6 +207,7 @@ export declare function classifyActor(actor: Partial<ViewActor> | null | undefin
 export declare function classifyConnection(connection: Partial<ViewConnection> | null | undefined): ConnectionVisual;
 export declare function createClientState(namespace: string): ClientState;
 export declare function setConnectionPhase(state: ClientState, phase: string, atMs?: number | null): ClientState;
+export declare function setSelectedActor(state: ClientState, actorKey: string | null): ClientState;
 export declare function applyEvent(state: ClientState, wire: unknown, atMs?: number | null): ClientState;
 export declare function applySnapshot(state: ClientState, payload: unknown, atMs?: number | null): ClientState;
 export declare function applyHalt(state: ClientState, payload: unknown, atMs?: number | null): ClientState;

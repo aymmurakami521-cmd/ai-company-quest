@@ -54,15 +54,16 @@ function attributes(name: string): string[] {
 // ------------------------------------------------------------- keyboard ---
 
 test('every control on the page is a native, keyboard-operable element', () => {
-  // The app only ever binds clicks to elements it found by these selectors.
-  const bound = [...APP.matchAll(/querySelectorAll\('([^']+)'\)|querySelector\('([^']+)'\)/g)]
-    .map((match) => match[1] ?? match[2] ?? '')
+  // The app only ever reaches a control through these selectors - directly, or
+  // through `closest` when one listener serves a whole list.
+  const bound = [...APP.matchAll(/(?:querySelectorAll|querySelector|closest)\('([^']+)'\)/g)]
+    .map((match) => match[1] ?? '')
     .filter((selector) => selector.startsWith('[data-'));
-  assert.deepEqual(bound.sort(), ['[data-action="reconnect"]', '[data-mode]']);
+  assert.deepEqual(bound.sort(), ['[data-action="reconnect"]', '[data-action="select-desk"]', '[data-mode]']);
 
   // …and in the page those are <button>s, which are focusable and fire on both
   // Enter and Space without any key handler of our own.
-  for (const marker of ['data-mode="live"', 'data-mode="demo"', 'data-action="reconnect"']) {
+  for (const marker of ['data-mode="live"', 'data-mode="demo"', 'data-action="reconnect"', 'data-action="select-desk"']) {
     const line = HTML.split('\n').find((row) => row.includes(marker));
     assert.ok(line !== undefined, `page has ${marker}`);
     assert.ok(String(line).includes('<button'), `${marker} is a <button>`);
@@ -97,6 +98,47 @@ test('a scrollable region can be reached and scrolled with a keyboard', () => {
   // The list itself keeps its list semantics inside the scrolling box.
   assert.match(CSS, /\.log \{[^}]*\}/, 'the list is still styled as a list');
   assert.equal(/<ol class="log" id="log"[^>]*role=/.test(HTML), false, 'no role overrides the list');
+});
+
+test('every colleague can be selected with a keyboard alone', () => {
+  // The control is a real <button> inside the desk heading, so Tab reaches one
+  // per seat and Enter/Space activate it. Nothing custom, nothing pointer-only.
+  const line = HTML.split('\n').find((row) => row.includes('class="desk__select"'));
+  assert.ok(line !== undefined, 'the desk template has a select control');
+  assert.ok(String(line).includes('<button'), 'and it is a <button>');
+  assert.ok(String(line).includes('type="button"'), 'an explicit one');
+  assert.ok(String(line).includes('aria-pressed'), 'that publishes its selected state');
+  assert.equal(/class="desk__select"[^>]*tabindex=/.test(HTML), false, 'and does not reorder the tab stops');
+
+  // Selection is state, not styling: the stylesheet reads it, and the app keeps
+  // both the attribute and `aria-pressed` in step with the same projection.
+  assert.match(CSS, /\.desk\[data-selected='true'\]/, 'the selected desk is styled from that state');
+  assert.ok(APP.includes("select.setAttribute('aria-pressed', String(desk.selected))"));
+  assert.ok(APP.includes("item.dataset.selected = String(desk.selected)"));
+
+  // The list has one delegated `click` listener, which a <button> also fires for
+  // Enter and Space - so there is still no key handler and no focus stealing.
+  assert.match(APP, /dom\.desks\.addEventListener\('click'/, 'the list handles activation');
+  assert.equal(/addEventListener\('key(down|up|press)'/.test(APP), false, 'no key handler of our own');
+});
+
+test('the canvas is never the thing being operated', () => {
+  // Condition: the DOM accessibility layer is the record of truth for input. The
+  // canvas is `aria-hidden` decoration, so nothing may be bound to it and it may
+  // not be hit-tested - either would put a fact behind a surface a screen reader
+  // and a keyboard cannot reach.
+  for (const target of ['dom.canvas', 'dom.canvasFrame']) {
+    assert.equal(APP.includes(`${target}.addEventListener`), false, `${target} has no listener`);
+  }
+  assert.equal(
+    /getBoundingClientRect|\.(clientX|clientY|offsetX|offsetY|pageX|pageY)\b/.test(APP),
+    false,
+    'nothing translates a pointer position into a seat',
+  );
+  // The selected seat is resolved from the rendered projection, never from a
+  // coordinate and never from a wire string smuggled into an attribute.
+  assert.ok(APP.includes('renderedDesks[Number(button.dataset.deskIndex)]'), 'selection resolves via the projection');
+  assert.equal(/dataset\.\w+ = desk\.(actor_key|session_id|display_name)/.test(APP), false, 'no wire string in an attribute');
 });
 
 test('the skip link goes to a target that exists', () => {
@@ -308,6 +350,7 @@ test('an office larger than the canvas still lists every actor in the DOM', () =
     last_tool: null,
     last_event_ts: null,
     event_count: 1,
+    selected: false,
     visual: visualForState('idle'),
   }));
 
@@ -324,7 +367,7 @@ test('an office larger than the canvas still lists every actor in the DOM', () =
 
   // The DOM list is built from `desks` itself, so it is unaffected by that cap.
   assert.equal(desks.length, total, 'every actor is still in the projection the DOM renders');
-  assert.ok(APP.includes('for (const desk of desks)'), 'and the app renders all of them, uncapped');
+  assert.ok(APP.includes('desks.forEach((desk, index)'), 'and the app renders all of them, uncapped');
   assert.equal(/desks\.slice\(|desks\.filter\(/.test(APP), false, 'the DOM list is never truncated or filtered');
 });
 

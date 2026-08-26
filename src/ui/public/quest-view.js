@@ -246,9 +246,31 @@ export function createClientState(namespace) {
     actors: emptyMap(),
     last_ingest_seq: 0,
     last_event_ts: null,
+    /**
+     * The actor the operator is currently looking at, or `null`.
+     *
+     * A pointer into `state.actors`, never a seat number: seats are positions in
+     * a deterministic ordering, so a new colleague joining renumbers them and a
+     * stored seat would silently move the selection to somebody else.
+     */
+    selected_actor_key: null,
     counters: { applied: 0, ignored: 0, out_of_order: 0, foreign: 0, snapshots: 0, gaps: 0, halts: 0 },
     log: [],
   };
+}
+
+/**
+ * Selects one seated actor, by key. `null` clears the selection.
+ *
+ * A key nobody is seated under is refused rather than stored - a selection that
+ * points at nobody is exactly the stale actor state a re-layout has to remove,
+ * and refusing it here means no other function has to defend against one.
+ */
+export function setSelectedActor(state, actorKey) {
+  const next =
+    typeof actorKey === 'string' && ownProp(state.actors, actorKey) !== undefined ? actorKey : null;
+  if (next === state.selected_actor_key) return state;
+  return { ...state, selected_actor_key: next };
 }
 
 export function setConnectionPhase(state, phase, atMs = null) {
@@ -452,6 +474,13 @@ export function applySnapshot(state, payload, atMs = null) {
     actors,
     last_ingest_seq: typeof payload.last_ingest_seq === 'number' ? payload.last_ingest_seq : 0,
     last_event_ts: latestTs,
+    // A snapshot replaces the office wholesale, so an actor that was selected
+    // and is no longer seated has to go with it. Keeping the key would leave the
+    // new layout carrying a selection from the old one.
+    selected_actor_key:
+      state.selected_actor_key !== null && ownProp(actors, state.selected_actor_key) !== undefined
+        ? state.selected_actor_key
+        : null,
     counters: { ...state.counters, snapshots: state.counters.snapshots + 1 },
   };
 }
@@ -573,6 +602,9 @@ export function selectDesks(state) {
       session_id: actor.session_id,
       display_name: actor.agent_id === null ? UNATTRIBUTED_AGENT_LABEL : actor.agent_id,
       is_main_orchestrator: actor.is_main_orchestrator === true,
+      // Derived, never stored per desk: at most one desk is ever selected, and a
+      // key that no longer matches anybody simply selects nothing.
+      selected: actor.actor_key === state.selected_actor_key,
       // Roles are shown only when the collector actually resolved one. This
       // screen never guesses a job title from a structural fact.
       role: actor.resolved === true ? actor.role : null,

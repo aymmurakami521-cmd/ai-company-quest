@@ -274,12 +274,14 @@ canvasが上限で描き切れない席があっても、DOMの一覧は**常に
 
 | 項目 | 実装 |
 |------|------|
-| キーボード操作 | 操作はすべてnativeの `<button>` / `<a>`。LIVE/DEMO切替・再接続・skip linkはTabとEnter/Spaceだけで完結します。独自key handlerもcustom widgetもありません |
+| キーボード操作 | 操作はすべてnativeの `<button>` / `<a>`。LIVE/DEMO切替・再接続・skip link・**AI社員の選択**はTabとEnter/Spaceだけで完結します。独自key handlerもcustom widgetもありません |
+| 社員の選択 | 社員カードの見出しがnativeの `<button>`（`.desk__select`）です。Tabで全社員に届き、Enter/Spaceで選択・再度押すと解除します。選択状態は `aria-pressed` と `data-selected` で公開し、色だけには依存しません。listenerは一覧に1つのdelegationで、席数が増えても増えません |
+| 操作の正本 | 選択はDOM側だけで完結します。canvasにはlistenerを付けず、pointer座標から席を引く処理（hit test）も持ちません。選択中のactorは `actor_key`（`ClientState.selected_actor_key`）で保持し、席番号では保持しません |
 | tab順 | `tabindex` は `0` のみ。正の値も `-1` も使わず、scriptがfocusを奪うこともありません |
 | scroll領域 | 独自scrollbarを持つのはアクティビティログだけで、その容器が `tabindex="0"` + `aria-labelledby` の名前付きfocus stopです（keyboardだけでscrollできます） |
 | focus可視化 | `:focus-visible` のoutlineを1箇所で宣言し、どこでも `outline: none` しません |
 | accessible name | 社員一覧・mode group・log領域に名前があります。記号（`✖` `▶` など）はすべて `aria-hidden` の装飾で、隣に必ずtext labelがあります |
-| 現在選択 | LIVE/DEMOは `aria-pressed` で状態を公開します（色だけに依存しません） |
+| 現在選択 | LIVE/DEMOと社員選択はどちらも `aria-pressed` で状態を公開します（色だけに依存しません） |
 | 通知 | live regionは**status bannerの1つだけ**（`role="status"` + `aria-live="polite"`）。接続・再接続・gap・fail-closed・emptyはすべてここへ1回だけ出ます。HUDの数値は同じ事実の静的な再掲なのでlive regionにしていません（二重読み上げ回避） |
 | 色以外での識別 | 全状態が「記号 + code + label」を持ちます。bannerの `data-tone` は色だけで、意味はcode/記号側にあります |
 | reduced motion | animation / transition は `@media (prefers-reduced-motion: no-preference)` の中だけ。canvasはtimerもanimation frameも使わない完全な静止画です |
@@ -425,6 +427,14 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 - **アクセシビリティのtestは配信assetに対する契約検証まで**です（`test/ui-a11y.test.ts`）。
   実ブラウザでのfocus順、実screen readerでの読み上げ、contrast比の実測、
   実際の200% zoom描画は自動化していません。手動確認が必要です。
+- **社員の選択は選択そのものだけです。** 選択してもrequestは1本も増えず、指示送信・行動指定・
+  詳細paneの展開はありません（Phase 3の範囲）。選択中のactorが在席しなくなると（`snapshot` で
+  officeが差し替わると）選択は自動的に解除され、古い座席が新しいlayoutへ持ち越されることは
+  ありません。選択状態はcanvasには反映しません（canvasは装飾層のままです）。
+- **本repoはruntime actor（Claude Code session）単位のofficeです。** 組織snapshot、部署、
+  社長室フロア、未所属・共用施設といったフロア構成、固定の社員roster、人間playerのactorは
+  実装していません。`selectDesks` が席を決めるのはcollectorが解決したactorだけで、
+  役職も配属も推測しません。
 - 画面の文言は日本語のみです（`<html lang="ja">`）。i18nはMVPの対象外です。
 - DEMOは自動進行しません。fixtureは1回投入されて固定で、時間経過で状態が変わることも、
   UIからDEMO stateを変更することもできません。

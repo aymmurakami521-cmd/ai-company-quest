@@ -441,6 +441,39 @@ h3 {
   text-transform: none;
 }
 
+/*
+ * The select control keeps the heading's own look: it is a button for the
+ * keyboard and the pointer, not a second visual style. The global
+ * `:focus-visible` ring still applies, and nothing here removes an outline.
+ */
+.desk__select {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Selection is a border and a marker, never a colour on its own. */
+.desk[data-selected='true'] .desk__card {
+  border-style: double;
+  box-shadow:
+    inset 0 0 0 2px #05070d,
+    0 0 0 var(--pixel) var(--accent);
+}
+
+.desk[data-selected='true'] .desk__seat::before {
+  content: '▸ ';
+  color: var(--accent);
+}
+
 .desk__seat {
   color: var(--text-dim);
   font-size: 0.75rem;

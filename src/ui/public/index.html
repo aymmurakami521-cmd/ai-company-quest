@@ -123,9 +123,17 @@
             <span class="sprite sprite--table"></span>
           </div>
           <div class="desk__info">
+            <!--
+              Selecting a colleague is a native <button>, so Tab reaches it and
+              Enter/Space activate it without a key handler of our own. The DOM
+              is the record of truth for who is selected; the canvas above stays
+              a decorative, aria-hidden layer and is never clicked or hit-tested.
+            -->
             <h3 class="desk__name">
-              <span class="desk__seat"></span>
-              <span class="desk__agent"></span>
+              <button class="desk__select" type="button" data-action="select-desk" aria-pressed="false">
+                <span class="desk__seat"></span>
+                <span class="desk__agent"></span>
+              </button>
               <span class="desk__badge" hidden>MAIN</span>
             </h3>
             <p class="desk__status">
