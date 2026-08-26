@@ -439,6 +439,12 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   `selectDesks` が席を決めるのはcollectorが解決したactorだけで、役職も配属も推測しません。
   これらを実装する前に決めるべき責務境界・入力契約・停止条件・未決事項は
   [`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) に記録しています（設計記録のみ・実装なし）。
+- **Run / Goal / Approval / Evidence という運用単位はこのrepoにありません。** 本repoが描くのは
+  event streamから畳み込んだactor状態までで、goal・run state machine・承認・risk分類・
+  retry予算・stall検出・永続run履歴はいずれも実装していません。Questをこれらの
+  read model / experience layerとして位置づけ直すための責務境界・契約の形・段取りは
+  [`docs/loop-control-plane-design.md`](docs/loop-control-plane-design.md) に記録しています
+  （設計記録のみ・実装なし）。この計画でもQuestは **read-only / GETのみ / loopback限定** のままです。
 - **人間playerはserverの `state.player` entityからのみ描画します。** `QUEST_PLAYER_NAME`
   で決まる1人だけで、`snapshot` frameが名前を運んできて初めて表示されます（それまでは
   非表示で、人物を捏造しません）。AI社員とは別のactorとして扱い、社員一覧にも在席数にも

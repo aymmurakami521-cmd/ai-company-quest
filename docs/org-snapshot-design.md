@@ -13,7 +13,25 @@ Phase 2の未達条件2つについて、**実装せずに責務境界だけを�
 **「既存事実」「設計判断」「未決事項」「次PR候補」を混ぜない**ことがこの文書の目的です。
 実装とこの文書が食い違った場合は、常に実装（`src/`）が正です。
 
-関連: [event-contract.md](event-contract.md) / [live-wire-contract.md](live-wire-contract.md)
+関連: [event-contract.md](event-contract.md) / [live-wire-contract.md](live-wire-contract.md) /
+[loop-control-plane-design.md](loop-control-plane-design.md)
+
+> **この文書の位置づけ（[loop-control-plane-design.md](loop-control-plane-design.md) による改訂）**
+>
+> 本文書の設計判断は **破棄されていません**。§5 の PR-1 〜 PR-5 も supersede されず、順序も維持されます。
+> ただし新しいロードマップでは Quest を Run State / Event の read model / experience layer として
+> 位置づけ直すため、次の1点だけが変わります。
+>
+> - **§4.7（縮退状態をどの表示面で示すか）の決定は、org 専用ではなく「stream 状態を隠さない、
+>   閉じた語彙の第2 status 面」として行うことを推奨します。** run state・承認待ち・stall も同じ
+>   表示面を使うため、表示面を2度決めないためです。判断基準（閉じた語彙のみ・自由記述なし・
+>   stream 状態を隠さない）は変えません。
+> - この推奨により、**§5 PR-1 の §4.7 決定部分**は Run/Event contract の語彙確定（LCP-1）に依存します。
+>   §4.1〜§4.6 の外部事実確認は依存せず、並行して進められます。
+> - §5 PR-4（決定論的 layout）は Loop Control Plane の前提ではないため、後ろへ移動しても構いません
+>   （分割はしません）。
+>
+> 詳細は [loop-control-plane-design.md §14](loop-control-plane-design.md#14-既存-org-snapshot--roster-ロードマップの移行) を参照してください。
 
 ---
 
