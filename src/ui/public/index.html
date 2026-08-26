@@ -78,6 +78,26 @@
           </canvas>
         </div>
         <div class="office__floor">
+          <!--
+            The human player, from the server's own `state.player` entity.
+            Outside the colleague list on purpose: they are not an AI社員, they
+            hold no seat, they are not selectable, and no Claude event can ever
+            change them. Hidden until a snapshot names one - this screen never
+            invents a person.
+          -->
+          <div class="player" id="player" hidden>
+            <div class="player__sprite" aria-hidden="true">
+              <span class="sprite sprite--head"></span>
+              <span class="sprite sprite--body"></span>
+              <span class="sprite sprite--legs"></span>
+            </div>
+            <p class="player__info">
+              <span class="player__badge">YOU</span>
+              <span class="player__name" id="player-name"></span>
+              <span class="player__note">あなた（人間のplayer）。AI社員とは別のactorで、eventでは変化しません。</span>
+            </p>
+          </div>
+
           <!-- The complete list of actors, canvas overflow or not. -->
           <ul class="desks" id="desks" aria-label="AI社員一覧"></ul>
           <p class="office__empty" id="empty-state">

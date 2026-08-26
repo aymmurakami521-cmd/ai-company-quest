@@ -19,6 +19,7 @@ import type { ActorVisualState, ClientState } from '../src/ui/public/quest-view.
 import {
   ACTOR_VISUAL_STATES,
   MAX_LOG_ENTRIES,
+  PLAYER_NAME_MAX,
   UNATTRIBUTED_AGENT_LABEL,
   applyEvent,
   applyFrame,
@@ -32,9 +33,11 @@ import {
   haltLabel,
   normalizeGapReason,
   normalizeHaltReason,
+  normalizePlayer,
   selectBanner,
   selectDesks,
   selectHeader,
+  selectPlayer,
   setConnectionPhase,
   setSelectedActor,
   visualForState,
@@ -696,6 +699,124 @@ test('switching namespace leaves no selection behind', () => {
   const live = setSelectedActor(officeOf(3), selectDesks(officeOf(3))[0]?.actor_key ?? '');
   assert.notEqual(live.selected_actor_key, null, 'the office under test really had a selection');
   assert.equal(createClientState('demo').selected_actor_key, null, 'a switch builds a state with none');
+});
+
+// ----------------------------------------------------------------- player ---
+
+test('the player comes from the snapshot entity, never from an event', () => {
+  const store = new NamespaceStore({
+    namespace: 'live',
+    player: { kind: 'player', id: 'player', display_name: '歩' },
+  });
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'main', status: 'active' }));
+
+  // Before any snapshot the screen knows of no player, and invents none.
+  const fresh = createClientState('live');
+  assert.equal(fresh.player, null);
+  assert.equal(selectPlayer(fresh), null);
+
+  const state = applySnapshot(fresh, snapshotOf(store));
+  assert.deepEqual(selectPlayer(state), { kind: 'player', id: 'player', display_name: '歩' });
+
+  // Every event path leaves it exactly as it was - the client-side echo of the
+  // reducer contract that no event can reach the player.
+  const wires = record(store);
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'player', status: 'active' }));
+  store.ingestObject(makeEvent({ event_type: 'agent_status', agent_id: 'player', status: 'busy' }));
+  store.ingestObject(makeEvent({ event_type: 'session_end' }));
+  let folded = state;
+  for (const event of wires) folded = applyEvent(folded, event);
+
+  assert.equal(Object.is(folded.player, state.player), true, 'not even a new object');
+  assert.deepEqual(selectPlayer(folded), { kind: 'player', id: 'player', display_name: '歩' });
+  // An *agent* named "player" is a colleague, and does not become the player.
+  assert.ok(
+    selectDesks(folded).some((desk) => desk.display_name === 'player'),
+    'the agent took a desk',
+  );
+});
+
+test('the player is never one of the colleagues, and cannot be selected', () => {
+  const store = new NamespaceStore({
+    namespace: 'live',
+    player: { kind: 'player', id: 'player', display_name: '歩' },
+  });
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'main', status: 'active' }));
+  const state = applySnapshot(createClientState('live'), snapshotOf(store));
+
+  const desks = selectDesks(state);
+  assert.equal(desks.length, 1, 'the player added no seat');
+  assert.equal(
+    desks.some((desk) => desk.display_name === '歩'),
+    false,
+    'and is not in the colleague list',
+  );
+  assert.equal(selectHeader(state).desk_count, 1, 'nor in the seat count');
+
+  // `setSelectedActor` only ever accepts a key somebody is seated under, and
+  // the player is seated under none - so their id selects nobody.
+  for (const key of ['player', '歩', 'kind', 'display_name']) {
+    assert.equal(setSelectedActor(state, key).selected_actor_key, null, `${key} selects nobody`);
+  }
+});
+
+test('a player entity the screen cannot trust is refused rather than shown', () => {
+  for (const raw of [
+    null,
+    undefined,
+    'player',
+    42,
+    {},
+    { kind: 'actor', id: 'player', display_name: 'x' },
+    { kind: 'player', id: '', display_name: 'x' },
+    { kind: 'player', id: 7, display_name: 'x' },
+  ]) {
+    assert.equal(normalizePlayer(raw), null, `${JSON.stringify(raw) ?? 'undefined'} is not a player`);
+  }
+
+  // A name is re-clamped here, whatever the server said, and an empty one falls
+  // back to the entity's own default rather than rendering as a blank figure.
+  const long = normalizePlayer({ kind: 'player', id: 'player', display_name: 'あ'.repeat(500) });
+  assert.equal(long?.display_name.length, PLAYER_NAME_MAX);
+  assert.equal(normalizePlayer({ kind: 'player', id: 'player', display_name: '' })?.display_name, 'Player');
+  assert.equal(normalizePlayer({ kind: 'player', id: 'player' })?.display_name, 'Player');
+
+  // Only the three fields the entity contract defines survive; anything else a
+  // payload carried is dropped rather than passed on to the screen.
+  const extra = normalizePlayer({ kind: 'player', id: 'player', display_name: 'x', secret: 'no' });
+  assert.deepEqual(Object.keys(extra ?? {}).sort(), ['display_name', 'id', 'kind']);
+});
+
+test('a snapshot is the only thing that changes the player, in both directions', () => {
+  const withPlayer = new NamespaceStore({
+    namespace: 'live',
+    player: { kind: 'player', id: 'player', display_name: '歩' },
+  });
+  const state = applySnapshot(createClientState('live'), snapshotOf(withPlayer));
+  assert.notEqual(state.player, null);
+
+  // A snapshot that names none leaves none: the screen does not keep a person
+  // the server has stopped reporting.
+  const without = applySnapshot(state, {
+    namespace: 'live',
+    halted: false,
+    halt_reason: null,
+    last_ingest_seq: 0,
+    state: { actors: {}, sessions: {} },
+  });
+  assert.equal(without.player, null);
+  assert.equal(selectPlayer(without), null);
+
+  // And a frame from the other namespace changes nothing at all.
+  const foreign = applySnapshot(state, {
+    namespace: 'demo',
+    halted: false,
+    halt_reason: null,
+    last_ingest_seq: 0,
+    state: { actors: {}, sessions: {}, player: { kind: 'player', id: 'x', display_name: 'somebody else' } },
+  });
+  assert.deepEqual(selectPlayer(foreign), { kind: 'player', id: 'player', display_name: '歩' });
+  assert.equal(foreign.counters.foreign, 1, 'it was counted as the foreign frame it is');
 });
 
 test('a role is shown only once the collector resolved one', () => {

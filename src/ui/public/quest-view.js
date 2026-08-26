@@ -24,6 +24,13 @@
 /** Shown instead of an `agent_id` the producer could not attribute. */
 export const UNATTRIBUTED_AGENT_LABEL = 'unattributed';
 
+/**
+ * Ceiling on the human player's display name, mirroring `loadConfig`'s own cap
+ * on `QUEST_PLAYER_NAME`. Applied again here because the screen trusts the
+ * length of nothing it did not measure itself.
+ */
+export const PLAYER_NAME_MAX = 64;
+
 /** Ceiling on the client-side activity log. */
 export const MAX_LOG_ENTRIES = 50;
 
@@ -123,6 +130,32 @@ const GAP_LABELS = Object.freeze({
   unknown_event_id: '再接続時のLast-Event-IDがreplay bufferにありませんでした',
   evicted: 'replay bufferから溢れた分があります',
 });
+
+/**
+ * The human player, from a snapshot's `state.player`, or null.
+ *
+ * The player is a *different kind of entity* from a seated actor and is kept
+ * apart from `actors` for exactly one reason: `reduce` in
+ * `src/domain/reducer.ts` never writes it, so no Claude event can move, rename
+ * or remove the person at the keyboard. Mirroring it into `actors` would put it
+ * on the path every event walks, which is the one thing that contract forbids.
+ *
+ * Only the three fields the entity contract defines are kept, and the name is
+ * re-clamped here: a payload is data to be checked, not to be trusted.
+ */
+export function normalizePlayer(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  if (raw.kind !== 'player') return null;
+  if (typeof raw.id !== 'string' || raw.id.length === 0) return null;
+  const name = typeof raw.display_name === 'string' ? raw.display_name : '';
+  return {
+    kind: 'player',
+    id: raw.id.slice(0, PLAYER_NAME_MAX),
+    // An empty name would render as a blank figure with no way to tell who it
+    // is, so the entity's own default stands in - never an invented person.
+    display_name: name.length === 0 ? 'Player' : name.slice(0, PLAYER_NAME_MAX),
+  };
+}
 
 /** A new prototype-less map: a `session_id` of `__proto__` is just a key. */
 function emptyMap() {
@@ -244,6 +277,12 @@ export function createClientState(namespace) {
     },
     sessions: emptyMap(),
     actors: emptyMap(),
+    /**
+     * The human player, once a `snapshot` has named one. Null until then: this
+     * screen never invents the person at the keyboard, it only repeats the
+     * entity the server already holds.
+     */
+    player: null,
     last_ingest_seq: 0,
     last_event_ts: null,
     /**
@@ -472,6 +511,10 @@ export function applySnapshot(state, payload, atMs = null) {
     },
     sessions: copyMap(served.sessions),
     actors,
+    // The snapshot is the server's whole state, so it is also the only thing
+    // that can name the player. A snapshot without one leaves the screen with
+    // none rather than keeping a person the server no longer reports.
+    player: normalizePlayer(served.player),
     last_ingest_seq: typeof payload.last_ingest_seq === 'number' ? payload.last_ingest_seq : 0,
     last_event_ts: latestTs,
     // A snapshot replaces the office wholesale, so an actor that was selected
@@ -616,6 +659,21 @@ export function selectDesks(state) {
       visual,
     };
   });
+}
+
+/**
+ * The human player in the office, or null before a snapshot named one.
+ *
+ * Deliberately *not* a `Desk`: the player has no seat number, no `actor_key`, no
+ * session and no visual state, because none of those are facts about them. A
+ * desk is a runtime actor the collector resolved; this is the person the office
+ * belongs to. Keeping the two projections separate is what stops the player
+ * appearing in the colleague list, in the seat count, or in a selection.
+ */
+export function selectPlayer(state) {
+  const player = state === null || state === undefined ? null : state.player;
+  if (player === null || player === undefined) return null;
+  return { kind: 'player', id: player.id, display_name: player.display_name };
 }
 
 /** Header summary: mode, connection, counts and the emptiness of the office. */

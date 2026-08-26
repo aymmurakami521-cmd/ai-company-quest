@@ -54,6 +54,18 @@ export type ViewActor = {
   event_count: number;
 };
 
+/**
+ * The human player, as the server's `state.player` entity reports them.
+ *
+ * A different kind of entity from `ViewActor`, and kept in its own field for
+ * that reason: `reduce` never writes it, so no Claude event can change it.
+ */
+export type ViewPlayer = {
+  kind: 'player';
+  id: string;
+  display_name: string;
+};
+
 export type ViewSession = {
   session_id: string;
   started_at: string | null;
@@ -97,6 +109,8 @@ export type ClientState = {
   connection: ViewConnection;
   sessions: Record<string, ViewSession>;
   actors: Record<string, ViewActor>;
+  /** Null until a `snapshot` names one. Never invented by the screen. */
+  player: ViewPlayer | null;
   last_ingest_seq: number;
   last_event_ts: string | null;
   /** `actor_key` of the seat the operator selected, or `null`. Always one that is seated. */
@@ -118,7 +132,11 @@ export type SnapshotPayload = {
   halted: boolean;
   halt_reason: string | null;
   last_ingest_seq: number;
-  state: { actors?: Record<string, ViewActor>; sessions?: Record<string, ViewSession> };
+  state: {
+    actors?: Record<string, ViewActor>;
+    sessions?: Record<string, ViewSession>;
+    player?: ViewPlayer;
+  };
 };
 
 /** The `fail_closed` control frame: ingestion stopped while this client was connected. */
@@ -195,7 +213,20 @@ export type Banner = {
   readonly message: string;
 };
 
+/**
+ * The player, projected for the screen.
+ *
+ * Not a `Desk`: no seat, no `actor_key`, no session, no visual state, because
+ * none of those are facts about the person at the keyboard.
+ */
+export type PlayerProjection = {
+  kind: 'player';
+  id: string;
+  display_name: string;
+};
+
 export declare const UNATTRIBUTED_AGENT_LABEL: string;
+export declare const PLAYER_NAME_MAX: number;
 export declare const MAX_LOG_ENTRIES: number;
 export declare const ACTOR_VISUAL_STATES: readonly ActorVisualState[];
 export declare const BANNER_CODES: readonly BannerCode[];
@@ -216,7 +247,9 @@ export declare function haltLabel(reason: unknown): string | null;
 export declare function normalizeGapReason(value: unknown): GapReasonToken | null;
 export declare function gapLabel(reason: unknown): string | null;
 export declare function applyFrame(state: ClientState, frame: Frame): ClientState;
+export declare function normalizePlayer(raw: unknown): ViewPlayer | null;
 export declare function selectDesks(state: ClientState): Desk[];
+export declare function selectPlayer(state: ClientState | null | undefined): PlayerProjection | null;
 export declare function selectHeader(state: ClientState): Header;
 export declare function selectBanner(header: Header): Banner;
 export declare function describeFreshness(state: ClientState, nowMs: number | null): string;

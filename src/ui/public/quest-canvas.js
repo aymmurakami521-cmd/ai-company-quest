@@ -45,6 +45,9 @@ export const PALETTE = Object.freeze({
   clockFace: '#e8ecf6',
   badge: '#f7d51d',
   badgeInk: '#1b2440',
+  /** The player's badge. A different colour from the MAIN badge on purpose. */
+  playerBadge: '#7fc8ff',
+  playerBadgeInk: '#0a0d14',
 });
 
 /** Per-state accent, used together with - never instead of - the marker shape. */
@@ -280,6 +283,51 @@ function drawCharacter(ctx, actor) {
   }
 }
 
+/** Skin inside a one-pixel dark outline. Used for the player's bare limbs. */
+function limb(ctx, color, box) {
+  fill(ctx, PALETTE.outline, box.x, box.y, box.width, box.height);
+  fill(ctx, color, box.x + 1, box.y + 1, Math.max(1, box.width - 2), Math.max(1, box.height - 2));
+}
+
+/**
+ * The human player: standing, with legs, a badge and a name.
+ *
+ * Shares the face-drawing code with a colleague, and nothing else. There is no
+ * chair, no desk, no monitor and no state marker here - the player has no
+ * runtime state to report, because no Claude event ever touches them.
+ */
+function drawPlayer(ctx, player) {
+  if (player === null || player === undefined) return;
+  const { appearance } = player;
+
+  limb(ctx, appearance.trouser, player.leg_left);
+  limb(ctx, appearance.trouser, player.leg_right);
+  limb(ctx, appearance.skin, player.arm_left);
+  limb(ctx, appearance.skin, player.arm_right);
+
+  panel(ctx, appearance.shirt, PALETTE.outline, player.body);
+  panel(ctx, appearance.skin, PALETTE.outline, player.head);
+  drawHair(ctx, player);
+
+  const eye = Math.max(1, Math.round(player.head.width / 7));
+  const eyeY = player.head.y + Math.round(player.head.height * 0.55);
+  fill(ctx, PALETTE.outline, player.head.x + eye * 2, eyeY, eye, eye);
+  fill(ctx, PALETTE.outline, player.head.x + player.head.width - eye * 3, eyeY, eye, eye);
+
+  fill(ctx, PALETTE.playerBadge, player.badge.x, player.badge.y, player.badge.width, player.badge.height);
+  label(
+    ctx,
+    PALETTE.playerBadgeInk,
+    player.badge_text,
+    player.badge.x + Math.round(player.badge.width / 2),
+    player.badge.y + player.badge.height - Math.max(1, Math.round(player.badge.height / 5)),
+    Math.max(6, player.badge.height - 2),
+    'center',
+  );
+
+  label(ctx, PALETTE.text, player.name_label.text, player.name_label.x, player.name_label.y, player.name_label.size, 'center');
+}
+
 function drawMarker(ctx, actor) {
   const bitmap = markerBitmap(actor.state);
   const pixel = Math.max(1, Math.round(actor.marker.width / 5));
@@ -336,6 +384,8 @@ export function drawWorld(ctx, world) {
   drawFloor(ctx, world.floor);
 
   for (const actor of world.actors) drawActor(ctx, actor);
+  // The player last, so an office at its row limit cannot paint over them.
+  drawPlayer(ctx, world.player ?? null);
 
   if (world.empty) {
     label(ctx, PALETTE.textDim, world.notice.text, world.notice.x, world.notice.y, world.notice.size, 'center');

@@ -122,6 +122,55 @@ test('every colleague can be selected with a keyboard alone', () => {
   assert.equal(/addEventListener\('key(down|up|press)'/.test(APP), false, 'no key handler of our own');
 });
 
+test('a re-render never takes the focus out of the desk button holding it', () => {
+  // The behaviour is held end-to-end in `test/ui-dom.test.ts`, against a DOM
+  // that drops the focus when a focused node is detached. What belongs here is
+  // the *shape* that makes it possible, so a future edit cannot quietly go back
+  // to rebuilding the list on every frame.
+  assert.equal(/dom\.desks\.replaceChildren\(/.test(APP), false, 'the colleague list is never rebuilt wholesale');
+  assert.ok(APP.includes('renderedNodes.get(desk.actor_key)'), 'each colleague keeps their own element');
+  assert.ok(APP.includes('if (current !== node.item)'), 'and it is moved only when it is in the wrong place');
+
+  // Focus is *kept*, never taken: the app still moves nobody's focus anywhere.
+  assert.equal(APP.includes('.focus()'), false, 'the script never calls focus');
+  assert.equal(/activeElement/.test(APP), false, 'and never reads who has it');
+
+  // A colleague who left takes their element with them, so no stale node can
+  // hold the focus or be pressed for somebody who is no longer seated.
+  assert.ok(APP.includes('if (!next.has(key)) node.item.remove()'), 'departed colleagues are removed');
+});
+
+test('reusing a desk element still keeps wire identifiers out of the DOM', () => {
+  // The element is looked up by `actor_key` through a Map held in the module -
+  // the key itself never becomes an attribute a page inspector or a selector
+  // could read it out of.
+  assert.equal(/dataset\.\w+ = desk\.(actor_key|session_id|display_name)/.test(APP), false);
+  assert.equal(/setAttribute\([^)]*desk\.(actor_key|session_id|display_name)/.test(APP), false);
+  assert.ok(APP.includes('renderedDesks[Number(button.dataset.deskIndex)]'), 'selection still resolves by position');
+});
+
+test('the human player is shown, and is not something to operate', () => {
+  const block = /<div class="player" id="player" hidden>[\s\S]*?<\/p>\s*<\/div>/.exec(HTML);
+  assert.ok(block !== null, 'the page has a player region');
+  const markup = String(block[0]);
+
+  // Nothing to focus and nothing to press: the player is a fact, not a control.
+  assert.equal(/<button|tabindex|data-action|aria-pressed/.test(markup), false, 'no control on the player');
+  // …and they are outside the colleague list, so tabbing through seats never
+  // lands on them and the list's accessible name stays honest.
+  assert.ok(HTML.indexOf(markup) < HTML.indexOf('<ul class="desks"'), 'the player comes before the list');
+  assert.equal(markup.includes('<ul'), false, 'and is not inside it');
+
+  // Their name is written as text, like every other name on this screen.
+  assert.ok(APP.includes('dom.playerName.textContent = player.display_name'));
+  assert.equal(/playerName\.(innerHTML|outerHTML|insertAdjacentHTML)/.test(APP), false);
+  // Hidden until the server names one, and the stylesheet honours that.
+  assert.ok(APP.includes('dom.player.hidden = player === null'));
+  assert.match(CSS, /\.player\[hidden\]\s*\{\s*display:\s*none/, 'the hidden attribute is not defeated by the layout');
+  // The badge is decoration next to the name, so it is readable as text.
+  assert.ok(markup.includes('class="player__badge"'));
+});
+
 test('the canvas is never the thing being operated', () => {
   // Condition: the DOM accessibility layer is the record of truth for input. The
   // canvas is `aria-hidden` decoration, so nothing may be bound to it and it may

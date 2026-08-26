@@ -33,6 +33,8 @@ import {
 } from '../src/ui/public/quest-view.js';
 import type { Rect, World, WorldActor } from '../src/ui/public/quest-world.js';
 import {
+  ACTOR_SHIRT_COLORS,
+  ACTOR_TROUSER_COLORS,
   APPEARANCE_KEYS,
   EMPTY_COLUMNS,
   MAX_COLUMNS,
@@ -43,6 +45,8 @@ import {
   MAX_SCALE,
   MIN_DEVICE_SCALE,
   MIN_SCALE,
+  PLAYER_BADGE_TEXT,
+  PLAYER_OUTFIT,
   VIEWPORT_HEIGHT_RATIO,
   appearanceFor,
   appearanceSeed,
@@ -50,6 +54,7 @@ import {
   deviceScaleFor,
   fitLabel,
   measureCanvasViewport,
+  playerAppearanceFor,
 } from '../src/ui/public/quest-world.js';
 
 // ------------------------------------------------------------- fixtures ---
@@ -711,7 +716,7 @@ test('an unresolved role is never guessed at, on the canvas either', () => {
   assert.equal(world.actors.length, 1, 'and no extra colleague is imagined');
 });
 
-test('a world is built from the projections only: no player and no extra actor', () => {
+test('a world is built from the projections only: no invented actor', () => {
   const state = demoState();
   const desks = selectDesks(state);
   const world = buildWorld({ desks, header: selectHeader(state), viewport: VIEWPORT });
@@ -721,6 +726,146 @@ test('a world is built from the projections only: no player and no extra actor',
     world.actors.map((actor) => actor.actor_key),
     desks.map((entry) => entry.actor_key),
   );
+  // No player was passed in, so there is none - the canvas invents nobody.
+  assert.equal(world.player, null);
+  assert.equal(world.hud.player_present, false);
+});
+
+// ----------------------------------------------------------------- player ---
+
+const PLAYER = { kind: 'player' as const, id: 'player', display_name: '歩' };
+
+test('the player is drawn as their own character, never as a colleague', () => {
+  const desks = [desk(1, 'working', { is_main_orchestrator: true }), desk(2, 'idle')];
+  const world = buildWorld({ desks, player: PLAYER, header: emptyHeader(), viewport: VIEWPORT });
+
+  assert.notEqual(world.player, null);
+  assert.equal(world.player?.kind, 'player');
+  assert.equal(world.player?.id, 'player');
+  assert.equal(world.player?.name_label.text, '歩');
+  assert.equal(world.player?.badge_text, PLAYER_BADGE_TEXT);
+
+  // Not a seat, not an actor, not part of the count the canvas reports.
+  assert.equal(world.actors.length, desks.length, 'the office still seats exactly the colleagues');
+  assert.equal(JSON.stringify(world.actors).includes('"kind"'), false, 'no actor gained a kind');
+  assert.equal(world.hud.desk_count, desks.length, 'and the seat count did not grow');
+  assert.equal(world.hud.player_present, true);
+  assert.equal(world.overflow.total, desks.length);
+
+  // Different parts, not just different colours: standing, with legs, and none
+  // of the furniture a working colleague sits at.
+  assert.deepEqual(
+    Object.keys(world.player ?? {}).sort(),
+    [
+      'appearance', 'arm_left', 'arm_right', 'badge', 'badge_text', 'body', 'cell', 'head',
+      'id', 'kind', 'leg_left', 'leg_right', 'name_label',
+    ].sort(),
+  );
+  for (const part of ['chair', 'desk', 'desk_front', 'monitor', 'marker', 'seat', 'state', 'session_id']) {
+    assert.equal(part in (world.player ?? {}), false, `the player has no ${part}`);
+  }
+});
+
+test('the player wears an outfit no colleague can be given', () => {
+  const world = buildWorld({ desks: [], player: PLAYER, header: emptyHeader(), viewport: VIEWPORT });
+  const outfit = world.player?.appearance;
+
+  assert.equal(outfit?.shirt, PLAYER_OUTFIT.shirt);
+  assert.equal(outfit?.trouser, PLAYER_OUTFIT.trouser);
+  assert.equal(ACTOR_SHIRT_COLORS.includes(PLAYER_OUTFIT.shirt), false, 'no colleague can wear that shirt');
+  assert.equal(ACTOR_TROUSER_COLORS.includes(PLAYER_OUTFIT.trouser), false, 'nor those trousers');
+
+  // Over a wide spread of keys, no actor ever lands on the player's outfit.
+  for (let index = 0; index < 400; index += 1) {
+    const look = appearanceFor(`sess-${index}:agent-${index}`);
+    assert.notEqual(look.shirt, PLAYER_OUTFIT.shirt);
+    assert.notEqual(look.trouser, PLAYER_OUTFIT.trouser);
+  }
+
+  // …including an actor whose key is exactly the player's id, or the salted
+  // form of it: the two derivations share no key space.
+  for (const key of ['player', 'player:player']) {
+    assert.notEqual(appearanceFor(key).shirt, PLAYER_OUTFIT.shirt);
+  }
+  assert.deepEqual(playerAppearanceFor('player'), world.player?.appearance, 'and it is the salted derivation');
+});
+
+test('the player looks the same every time, and different players differ', () => {
+  const input = { desks: [desk(1, 'idle')], player: PLAYER, header: emptyHeader(), viewport: VIEWPORT };
+  assert.deepEqual(buildWorld(input).player, buildWorld(input).player, 'same input, same person');
+
+  const other = buildWorld({ ...input, player: { ...PLAYER, id: 'someone-else' } });
+  assert.notDeepEqual(other.player?.appearance, buildWorld(input).player?.appearance, 'a different id, a different face');
+  // The name is what is shown, but the *look* follows the id, so renaming the
+  // same player does not turn them into somebody else.
+  const renamed = buildWorld({ ...input, player: { ...PLAYER, display_name: 'Player' } });
+  assert.deepEqual(renamed.player?.appearance, buildWorld(input).player?.appearance);
+  assert.equal(renamed.player?.name_label.text, 'Player');
+});
+
+test('the player stands in the room, below the seats and inside the walls', () => {
+  for (const count of [0, 1, 5, 6, 7, MAX_COLUMNS * MAX_ROWS]) {
+    const desks = Array.from({ length: count }, (_unused, index) => desk(index + 1, 'idle'));
+    const world = buildWorld({ desks, player: PLAYER, header: emptyHeader(), viewport: VIEWPORT });
+    const player = world.player;
+    assert.ok(player !== null, `${count} seats: the player is there`);
+
+    for (const box of [player.head, player.body, player.arm_left, player.arm_right, player.leg_left, player.leg_right, player.badge]) {
+      assert.ok(contains(world.room, box), `${count} seats: the player is inside the room`);
+      assert.ok(contains({ x: 0, y: 0, width: world.canvas.width, height: world.canvas.height }, box));
+    }
+    // And below every seat, so no colleague is painted over.
+    for (const actor of world.actors) {
+      assert.ok(player.cell.y >= actor.cell.y + actor.cell.height, `${count} seats: the player stands clear of seat ${actor.seat}`);
+    }
+  }
+});
+
+test('adding a player moves no colleague out of their seat', () => {
+  const desks = Array.from({ length: 9 }, (_unused, index) => desk(index + 1, 'idle'));
+  const without = buildWorld({ desks, header: emptyHeader(), viewport: VIEWPORT });
+  const with_ = buildWorld({ desks, player: PLAYER, header: emptyHeader(), viewport: VIEWPORT });
+
+  // The seating is the same seating: same colleagues, same seat numbers, same
+  // grid. The player is added to the room, never in place of somebody.
+  assert.deepEqual(
+    with_.actors.map((actor) => ({ seat: actor.seat, key: actor.actor_key })),
+    without.actors.map((actor) => ({ seat: actor.seat, key: actor.actor_key })),
+  );
+  assert.equal(with_.columns, without.columns);
+  assert.equal(with_.rows, without.rows);
+  assert.ok(with_.room.height > without.room.height, 'the room grew to hold them');
+
+  // A taller room in the same viewport is drawn a little smaller, as any taller
+  // office would be - the strip is not carved out of the desks.
+  assert.ok(with_.scale <= without.scale, 'the office scales to fit, it does not overflow');
+  assert.ok(contains({ x: 0, y: 0, width: with_.canvas.width, height: with_.canvas.height }, with_.room));
+});
+
+test('a player entity the canvas cannot trust is left out rather than guessed at', () => {
+  const desks = [desk(1, 'idle')];
+  for (const player of [
+    null,
+    undefined,
+    'player',
+    {},
+    { kind: 'actor', id: 'player' },
+    { kind: 'player', id: '' },
+  ] as unknown[]) {
+    const world = buildWorld({ desks, player, header: emptyHeader(), viewport: VIEWPORT } as never);
+    assert.equal(world.player, null, `${JSON.stringify(player) ?? 'undefined'} draws nobody`);
+    assert.equal(world.hud.player_present, false);
+  }
+
+  // A very long name is truncated to the label box, like every other name.
+  const long = buildWorld({
+    desks,
+    player: { kind: 'player', id: 'player', display_name: 'あ'.repeat(120) },
+    header: emptyHeader(),
+    viewport: VIEWPORT,
+  });
+  assert.ok((long.player?.name_label.text.length ?? 0) < 120);
+  assert.ok(long.player?.name_label.text.endsWith('…'));
 });
 
 test('a prototype-shaped actor key is just a key here too', () => {
