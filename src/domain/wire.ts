@@ -19,6 +19,11 @@ export type WireEvent = {
   actor_key: string;
   agent_id: string | null;
   role: string | null;
+  /**
+   * Runtime agent type as reported by the producer. Published separately from
+   * `role` on purpose: it is not an org role and must not be rendered as one.
+   */
+  runtime_agent_type: string | null;
   resolved: boolean;
   is_main_orchestrator: boolean;
   status: string | null;
@@ -41,6 +46,7 @@ export const WIRE_EVENT_KEYS: readonly string[] = [
   'actor_key',
   'agent_id',
   'role',
+  'runtime_agent_type',
   'resolved',
   'is_main_orchestrator',
   'status',
@@ -65,6 +71,7 @@ export function toWireEvent(ingested: IngestedEvent): WireEvent {
     actor_key: actor.actor_key,
     agent_id: actor.agent_id,
     role: actor.role,
+    runtime_agent_type: event.runtime_agent_type,
     resolved: actor.resolved,
     is_main_orchestrator: actor.is_main_orchestrator,
     status: event.status,

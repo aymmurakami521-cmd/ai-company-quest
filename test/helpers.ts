@@ -18,6 +18,7 @@ export function makeEvent(overrides: Partial<SanitizedEvent> = {}): SanitizedEve
     event_type: 'agent_start',
     agent_id: 'main',
     agent_role: null,
+    runtime_agent_type: null,
     producer_seq: null,
     status: null,
     tool_name: null,

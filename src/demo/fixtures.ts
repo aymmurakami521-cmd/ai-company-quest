@@ -20,6 +20,7 @@ const BASE: Omit<SanitizedEvent, 'event_id' | 'ts' | 'event_type'> = {
   session_id: 'demo-session-01',
   agent_id: 'main',
   agent_role: null,
+  runtime_agent_type: null,
   producer_seq: null,
   status: null,
   tool_name: null,

@@ -15,13 +15,21 @@ AI Companyの稼働状況をレトロゲーム風UIで可視化するアプリ�
 1つのpure reducerで状態へ畳み込み、`127.0.0.1` 限定のSSEで再接続可能に配信します。
 
 ```
-sanitized JSONL file
+sanitized JSONL file (Claude Code Hook, rich/nested schema_version=2)
    └─ tailer (partial line / rotation / truncation)
-        └─ strict validation (schema_version=2, fail closed)
-             └─ dedupe by event_id  →  collector-assigned ingest_seq
-                  └─ shared pure reducer  →  QuestState
-                       └─ SSE (127.0.0.1 only, id: = event_id)
+        └─ external wire validation (src/domain/hookWire.ts, fail closed)
+             └─ allowlist adapter    (src/domain/hookAdapter.ts)
+                  └─ internal normalized model + content re-check (src/domain/validate.ts)
+                       └─ dedupe by event_id  →  collector-assigned ingest_seq
+                            └─ shared pure reducer  →  QuestState
+                                 └─ SSE (127.0.0.1 only, id: = event_id)
 ```
+
+外部wireと内部modelは **どちらも `schema_version: 2` ですが別の契約** です。
+どちらで読むかは `NamespaceStore` の `inputContract` が生成時に決め、payloadの形からは
+推測しません（LIVEは `claude_hook_v2`、DEMOは `internal_normalized`）。
+契約と完全なfield mappingは [`docs/live-wire-contract.md`](docs/live-wire-contract.md) と
+[`docs/event-contract.md`](docs/event-contract.md) にあります。
 
 画面はこのstreamの **snapshotを正本** とし、後続のeventを同じ規則で畳み込みます
 （`src/ui/public/quest-view.js`）。そのfoldが `src/domain/reducer.ts` と一致することは
@@ -130,8 +138,9 @@ SSE frameの構造:
 `fail_closed` は、接続中にingestがhaltしたことを伝えるframeです。haltはeventを生まないため、
 これがないと接続済みclientはheartbeatを受け続けたまま「接続済み」を表示し続けてしまいます。
 payloadは `{ namespace, halted: true, reason, detail }` で、`reason` は
-`unsupported_schema` / `state_limit` の閉じた語彙、`detail` は `/health` の `halt_reason` と
-同じsanitized断片（`schema_version:<n>` または `<limit>:<max>`）です。stream内容は含みません。
+`unsupported_schema` / `state_limit` / `producer_capacity` の閉じた語彙、`detail` は
+`/health` の `halt_reason` と同じsanitized断片（`schema_version:<n>`、`<limit>:<max>`、
+`producer:limit_reached`）です。stream内容は含みません。
 haltは接続中のclientへ一度だけ通知され、`snapshot` を受け取る接続では
 `snapshot` の `halted` / `halt_reason` からも判定できます。
 
@@ -201,7 +210,8 @@ ingestがhaltしている場合の `取り込み停止 (fail-closed)` を表示�
 | `EMPTY` | `⋯` | 接続済みだが在席0 |
 | `CONNECTED` | `●` | 接続済み・N席のstateを表示中 |
 
-halt reason（`unsupported_schema` / `state_limit`）とgap reason（`invalid_last_event_id` /
+halt reason（`unsupported_schema` / `state_limit` / `producer_capacity`）と
+gap reason（`invalid_last_event_id` /
 `unknown_event_id` / `evicted`）はどちらも**閉じた語彙**です。既知のtokenだけが日本語labelへ
 変換され、未知の文字列はbannerへ出しません（wireの自由記述をそのまま表示しません）。
 
@@ -303,7 +313,11 @@ replay buffer、subscriber listのいずれも共有しません。
 |------|------|
 | `QUEST_INPUT_PATH` 未設定 | LIVEを起動しない（exit 1） |
 | `schema_version` が2以外（LIVE） | ingestを即時halt。以降の行は全て拒否し、`/health` は `fail_closed` |
+| producerのcapacity marker（LIVE） | ingestを即時halt（`producer_capacity`）。markerは業務eventとして畳み込まず、履歴欠落を固定文言で表示 |
 | state保持上限に到達（LIVE / DEMO両方） | ingestを即時halt。上限超過のeventは適用せず、既存stateは削除も置換もしない |
+| `producer.kind` / `producer.env` 不一致（LIVE） | その行だけ拒否（`unsupported_producer`） |
+| `session_id` が `null`（LIVE） | その行だけ拒否（`unattributable`）。sentinelは作らない |
+| known table外の `hook_event`（LIVE） | その行だけ拒否（`unsupported_hook_event`）。意味を推測しない |
 | malformed JSON / 契約key欠落 / 型不一致 | その行だけ拒否・理由別に計数 |
 | 行がoversized | 破棄・計数（次のnewlineまでskip） |
 | 絶対path・shell command・credential様の文字列 | その行を拒否（修復や部分redactはしない） |
@@ -344,7 +358,13 @@ reducerが保持する構造は、event内容で増えるものすべてに明�
 ## 安全境界
 
 - 出力するのは `src/domain/wire.ts` のwhitelistのみ。producerの未知keyは検証前にdropします。
+- 外部wireは `src/domain/hookWire.ts` がmodelしたkeyだけを組み立て、`src/domain/hookAdapter.ts` が
+  mapping表の行だけを使います。producer objectのspreadはどこでも行いません。
+- adapterの出力は内部validatorへ **もう一度** 通します。mappingが変わっても内容規則は効き続けます。
+- `agent.type`（runtime agent type）は組織上のroleではないため `agent_role` へ入れません。
+  `runtime_agent_type` として別fieldに保持し、roleはActorDirectoryだけが与えます。
 - raw prompt、raw command、絶対path、secret/credential、内部reasoningは保存も配信もしません。
+  producerが出さないこれらの値を、このrepositoryから追加取得することもありません。
 - 拒否理由は field名 + rule名のみで、問題のあった文字列自体は含めません。
 - 入力pathは設定由来のみ。event内容からpathを組み立てることも、任意ファイルを読む機能もありません。
 - CORS headerを出さないため、任意のweb originからstreamを読むことはできません。

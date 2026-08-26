@@ -14,7 +14,7 @@
  */
 
 import type { SanitizedEvent } from './event.ts';
-import { REQUIRED_KEYS, SUPPORTED_SCHEMA_VERSION } from './event.ts';
+import { CONTRACT_KEYS, REQUIRED_KEYS, SUPPORTED_SCHEMA_VERSION } from './event.ts';
 
 export type RejectReason =
   | 'blank'
@@ -43,7 +43,7 @@ const EVENT_TYPE_SLUG = /^[a-z][a-z0-9_]{0,63}$/;
 const LABEL_SLUG = /^[A-Za-z0-9_.:@#| -]{1,128}$/;
 const ISO_TS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 /** True when the value contains C0/C7F control characters (tab included). */
-function hasControlChars(value: string): boolean {
+export function hasControlChars(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
     if (code < 0x20 || code === 0x7f) return true;
@@ -181,6 +181,16 @@ export function validateEventObject(raw: unknown): ValidationResult {
   const agentRole = checkNullableLabel(raw, 'agent_role', LABEL_SLUG);
   if (!agentRole.ok) return agentRole.result;
 
+  // Optional key: absent normalizes to null, present is checked like any label.
+  // Deliberately validated separately from `agent_role` - the two must not be
+  // interchangeable, here or anywhere downstream.
+  let runtimeAgentType: string | null = null;
+  if (Object.prototype.hasOwnProperty.call(raw, 'runtime_agent_type')) {
+    const checked = checkNullableLabel(raw, 'runtime_agent_type', LABEL_SLUG);
+    if (!checked.ok) return checked.result;
+    runtimeAgentType = checked.value;
+  }
+
   const status = checkNullableLabel(raw, 'status', LABEL_SLUG);
   if (!status.ok) return status.result;
 
@@ -207,7 +217,7 @@ export function validateEventObject(raw: unknown): ValidationResult {
     summary = rawSummary;
   }
 
-  const known = new Set<string>(REQUIRED_KEYS);
+  const known = new Set<string>(CONTRACT_KEYS);
   const droppedKeys = Object.keys(raw).filter((key) => !known.has(key));
 
   // Explicit whitelist construction: producer keys are never spread in.
@@ -220,6 +230,7 @@ export function validateEventObject(raw: unknown): ValidationResult {
     event_type: eventType,
     agent_id: agentId.value,
     agent_role: agentRole.value,
+    runtime_agent_type: runtimeAgentType,
     producer_seq: producerSeq.value,
     status: status.value,
     tool_name: toolName.value,
