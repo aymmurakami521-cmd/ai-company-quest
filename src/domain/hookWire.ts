@@ -299,26 +299,77 @@ export const HOOK_RESEARCH_TOOL_NAMES: readonly string[] = ['WebSearch', 'WebFet
 export const HOOK_RESEARCH_PRE_LABEL = '外部資料を調査中';
 export const HOOK_RESEARCH_POST_LABEL = '外部調査の完了を確認しました';
 
+/** What the producer classifies one tool name as: its category and its facility. */
+export type HookToolClass = { category: HookToolCategory; facility: HookFacility };
+
 /**
- * Where a tool category is performed in the office.
+ * The producer's `TOOL_CATEGORY` table, keyed by tool name.
  *
- * The producer emits `activity.facility` as a function of the tool category. The
- * two records published verbatim with the contract pin `exec -> terminal` and
- * `delegate -> meeting`; the remaining rows are the only assignment of the
- * closed facility vocabulary that is consistent with them and with the fixed
- * non-tool tuples above. A row whose facility disagrees is refused rather than
- * folded, so a producer-side change shows up as a content-free rejection.
+ * `activity.facility` is NOT a function of `tool.category`: the producer derives
+ * `(kind, facility)` together from the tool name (`_category(tool_name,
+ * mcp_server)`), and one category can sit in two facilities - `Grep` is
+ * `search / search-terminal` while `WebSearch` and `WebFetch` are
+ * `search / antenna`. A category-keyed facility table cannot express that, so
+ * the name is the key here.
+ *
+ * Verbatim from the pinned producer
+ * (`aymmurakami521-cmd/ai-company@3306b2b3c07a17a7d1de2c66e6669f0e6bb02a2f`,
+ * `scripts/quest-hook-emit.py`). `Skill` is listed there as `skill / workshop`,
+ * but `workshop` is outside the emitted facility vocabulary and the producer's
+ * own `_safe_facility` rewrites it to `desk` before the record is written, so
+ * `skill / desk` is what actually appears on the wire.
+ *
+ * A `Map`, not an object literal: the key is stream content and a lookup must
+ * never answer with an inherited `Object.prototype` member.
  */
-export const HOOK_TOOL_FACILITY: ReadonlyMap<HookToolCategory, HookFacility> = new Map<HookToolCategory, HookFacility>([
-  ['read', 'shelf'],
-  ['write', 'desk'],
-  ['exec', 'terminal'],
-  ['search', 'search-terminal'],
-  ['mcp', 'antenna'],
-  ['delegate', 'meeting'],
-  ['skill', 'portal'],
-  ['idle', 'desk'],
+export const HOOK_TOOL_CLASS: ReadonlyMap<string, HookToolClass> = new Map<string, HookToolClass>([
+  ['Read', { category: 'read', facility: 'shelf' }],
+  ['Glob', { category: 'read', facility: 'shelf' }],
+  ['Write', { category: 'write', facility: 'desk' }],
+  ['Edit', { category: 'write', facility: 'desk' }],
+  ['NotebookEdit', { category: 'write', facility: 'desk' }],
+  ['Bash', { category: 'exec', facility: 'terminal' }],
+  ['PowerShell', { category: 'exec', facility: 'terminal' }],
+  ['Grep', { category: 'search', facility: 'search-terminal' }],
+  ['WebSearch', { category: 'search', facility: 'antenna' }],
+  ['WebFetch', { category: 'search', facility: 'antenna' }],
+  ['Agent', { category: 'delegate', facility: 'meeting' }],
+  ['Skill', { category: 'skill', facility: 'desk' }],
+  ['TaskCreate', { category: 'idle', facility: 'desk' }],
+  ['TaskUpdate', { category: 'idle', facility: 'desk' }],
+  ['TaskGet', { category: 'idle', facility: 'desk' }],
+  ['TaskList', { category: 'idle', facility: 'desk' }],
+  ['TaskStop', { category: 'idle', facility: 'desk' }],
+  ['TaskOutput', { category: 'idle', facility: 'desk' }],
 ]);
+
+/** An MCP tool is named `mcp__<server>__<tool>` and reports its server. */
+export const HOOK_MCP_TOOL_PREFIX = 'mcp__';
+export const HOOK_MCP_TOOL_CLASS: HookToolClass = { category: 'mcp', facility: 'portal' };
+
+/** The producer's own fallback for a tool it does not classify, and for none. */
+export const HOOK_TOOL_FALLBACK_CLASS: HookToolClass = { category: 'idle', facility: 'desk' };
+
+/**
+ * Classifies a tool row exactly as the pinned producer does.
+ *
+ * Both inputs are already validated: `tool.name` matched the identifier charset
+ * and `tool.mcp_server` is a bounded, control-character-free string. The server
+ * is read as a signal only - never as text - and the name is compared against a
+ * closed table, so nothing here is derived from unvalidated content.
+ *
+ * An unknown or absent name is the producer's `idle / desk` fallback rather than
+ * a rejection: the producer emits that row, and refusing it would drop real
+ * history. It stays safe because the label is still fixed by the class, so an
+ * unknown name can only ever carry `作業中` / `ツール処理を確認しました`.
+ */
+export function hookToolClass(toolName: string | null, mcpServer: string | null): HookToolClass {
+  if (mcpServer !== null || (toolName !== null && toolName.startsWith(HOOK_MCP_TOOL_PREFIX))) {
+    return HOOK_MCP_TOOL_CLASS;
+  }
+  if (toolName === null) return HOOK_TOOL_FALLBACK_CLASS;
+  return HOOK_TOOL_CLASS.get(toolName) ?? HOOK_TOOL_FALLBACK_CLASS;
+}
 
 /**
  * The producer's capacity marker, in full. It is a control row, not an event:
@@ -481,6 +532,7 @@ type ActivitySeen = {
   hookEvent: string | null;
   toolName: string | null;
   toolCategory: HookToolCategory | null;
+  toolMcpServer: string | null;
   kind: HookActivityKind;
   facility: HookFacility;
   label: string;
@@ -493,28 +545,32 @@ type ActivitySeen = {
 /**
  * Resolves the one activity tuple the producer emits for a tool row.
  *
- * Everything it reads has already been validated: `tool.category` is a member of
- * the closed category vocabulary and `tool.name` matched the identifier charset.
- * Nothing here is derived from an unvalidated value.
+ * Everything it reads has already been validated: `tool.name` matched the
+ * identifier charset, `tool.mcp_server` is bounded and control-free, and
+ * `tool.category` is a member of the closed category vocabulary. The tuple is
+ * derived from the *name* (through `hookToolClass`), and the category the
+ * producer emitted must agree with it - so a row cannot pick a category to
+ * borrow another tool's facility or label.
  */
 function toolActivityContract(
   phase: 'pre' | 'post' | 'failure',
   category: HookToolCategory,
-  toolName: string,
+  toolName: string | null,
+  mcpServer: string | null,
 ): HookActivityContract {
-  const facility = HOOK_TOOL_FACILITY.get(category);
-  // Unreachable: the map covers `HOOK_TOOL_CATEGORIES` exactly, and a test pins
-  // that. Fail closed anyway rather than assert a value into existence.
-  if (facility === undefined) return reject('contract_mismatch', 'tool.category:no_facility');
+  const tool = hookToolClass(toolName, mcpServer);
+  if (category !== tool.category) reject('contract_mismatch', 'tool.category:not_fixed_for_tool');
 
-  const isResearch = HOOK_RESEARCH_TOOL_NAMES.includes(toolName);
+  const isResearch = toolName !== null && HOOK_RESEARCH_TOOL_NAMES.includes(toolName);
   let label: string | undefined;
   if (phase === 'failure') label = HOOK_TOOL_FAILURE_LABEL;
-  else if (phase === 'pre') label = isResearch ? HOOK_RESEARCH_PRE_LABEL : HOOK_PRE_TOOL_LABELS.get(category);
-  else label = isResearch ? HOOK_RESEARCH_POST_LABEL : HOOK_POST_TOOL_LABELS.get(category);
+  else if (phase === 'pre') label = isResearch ? HOOK_RESEARCH_PRE_LABEL : HOOK_PRE_TOOL_LABELS.get(tool.category);
+  else label = isResearch ? HOOK_RESEARCH_POST_LABEL : HOOK_POST_TOOL_LABELS.get(tool.category);
+  // Unreachable: both label maps cover `HOOK_TOOL_CATEGORIES` exactly, and a
+  // test pins that. Fail closed anyway rather than assert a value into being.
   if (label === undefined) return reject('contract_mismatch', 'tool.category:no_label');
 
-  return { kind: category, facility, label, status: TOOL_PHASE_STATUS[phase] };
+  return { kind: tool.category, facility: tool.facility, label, status: TOOL_PHASE_STATUS[phase] };
 }
 
 /**
@@ -545,9 +601,11 @@ function checkActivityContract(seen: ActivitySeen): void {
 
   const phase = HOOK_TOOL_PHASES.get(seen.hookEvent);
   if (phase !== undefined) {
+    // The producer always classifies a tool row, even one whose tool it does not
+    // know, so the category is required. The *name* is not: an absent name is
+    // the producer's own `idle / desk` fallback.
     if (seen.toolCategory === null) reject('contract_mismatch', 'tool.category:required_for_tool_event');
-    if (seen.toolName === null) reject('contract_mismatch', 'tool.name:required_for_tool_event');
-    compareActivity(toolActivityContract(phase, seen.toolCategory, seen.toolName), seen, 'tool');
+    compareActivity(toolActivityContract(phase, seen.toolCategory, seen.toolName, seen.toolMcpServer), seen, 'tool');
     return;
   }
 
@@ -699,6 +757,7 @@ function buildWireEvent(raw: unknown): { wire: HookWireEvent; dropped_keys: stri
     hookEvent,
     toolName,
     toolCategory,
+    toolMcpServer,
     kind: activityKind,
     facility: activityFacility,
     label: activityLabel,

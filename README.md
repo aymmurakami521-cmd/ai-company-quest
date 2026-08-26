@@ -318,7 +318,7 @@ replay buffer、subscriber listのいずれも共有しません。
 | `producer.kind` / `producer.env` 不一致（LIVE） | その行だけ拒否（`unsupported_producer`） |
 | `session_id` が `null`（LIVE） | その行だけ拒否（`unattributable`）。sentinelは作らない |
 | known table外の `hook_event`（LIVE） | その行だけ拒否（`unsupported_hook_event`）。意味を推測しない |
-| `activity` が正本の固定tupleと不一致（LIVE） | その行だけ拒否（`contract_mismatch`）。`activity.label` は自由記述として受理しない |
+| `activity` が正本の固定tupleと不一致（LIVE） | その行だけ拒否（`contract_mismatch`）。`activity.label` は自由記述として受理しない。tool行のtupleは正本と同じく **`tool.name` から** 決まります（`Grep`=`search-terminal` / `WebSearch`=`antenna` / `mcp__…`=`portal` / `Skill`=`desk`）。未知名・名前なしは正本と同じ `idle / desk` fallback |
 | `hook_event` とagent identityの矛盾（LIVE） | その行だけ拒否（`identity_conflict`）。`agent.id: null` を無条件に `main` としない |
 | malformed JSON / 契約key欠落 / 型不一致 | その行だけ拒否・理由別に計数 |
 | 行がoversized | 破棄・計数（次のnewlineまでskip） |

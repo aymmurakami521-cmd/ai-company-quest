@@ -141,19 +141,44 @@ labelは単独では判定せず、`activity.kind` / `activity.facility` / `outc
 | `TaskCreated` | `task` | `desk` | 内部タスクが作成されました | `started` |
 | `TaskCompleted` | `task` | `desk` | 内部タスクが完了しました | `ok` |
 
-tool eventは **検証済みの** `tool.category` / `tool.name` とphaseから一意に決まります。
-`tool.category` と `tool.name` は非nullが必須です（`activity.kind` = category）。
+tool eventのtupleは **検証済みの `tool.name`（と `tool.mcp_server`）** とphaseから一意に決まります。
+`facility` は category の関数では **ありません**。正本 `scripts/quest-hook-emit.py` は
+`kind, facility = _category(tool_name, mcp_server)` として **名前から両方を同時に** 決めるため、
+同じ `search` でも `Grep` は `search-terminal`、`WebSearch` / `WebFetch` は `antenna` です。
+consumer側の表も **tool名をkey** にしています（`HOOK_TOOL_CLASS`）。
 
-| `tool.category` | `facility` | `PreToolUse`（`started`） | `PostToolUse`（`ok`） |
-|---|---|---|---|
-| `read` | `shelf` | 資料を確認中 | 資料の参照を確認しました |
-| `write` | `desk` | 作業内容を編集中 | 変更処理を確認しました |
-| `exec` | `terminal` | コマンドを実行中 | ターミナル処理を確認しました |
-| `search` | `search-terminal` | 情報を検索中 | 検索処理を確認しました |
-| `mcp` | `antenna` | 外部サービスと通信中 | 外部サービスとの通信を確認しました |
-| `delegate` | `meeting` | 担当者に作業を依頼中 | 委任処理を確認しました |
-| `skill` | `portal` | 手順書を実行中 | 手順書の実行を確認しました |
-| `idle` | `desk` | 作業中 | ツール処理を確認しました |
+| `tool.name` | `tool.category` | `facility` |
+|---|---|---|
+| `Read` / `Glob` | `read` | `shelf` |
+| `Write` / `Edit` / `NotebookEdit` | `write` | `desk` |
+| `Bash` / `PowerShell` | `exec` | `terminal` |
+| `Grep` | `search` | `search-terminal` |
+| `WebSearch` / `WebFetch` | `search` | `antenna` |
+| `Agent` | `delegate` | `meeting` |
+| `Skill` | `skill` | `desk` |
+| `TaskCreate` / `TaskUpdate` / `TaskGet` / `TaskList` / `TaskStop` / `TaskOutput` | `idle` | `desk` |
+| `mcp__<server>__…`（または `tool.mcp_server` あり） | `mcp` | `portal` |
+| 上記以外・`tool.name` が `null` | `idle` | `desk` |
+
+`Skill` は正本の表では `skill / workshop` ですが、`workshop` は出力facility語彙外で、
+producer自身の `_safe_facility` が **出力前に** `desk` へ落とすため、wire上は `skill / desk` です。
+
+`tool.category` は非nullが必須で、名前から導いた category と **一致** しなければなりません
+（不一致は `tool.category:not_fixed_for_tool`）。`tool.name` は非null必須では **ありません**:
+未知名・名前なしは正本と同じく `idle / desk` fallbackになります（labelもfallbackのものだけ）。
+
+labelは category とphaseで決まります。
+
+| `tool.category` | `PreToolUse`（`started`） | `PostToolUse`（`ok`） |
+|---|---|---|
+| `read` | 資料を確認中 | 資料の参照を確認しました |
+| `write` | 作業内容を編集中 | 変更処理を確認しました |
+| `exec` | コマンドを実行中 | ターミナル処理を確認しました |
+| `search` | 情報を検索中 | 検索処理を確認しました |
+| `mcp` | 外部サービスと通信中 | 外部サービスとの通信を確認しました |
+| `delegate` | 担当者に作業を依頼中 | 委任処理を確認しました |
+| `skill` | 手順書を実行中 | 手順書の実行を確認しました |
+| `idle` | 作業中 | ツール処理を確認しました |
 
 `tool.name` が `WebSearch` / `WebFetch` の場合のみ、labelは category ではなく名前で決まります
 （`外部資料を調査中` / `外部調査の完了を確認しました`）。`PostToolUseFailure` は category に依らず

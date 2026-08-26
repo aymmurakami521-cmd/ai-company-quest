@@ -116,6 +116,65 @@ test('the whole known hook_event table folds without a rejection', async () => {
   assert.equal(store.state.counters.ignored, 2);
 });
 
+/** One completed tool call, as the pinned producer classifies that tool. */
+function postToolLine(
+  index: number,
+  toolName: string | null,
+  mcpServer: string | null,
+  category: string,
+  facility: string,
+  label: string,
+): string {
+  return JSON.stringify({
+    ...makeHookEvent({ event_id: hookEventId(index), hook_event: 'PostToolUse' }),
+    tool: { name: toolName, category, mcp_server: mcpServer, tool_use_id: 'tool-1' },
+    activity: { kind: category, facility, label },
+    outcome: { status: 'ok', duration_ms: 12, is_interrupt: null, error_kind: null, denial_kind: null },
+  });
+}
+
+test("every producer tool class folds, and a facility the producer does not emit does not", async () => {
+  const store = liveStore();
+  // One row per classification rule of the pinned producer: the name table, the
+  // two facilities of the `search` category, the MCP prefix rule, the `Skill`
+  // row `_safe_facility` rewrites, the Task tools and the unknown-name fallback.
+  await ingestThroughTailer(store, [
+    postToolLine(61, 'Read', null, 'read', 'shelf', '資料の参照を確認しました'),
+    postToolLine(62, 'Grep', null, 'search', 'search-terminal', '検索処理を確認しました'),
+    postToolLine(63, 'WebSearch', null, 'search', 'antenna', '外部調査の完了を確認しました'),
+    postToolLine(64, 'WebFetch', null, 'search', 'antenna', '外部調査の完了を確認しました'),
+    postToolLine(65, 'mcp__github__get_issue', 'github', 'mcp', 'portal', '外部サービスとの通信を確認しました'),
+    postToolLine(66, 'Skill', null, 'skill', 'desk', '手順書の実行を確認しました'),
+    postToolLine(67, 'TaskCreate', null, 'idle', 'desk', 'ツール処理を確認しました'),
+    postToolLine(68, 'SomeFutureTool', null, 'idle', 'desk', 'ツール処理を確認しました'),
+    postToolLine(69, null, null, 'idle', 'desk', 'ツール処理を確認しました'),
+  ]);
+
+  assert.equal(store.stats.rejected, 0, 'a real Mac hook row must not be refused as a mismatch');
+  assert.equal(store.stats.accepted, 9);
+  // The last row reports no tool, so the desk keeps the last tool it did report.
+  assert.equal(store.state.actors['sess-1:main']?.last_tool, 'SomeFutureTool');
+  assert.equal(store.state.actors['sess-1:main']?.status, 'ok');
+  assert.equal(store.halted, false);
+
+  // The facilities the consumer previously invented, and the two cross-facility
+  // rows a category-keyed table could not tell apart. All fail closed.
+  const refused = liveStore();
+  await ingestThroughTailer(refused, [
+    postToolLine(71, 'mcp__github__get_issue', 'github', 'mcp', 'antenna', '外部サービスとの通信を確認しました'),
+    postToolLine(72, 'Skill', null, 'skill', 'portal', '手順書の実行を確認しました'),
+    postToolLine(73, 'Grep', null, 'search', 'antenna', '検索処理を確認しました'),
+    postToolLine(74, 'WebSearch', null, 'search', 'search-terminal', '外部調査の完了を確認しました'),
+    // ...and a plain tool claiming the MCP class to borrow its label.
+    postToolLine(75, 'Bash', null, 'mcp', 'portal', '外部サービスとの通信を確認しました'),
+  ]);
+
+  assert.equal(refused.stats.accepted, 0);
+  assert.equal(refused.stats.rejected_by_reason['contract_mismatch'], 5);
+  assert.equal(Object.keys(refused.state.actors).length, 0, 'no desk moved on a mismatched tuple');
+  assert.equal(refused.halted, false, 'a mismatched tuple is a per-line rejection');
+});
+
 test('producer records reach the screen through SSE, and land on a desk', async () => {
   const live = liveStore();
   const demo = new NamespaceStore({ namespace: 'demo' });

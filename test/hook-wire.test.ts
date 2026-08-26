@@ -10,18 +10,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { HookToolCategory } from '../src/domain/hookWire.ts';
+import type { HookFacility, HookToolCategory } from '../src/domain/hookWire.ts';
 import {
   HOOK_FIXED_ACTIVITY,
+  HOOK_MCP_TOOL_CLASS,
   HOOK_POST_TOOL_LABELS,
   HOOK_PRE_TOOL_LABELS,
   HOOK_RESEARCH_POST_LABEL,
   HOOK_RESEARCH_PRE_LABEL,
   HOOK_TOOL_CATEGORIES,
-  HOOK_TOOL_FACILITY,
+  HOOK_TOOL_CLASS,
   HOOK_TOOL_FAILURE_LABEL,
+  HOOK_TOOL_FALLBACK_CLASS,
   HOOK_TOOL_PHASES,
   HOOK_WIRE_KEYS,
+  hookToolClass,
   validateHookWireLine,
   validateHookWireObject,
 } from '../src/domain/hookWire.ts';
@@ -350,81 +353,295 @@ test('a mismatched kind, facility or status is refused, not just a mismatched la
 
 // ------------------------------------------------------------- tool activity ---
 
-/** A tool row: the tuple is a function of the phase, the category and the name. */
-function toolRow(
-  hookEvent: string,
-  category: HookToolCategory,
-  toolName: string,
-  label: string,
-  status: string,
-): unknown {
-  const facility = HOOK_TOOL_FACILITY.get(category);
-  assert.ok(facility !== undefined, `${category} must have a facility`);
+type ToolRow = {
+  hookEvent: string;
+  toolName: string | null;
+  mcpServer?: string | null;
+  category: HookToolCategory;
+  facility: HookFacility;
+  label: string;
+  status: string;
+};
+
+/** A tool row, with every correlated field written out rather than derived. */
+function toolRow(row: ToolRow): unknown {
   return {
-    ...makeHookEvent({ hook_event: hookEvent }),
-    tool: { name: toolName, category, mcp_server: null, tool_use_id: 'tool-1' },
-    activity: { kind: category, facility, label },
-    outcome: { status, duration_ms: null, is_interrupt: null, error_kind: null, denial_kind: null },
+    ...makeHookEvent({ hook_event: row.hookEvent }),
+    tool: {
+      name: row.toolName,
+      category: row.category,
+      mcp_server: row.mcpServer ?? null,
+      tool_use_id: 'tool-1',
+    },
+    activity: { kind: row.category, facility: row.facility, label: row.label },
+    outcome: { status: row.status, duration_ms: null, is_interrupt: null, error_kind: null, denial_kind: null },
   };
 }
 
-test('every tool category is accepted with exactly its own fixed label, per phase', () => {
-  for (const category of HOOK_TOOL_CATEGORIES) {
-    const pre = HOOK_PRE_TOOL_LABELS.get(category);
-    const post = HOOK_POST_TOOL_LABELS.get(category);
-    assert.ok(pre !== undefined && post !== undefined, `${category} must have both labels`);
+/** The phase-specific `(hook_event, status)` pairs a tool row is emitted with. */
+const TOOL_PHASES: ReadonlyArray<['pre' | 'post' | 'failure', string, string]> = [
+  ['pre', 'PreToolUse', 'started'],
+  ['post', 'PostToolUse', 'ok'],
+  ['failure', 'PostToolUseFailure', 'error'],
+];
 
-    for (const [hookEvent, label, status] of [
-      ['PreToolUse', pre, 'started'],
-      ['PostToolUse', post, 'ok'],
-      ['PostToolUseFailure', HOOK_TOOL_FAILURE_LABEL, 'error'],
-    ] as const) {
-      const ok = validateHookWireObject(toolRow(hookEvent, category, 'Bash', label, status));
-      assert.equal(ok.ok, true, `${hookEvent} ${category} must accept its own label`);
+/** The label the producer emits for one tool name in one phase. */
+function expectedLabel(phase: 'pre' | 'post' | 'failure', toolName: string | null, category: HookToolCategory): string {
+  if (phase === 'failure') return HOOK_TOOL_FAILURE_LABEL;
+  const isResearch = toolName === 'WebSearch' || toolName === 'WebFetch';
+  if (phase === 'pre') {
+    if (isResearch) return HOOK_RESEARCH_PRE_LABEL;
+    const label = HOOK_PRE_TOOL_LABELS.get(category);
+    assert.ok(label !== undefined, `${category} must have a pre label`);
+    return label;
+  }
+  if (isResearch) return HOOK_RESEARCH_POST_LABEL;
+  const label = HOOK_POST_TOOL_LABELS.get(category);
+  assert.ok(label !== undefined, `${category} must have a post label`);
+  return label;
+}
+
+/**
+ * The pinned producer's `TOOL_CATEGORY` table, written out by hand.
+ *
+ * Deliberately not derived from `HOOK_TOOL_CLASS`: this is the copy of the
+ * producer source, so editing the module alone makes this test fail.
+ */
+const PRODUCER_TOOL_TABLE: ReadonlyArray<[string, HookToolCategory, HookFacility]> = [
+  ['Read', 'read', 'shelf'],
+  ['Glob', 'read', 'shelf'],
+  ['Write', 'write', 'desk'],
+  ['Edit', 'write', 'desk'],
+  ['NotebookEdit', 'write', 'desk'],
+  ['Bash', 'exec', 'terminal'],
+  ['PowerShell', 'exec', 'terminal'],
+  ['Grep', 'search', 'search-terminal'],
+  ['WebSearch', 'search', 'antenna'],
+  ['WebFetch', 'search', 'antenna'],
+  ['Agent', 'delegate', 'meeting'],
+  // `skill / workshop` upstream; `_safe_facility` rewrites it before emission.
+  ['Skill', 'skill', 'desk'],
+  ['TaskCreate', 'idle', 'desk'],
+  ['TaskUpdate', 'idle', 'desk'],
+  ['TaskGet', 'idle', 'desk'],
+  ['TaskList', 'idle', 'desk'],
+  ['TaskStop', 'idle', 'desk'],
+  ['TaskOutput', 'idle', 'desk'],
+];
+
+test("the tool class table is the pinned producer's, name by name", () => {
+  assert.deepEqual(
+    [...HOOK_TOOL_CLASS.entries()].map(([name, cls]) => [name, cls.category, cls.facility]),
+    PRODUCER_TOOL_TABLE.map((row) => [...row]),
+    'the consumer table must be the producer table',
+  );
+  assert.deepEqual(HOOK_MCP_TOOL_CLASS, { category: 'mcp', facility: 'portal' });
+  assert.deepEqual(HOOK_TOOL_FALLBACK_CLASS, { category: 'idle', facility: 'desk' });
+
+  // The classification a real row goes through, including the two rules that a
+  // category-keyed facility table could not express.
+  assert.deepEqual(hookToolClass('Grep', null), { category: 'search', facility: 'search-terminal' });
+  assert.deepEqual(hookToolClass('WebFetch', null), { category: 'search', facility: 'antenna' });
+  assert.deepEqual(hookToolClass('mcp__github__get_issue', 'github'), { category: 'mcp', facility: 'portal' });
+  assert.deepEqual(hookToolClass('mcp__github__get_issue', null), { category: 'mcp', facility: 'portal' });
+  assert.deepEqual(hookToolClass('SomeFutureTool', null), { category: 'idle', facility: 'desk' });
+  assert.deepEqual(hookToolClass(null, null), { category: 'idle', facility: 'desk' });
+});
+
+test("every producer tool name is accepted with exactly its own tuple, in every phase", () => {
+  for (const [toolName, category, facility] of PRODUCER_TOOL_TABLE) {
+    for (const [phase, hookEvent, status] of TOOL_PHASES) {
+      const label = expectedLabel(phase, toolName, category);
+      const ok = validateHookWireObject(toolRow({ hookEvent, toolName, category, facility, label, status }));
+      assert.equal(ok.ok, true, `${hookEvent} ${toolName} must accept its own tuple`);
+      if (ok.ok) assert.equal(ok.wire.activity.label, label);
+    }
+  }
+});
+
+test('a tool row that claims another name\'s category or facility is refused', () => {
+  for (const [toolName, category, facility] of PRODUCER_TOOL_TABLE) {
+    for (const [otherName, otherCategory, otherFacility] of PRODUCER_TOOL_TABLE) {
+      const label = expectedLabel('pre', toolName, category);
+
+      // The other tool's category, carried by this name.
+      if (otherCategory !== category) {
+        const crossedCategory = validateHookWireObject(
+          toolRow({
+            hookEvent: 'PreToolUse',
+            toolName,
+            category: otherCategory,
+            facility: otherFacility,
+            label: expectedLabel('pre', otherName, otherCategory),
+            status: 'started',
+          }),
+        );
+        assert.equal(crossedCategory.ok, false, `${toolName} must not pass as ${otherCategory}`);
+        if (!crossedCategory.ok) assert.equal(crossedCategory.detail, 'tool.category:not_fixed_for_tool');
+      }
+
+      // The same category from a different facility: this is what the previous
+      // category-keyed table got wrong for `search`.
+      if (otherFacility !== facility && otherCategory === category) {
+        const crossedFacility = validateHookWireObject(
+          toolRow({ hookEvent: 'PreToolUse', toolName, category, facility: otherFacility, label, status: 'started' }),
+        );
+        assert.equal(crossedFacility.ok, false, `${toolName} must not sit in ${otherFacility}`);
+        if (!crossedFacility.ok) assert.equal(crossedFacility.detail, 'activity.facility:not_fixed_for_tool');
+      }
+
+      // The other tool's label, on this tool's otherwise correct row.
+      const otherLabel = expectedLabel('pre', otherName, otherCategory);
+      if (otherLabel !== label) {
+        const crossedLabel = validateHookWireObject(
+          toolRow({ hookEvent: 'PreToolUse', toolName, category, facility, label: otherLabel, status: 'started' }),
+        );
+        assert.equal(crossedLabel.ok, false, `${otherName}'s label must not pass as ${toolName}'s`);
+        if (!crossedLabel.ok) assert.equal(crossedLabel.detail, 'activity.label:not_fixed_for_tool');
+      }
     }
 
-    // The other phase's label for the same category, and the same phase's label
-    // from a different category, are both refused.
-    const wrongPhase = validateHookWireObject(toolRow('PreToolUse', category, 'Bash', post, 'started'));
-    assert.equal(wrongPhase.ok, false, `${category}: a post label must not pass as a pre label`);
+    // And a phase's label does not travel to another phase.
+    const wrongPhase = validateHookWireObject(
+      toolRow({
+        hookEvent: 'PreToolUse',
+        toolName,
+        category,
+        facility,
+        label: expectedLabel('post', toolName, category),
+        status: 'started',
+      }),
+    );
+    assert.equal(wrongPhase.ok, false, `${toolName}: a post label must not pass as a pre label`);
     if (!wrongPhase.ok) assert.equal(wrongPhase.detail, 'activity.label:not_fixed_for_tool');
+  }
+});
 
-    for (const other of HOOK_TOOL_CATEGORIES) {
-      if (other === category) continue;
-      const otherPre = HOOK_PRE_TOOL_LABELS.get(other);
-      assert.ok(otherPre !== undefined);
-      if (otherPre === pre) continue;
-      const crossed = validateHookWireObject(toolRow('PreToolUse', category, 'Bash', otherPre, 'started'));
-      assert.equal(crossed.ok, false, `${other}'s label must not pass as ${category}'s`);
+test('the facilities the previous category-keyed table got wrong are now refused', () => {
+  // `mcp -> antenna` and `skill -> portal` were consumer inventions. The pinned
+  // producer emits `mcp -> portal` and `skill -> desk`.
+  const wrong: Array<[string, HookToolCategory, HookFacility]> = [
+    ['mcp__github__get_issue', 'mcp', 'antenna'],
+    ['Skill', 'skill', 'portal'],
+    // `search` is not one facility: Grep is not in the research facility, and
+    // the research tools are not at the search terminal.
+    ['Grep', 'search', 'antenna'],
+    ['WebSearch', 'search', 'search-terminal'],
+  ];
+  for (const [toolName, category, facility] of wrong) {
+    const result = validateHookWireObject(
+      toolRow({
+        hookEvent: 'PreToolUse',
+        toolName,
+        mcpServer: category === 'mcp' ? 'github' : null,
+        category,
+        facility,
+        label: expectedLabel('pre', toolName, category),
+        status: 'started',
+      }),
+    );
+    assert.equal(result.ok, false, `${toolName} must not be accepted in ${facility}`);
+    if (!result.ok) {
+      assert.equal(result.reason, 'contract_mismatch');
+      assert.equal(result.detail, 'activity.facility:not_fixed_for_tool');
     }
   }
 });
 
-test('the web research tools are labelled by name, not by category', () => {
-  for (const toolName of ['WebSearch', 'WebFetch']) {
-    for (const [hookEvent, label, status] of [
-      ['PreToolUse', HOOK_RESEARCH_PRE_LABEL, 'started'],
-      ['PostToolUse', HOOK_RESEARCH_POST_LABEL, 'ok'],
-    ] as const) {
-      const ok = validateHookWireObject(toolRow(hookEvent, 'search', toolName, label, status));
-      assert.equal(ok.ok, true, `${toolName} ${hookEvent} must accept the research label`);
+test('an MCP tool is classified by its name prefix and its server, not by a claim', () => {
+  for (const [phase, hookEvent, status] of TOOL_PHASES) {
+    const label = expectedLabel(phase, 'mcp__github__get_issue', 'mcp');
+    const ok = validateHookWireObject(
+      toolRow({
+        hookEvent,
+        toolName: 'mcp__github__get_issue',
+        mcpServer: 'github',
+        category: 'mcp',
+        facility: 'portal',
+        label,
+        status,
+      }),
+    );
+    assert.equal(ok.ok, true, `${hookEvent}: a real MCP row must be accepted`);
+  }
 
-      // The plain category label is not what the producer emits for these two.
-      const categoryLabel =
-        hookEvent === 'PreToolUse' ? HOOK_PRE_TOOL_LABELS.get('search') : HOOK_POST_TOOL_LABELS.get('search');
-      assert.ok(categoryLabel !== undefined);
-      const refused = validateHookWireObject(toolRow(hookEvent, 'search', toolName, categoryLabel, status));
-      assert.equal(refused.ok, false, `${toolName} must not carry the category label`);
-      if (!refused.ok) assert.equal(refused.detail, 'activity.label:not_fixed_for_tool');
+  // A plain tool cannot claim the MCP class to borrow its facility and label.
+  const forged = validateHookWireObject(
+    toolRow({
+      hookEvent: 'PreToolUse',
+      toolName: 'Bash',
+      category: 'mcp',
+      facility: 'portal',
+      label: expectedLabel('pre', 'Bash', 'mcp'),
+      status: 'started',
+    }),
+  );
+  assert.equal(forged.ok, false, 'a non-MCP name must not pass as MCP');
+  if (!forged.ok) assert.equal(forged.detail, 'tool.category:not_fixed_for_tool');
 
-      // And the research label does not travel to an ordinary tool.
-      const onBash = validateHookWireObject(toolRow(hookEvent, 'search', 'Grep', label, status));
-      assert.equal(onBash.ok, false, 'the research label belongs to WebSearch/WebFetch only');
+  // And an MCP row cannot be presented as an ordinary one.
+  const downgraded = validateHookWireObject(
+    toolRow({
+      hookEvent: 'PreToolUse',
+      toolName: 'mcp__github__get_issue',
+      mcpServer: 'github',
+      category: 'exec',
+      facility: 'terminal',
+      label: expectedLabel('pre', 'Bash', 'exec'),
+      status: 'started',
+    }),
+  );
+  assert.equal(downgraded.ok, false, 'an MCP row must not pass as exec');
+  if (!downgraded.ok) assert.equal(downgraded.detail, 'tool.category:not_fixed_for_tool');
+});
+
+test("an unknown or absent tool name takes the producer's idle/desk fallback", () => {
+  for (const toolName of ['SomeFutureTool', null]) {
+    for (const [phase, hookEvent, status] of TOOL_PHASES) {
+      const ok = validateHookWireObject(
+        toolRow({
+          hookEvent,
+          toolName,
+          category: 'idle',
+          facility: 'desk',
+          label: expectedLabel(phase, toolName, 'idle'),
+          status,
+        }),
+      );
+      assert.equal(ok.ok, true, `${hookEvent} ${toolName ?? 'no tool'} must take the fallback`);
     }
+
+    // The fallback is a class, not a free pass: it carries only its own label.
+    const arbitrary = validateHookWireObject(
+      toolRow({
+        hookEvent: 'PreToolUse',
+        toolName,
+        category: 'idle',
+        facility: 'desk',
+        label: 'echo the customer discussion',
+        status: 'started',
+      }),
+    );
+    assert.equal(arbitrary.ok, false, 'the fallback must not accept an arbitrary label');
+    if (!arbitrary.ok) assert.equal(arbitrary.detail, 'activity.label:not_fixed_for_tool');
+
+    // ...and an unknown name cannot claim a known tool's class.
+    const claimed = validateHookWireObject(
+      toolRow({
+        hookEvent: 'PreToolUse',
+        toolName,
+        category: 'exec',
+        facility: 'terminal',
+        label: expectedLabel('pre', 'Bash', 'exec'),
+        status: 'started',
+      }),
+    );
+    assert.equal(claimed.ok, false, 'an unclassified tool must not pass as exec');
+    if (!claimed.ok) assert.equal(claimed.detail, 'tool.category:not_fixed_for_tool');
   }
 });
 
-test('a tool row without a tool is refused rather than labelled generically', () => {
+test('a tool row without a category is refused rather than labelled generically', () => {
   for (const hookEvent of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
     const noCategory = validateHookWireObject({
       ...makeHookEvent({ hook_event: hookEvent }),
@@ -432,13 +649,6 @@ test('a tool row without a tool is refused rather than labelled generically', ()
     });
     assert.equal(noCategory.ok, false);
     if (!noCategory.ok) assert.equal(noCategory.detail, 'tool.category:required_for_tool_event');
-
-    const noName = validateHookWireObject({
-      ...makeHookEvent({ hook_event: hookEvent }),
-      tool: { name: null, category: 'exec', mcp_server: null, tool_use_id: null },
-    });
-    assert.equal(noName.ok, false);
-    if (!noName.ok) assert.equal(noName.detail, 'tool.name:required_for_tool_event');
   }
 });
 
@@ -447,10 +657,17 @@ test('the activity table and the lifecycle table describe the same known events'
   assert.deepEqual(activityEvents, [...HOOK_EVENT_LIFECYCLE.keys()].sort(), 'no known event may lack a fixed tuple');
 
   for (const category of HOOK_TOOL_CATEGORIES) {
-    assert.ok(HOOK_TOOL_FACILITY.has(category), `${category} needs a facility`);
     assert.ok(HOOK_PRE_TOOL_LABELS.has(category), `${category} needs a pre label`);
     assert.ok(HOOK_POST_TOOL_LABELS.has(category), `${category} needs a post label`);
   }
+
+  // Every category the producer can classify a tool into is reachable by name.
+  const reachable = new Set<HookToolCategory>([
+    ...[...HOOK_TOOL_CLASS.values()].map((cls) => cls.category),
+    HOOK_MCP_TOOL_CLASS.category,
+    HOOK_TOOL_FALLBACK_CLASS.category,
+  ]);
+  assert.deepEqual([...reachable].sort(), [...HOOK_TOOL_CATEGORIES].sort(), 'every category needs a tool name');
 });
 
 // ---------------------------------------------------------- capacity marker ---
