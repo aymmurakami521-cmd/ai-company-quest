@@ -204,6 +204,48 @@ function squash(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Report the redirection that carries a run script's `<key>=` write.
+ *
+ * A step publishes an output by appending `key=value` to the file named by
+ * $GITHUB_OUTPUT. Matching the write on its own proves nothing: the guard
+ * emits it inside a `{ ... } >> "$GITHUB_OUTPUT"` group, so the redirection
+ * that decides whether the value is published at all sits several lines below
+ * and can be retargeted -- to /dev/null, to a scratch file -- while the echo
+ * stays word for word the same. Return the redirection actually in force, so
+ * the caller can assert on it, or null when the write goes nowhere.
+ */
+function redirectionFor(script: string, key: string): string | null {
+  const writes = new RegExp(`(?:^|[;&|]\\s*)(?:echo|printf)\\b.*\\b${key}=`);
+  const lines = script.split('\n');
+  const open: number[] = [];
+  // Depth the brace group enclosing the write closes back down to, once found.
+  let enclosing: number | null = null;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === '{') {
+      open.push(1);
+      continue;
+    }
+    const closed = /^\}(.*)$/.exec(line);
+    if (closed !== null) {
+      open.pop();
+      if (enclosing !== null && open.length === enclosing) return (closed[1] ?? '').trim();
+      continue;
+    }
+    if (enclosing !== null || !writes.test(line)) continue;
+    // A write redirected on its own line needs no enclosing group.
+    const own = /(>>?\s*\S+)\s*$/.exec(line);
+    if (own !== null) return (own[1] ?? '').trim();
+    if (open.length === 0) return null;
+    enclosing = open.length - 1;
+  }
+  return null;
+}
+
+/** `>> "$GITHUB_OUTPUT"`, however the workflow spells the variable. */
+const APPENDS_TO_GITHUB_OUTPUT = /^>>\s*"?\$\{?GITHUB_OUTPUT\}?"?$/;
+
 const WORKFLOW_PATH = fileURLToPath(new URL('../.github/workflows/claude.yml', import.meta.url));
 const SOURCE = readFileSync(WORKFLOW_PATH, 'utf8');
 const WORKFLOW = parseYaml(SOURCE);
@@ -297,8 +339,9 @@ test('the fork decision reaches the write-token job unbroken', () => {
   // and the `if` that consumes -- but not the wire between them. With
   // `jobs.guard.outputs.allowed` rewritten to a constant, to another step, or
   // to another output, both of those still pass while a fork gets a write
-  // token. Pin every link instead: the deciding step, the output it publishes
-  // under, the job dependency, and the expression that reads it back.
+  // token. Pin every link instead: the deciding step, the redirection that
+  // publishes it, the output it publishes under, the job dependency, and the
+  // expression that reads it back.
   const guard = asMapping(JOBS['guard'], 'jobs.guard');
   const deciding = asSequence(guard['steps'], 'jobs.guard.steps')
     .map((step, i) => asMapping(step, `jobs.guard.steps[${i}]`))
@@ -308,6 +351,17 @@ test('the fork decision reaches the write-token job unbroken', () => {
     );
   assert.equal(deciding.length, 1, 'exactly one guard step may publish the fork decision');
   const decidingId = asScalar(deciding[0]?.['id'], 'the deciding step has no id');
+
+  // Writing the decision is not publishing it. Redirect the group somewhere
+  // other than $GITHUB_OUTPUT and the step output is never set at all, so the
+  // gate below reads empty and every legitimate run is skipped -- a mis-wiring
+  // the echo text alone cannot show. Assert on the redirection in force.
+  const redirection = redirectionFor(
+    asScalar(deciding[0]?.['run'], 'the deciding step has no run script'),
+    'allowed',
+  );
+  assert.notEqual(redirection, null, 'the fork decision is written but never redirected anywhere');
+  assert.match(redirection ?? '', APPENDS_TO_GITHUB_OUTPUT);
 
   // Exact match, not a substring: `${{ 'true' }}` or a reference to any other
   // step or output has to fail here.
@@ -356,6 +410,29 @@ test('no job grants itself more than it already had', () => {
       actions: 'read',
     },
   );
+});
+
+test('the redirection reader answers for each shape a run script can use', () => {
+  // The assertion above is only as good as this reader: one that returned the
+  // append unconditionally would pass every mutation. Pin its answers.
+  const grouped = (target: string) => `x=1\n{\n  echo "allowed=${'${allowed}'}"\n} ${target}`;
+  assert.equal(redirectionFor(grouped('>> "$GITHUB_OUTPUT"'), 'allowed'), '>> "$GITHUB_OUTPUT"');
+  assert.equal(redirectionFor(grouped('> /dev/null'), 'allowed'), '> /dev/null');
+  assert.equal(redirectionFor(grouped('>> "$GITHUB_ENV"'), 'allowed'), '>> "$GITHUB_ENV"');
+  // Redirected on the write's own line, and not redirected at all.
+  assert.equal(
+    redirectionFor('echo "allowed=true" >> "$GITHUB_OUTPUT"', 'allowed'),
+    '>> "$GITHUB_OUTPUT"',
+  );
+  assert.equal(redirectionFor('echo "allowed=true"', 'allowed'), null);
+  assert.equal(redirectionFor(grouped('>> "$GITHUB_OUTPUT"'), 'number'), null);
+  // A group that closes before the write must not lend it its redirection.
+  assert.equal(
+    redirectionFor('{\n  echo "x=1"\n} >> "$GITHUB_OUTPUT"\necho "allowed=true"', 'allowed'),
+    null,
+  );
+  assert.match('>> $GITHUB_OUTPUT', APPENDS_TO_GITHUB_OUTPUT);
+  assert.doesNotMatch('> "$GITHUB_OUTPUT"', APPENDS_TO_GITHUB_OUTPUT);
 });
 
 test('the trigger block is found however the loader spells the `on` key', () => {
