@@ -319,6 +319,7 @@ replay buffer、subscriber listのいずれも共有しません。
 | `session_id` が `null`（LIVE） | その行だけ拒否（`unattributable`）。sentinelは作らない |
 | known table外の `hook_event`（LIVE） | その行だけ拒否（`unsupported_hook_event`）。意味を推測しない |
 | `activity` が正本の固定tupleと不一致（LIVE） | その行だけ拒否（`contract_mismatch`）。`activity.label` は自由記述として受理しない。tool行のtupleは正本と同じく **`tool.name` から** 決まります（`Grep`=`search-terminal` / `WebSearch`=`antenna` / `mcp__…`=`portal` / `Skill`=`desk`）。未知名・名前なしは正本と同じ `idle / desk` fallback |
+| `tool.mcp_server` が `tool.name` から導かれない（LIVE） | その行だけ拒否（`contract_mismatch` / `tool.mcp_server:not_derived_from_name`）。serverは正本と同じ `^mcp__([A-Za-z0-9_-]{1,64}?)__` の捕獲結果のみで、供給値を分類に使わない |
 | `hook_event` とagent identityの矛盾（LIVE） | その行だけ拒否（`identity_conflict`）。`agent.id: null` を無条件に `main` としない |
 | malformed JSON / 契約key欠落 / 型不一致 | その行だけ拒否・理由別に計数 |
 | 行がoversized | 破棄・計数（次のnewlineまでskip） |

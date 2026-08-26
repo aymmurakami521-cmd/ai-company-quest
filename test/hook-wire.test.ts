@@ -24,6 +24,7 @@ import {
   HOOK_TOOL_FALLBACK_CLASS,
   HOOK_TOOL_PHASES,
   HOOK_WIRE_KEYS,
+  hookMcpServer,
   hookToolClass,
   validateHookWireLine,
   validateHookWireObject,
@@ -440,12 +441,115 @@ test("the tool class table is the pinned producer's, name by name", () => {
 
   // The classification a real row goes through, including the two rules that a
   // category-keyed facility table could not express.
-  assert.deepEqual(hookToolClass('Grep', null), { category: 'search', facility: 'search-terminal' });
-  assert.deepEqual(hookToolClass('WebFetch', null), { category: 'search', facility: 'antenna' });
-  assert.deepEqual(hookToolClass('mcp__github__get_issue', 'github'), { category: 'mcp', facility: 'portal' });
-  assert.deepEqual(hookToolClass('mcp__github__get_issue', null), { category: 'mcp', facility: 'portal' });
-  assert.deepEqual(hookToolClass('SomeFutureTool', null), { category: 'idle', facility: 'desk' });
-  assert.deepEqual(hookToolClass(null, null), { category: 'idle', facility: 'desk' });
+  assert.deepEqual(hookToolClass('Grep'), { category: 'search', facility: 'search-terminal' });
+  assert.deepEqual(hookToolClass('WebFetch'), { category: 'search', facility: 'antenna' });
+  assert.deepEqual(hookToolClass('mcp__github__get_issue'), { category: 'mcp', facility: 'portal' });
+  assert.deepEqual(hookToolClass('SomeFutureTool'), { category: 'idle', facility: 'desk' });
+  assert.deepEqual(hookToolClass(null), { category: 'idle', facility: 'desk' });
+});
+
+test("the MCP server is derived from the tool name by the producer's own regex", () => {
+  // The producer's `RE_MCP_SERVER`, applied to the name and to nothing else.
+  assert.equal(hookMcpServer('mcp__github__get_issue'), 'github');
+  assert.equal(hookMcpServer('mcp__my-server_2__do'), 'my-server_2');
+  // Lazy quantifier, exactly as upstream: the first segment is the server.
+  assert.equal(hookMcpServer('mcp__a__b__tool'), 'a');
+  // A segment of exactly 64 characters is the longest the producer captures.
+  const longest = 'a'.repeat(64);
+  assert.equal(hookMcpServer(`mcp__${longest}__do`), longest);
+  // At 65 the pattern no longer matches, so the producer emits no server at all
+  // and the name goes through the ordinary unknown-name fallback.
+  assert.equal(hookMcpServer(`mcp__${'a'.repeat(65)}__do`), null);
+  assert.deepEqual(hookToolClass(`mcp__${'a'.repeat(65)}__do`), HOOK_TOOL_FALLBACK_CLASS);
+  // Incomplete or malformed prefixes are not the MCP form.
+  for (const name of ['mcp__github', 'mcp__', 'mcp____x', 'Xmcp__github__get_issue', 'Bash']) {
+    assert.equal(hookMcpServer(name), null, `${name} is not the producer's MCP form`);
+    assert.notDeepEqual(hookToolClass(name), HOOK_MCP_TOOL_CLASS, `${name} must not classify as MCP`);
+  }
+  assert.equal(hookMcpServer(null), null);
+});
+
+test('a supplied mcp_server that the name does not derive is refused', () => {
+  const detail = 'tool.mcp_server:not_derived_from_name';
+  const mcpName = 'mcp__github__get_issue';
+  const mcpLabel = expectedLabel('pre', mcpName, 'mcp');
+  const execLabel = expectedLabel('pre', 'Bash', 'exec');
+  const idleLabel = expectedLabel('pre', 'SomeFutureTool', 'idle');
+
+  const mcp = { category: 'mcp' as const, facility: 'portal' as const, label: mcpLabel };
+  const idle = { category: 'idle' as const, facility: 'desk' as const, label: idleLabel };
+  const pre = { hookEvent: 'PreToolUse', status: 'started' };
+
+  const refused: Array<[ToolRow, string]> = [
+    // A valid MCP name whose server is missing, different, or invented.
+    [{ ...pre, ...mcp, toolName: mcpName, mcpServer: null }, 'a null server'],
+    [{ ...pre, ...mcp, toolName: mcpName, mcpServer: 'gitlab' }, 'a different server'],
+    [{ ...pre, ...mcp, toolName: mcpName, mcpServer: 'github__get_issue' }, 'a greedier capture'],
+    // A plain tool carrying a server: the producer emits null for it.
+    [
+      { ...pre, toolName: 'Bash', mcpServer: 'github', category: 'exec', facility: 'terminal', label: execLabel },
+      'a non-MCP name with a server',
+    ],
+    // An incomplete prefix, both as MCP and as the fallback it really is.
+    [{ ...pre, ...mcp, toolName: 'mcp__github', mcpServer: 'github' }, 'an incomplete prefix claiming MCP'],
+    [{ ...pre, ...idle, toolName: 'mcp__github', mcpServer: 'github' }, 'an incomplete prefix with a server'],
+    // Over-long server segment: not the MCP form, so not an MCP row.
+    [
+      { ...pre, ...idle, toolName: `mcp__${'a'.repeat(65)}__do`, mcpServer: 'a'.repeat(65) },
+      'a 65-character segment',
+    ],
+  ];
+
+  for (const [row, description] of refused) {
+    const result = validateHookWireObject(toolRow(row));
+    assert.equal(result.ok, false, `${description} must be refused`);
+    if (!result.ok) {
+      assert.equal(result.reason, 'contract_mismatch');
+      assert.equal(result.detail, detail);
+      // Content-free: neither the name nor the supplied server appears.
+      assert.equal(result.detail.includes('github'), false);
+      assert.equal(result.detail.includes('mcp__'), false);
+    }
+  }
+
+  // A non-tool event reports no tool, and therefore no server either.
+  const sessionRow = validateHookWireObject({
+    ...makeHookEvent({ hook_event: 'SessionStart' }),
+    tool: { name: null, category: null, mcp_server: 'github', tool_use_id: null },
+  });
+  assert.equal(sessionRow.ok, false, 'a session row must not carry an MCP server');
+  if (!sessionRow.ok) assert.equal(sessionRow.detail, detail);
+
+  // The pairs the producer really emits still pass.
+  for (const [phase, hookEvent, status] of TOOL_PHASES) {
+    const exact = validateHookWireObject(
+      toolRow({
+        hookEvent,
+        toolName: 'mcp__github__get_issue',
+        mcpServer: 'github',
+        category: 'mcp',
+        facility: 'portal',
+        label: expectedLabel(phase, 'mcp__github__get_issue', 'mcp'),
+        status,
+      }),
+    );
+    assert.equal(exact.ok, true, `${hookEvent}: the exact name/server pair must be accepted`);
+    if (exact.ok) assert.equal(exact.wire.tool.mcp_server, 'github');
+  }
+
+  // An incomplete prefix with a null server is an ordinary unknown name.
+  const fallback = validateHookWireObject(
+    toolRow({
+      hookEvent: 'PreToolUse',
+      toolName: 'mcp__github',
+      mcpServer: null,
+      category: 'idle',
+      facility: 'desk',
+      label: idleLabel,
+      status: 'started',
+    }),
+  );
+  assert.equal(fallback.ok, true, 'an incomplete prefix takes the idle/desk fallback');
 });
 
 test("every producer tool name is accepted with exactly its own tuple, in every phase", () => {

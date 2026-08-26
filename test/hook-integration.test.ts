@@ -344,6 +344,56 @@ test('an arbitrary label never reaches the state, the wire, /health or the scree
   }
 });
 
+test('an MCP server the tool name does not derive never reaches the state or the screen', async () => {
+  const live = liveStore();
+  const demo = new NamespaceStore({ namespace: 'demo' });
+  const server = new QuestServer({ stores: { live, demo }, heartbeatMs: 60_000 });
+  const address = await server.listen(0);
+
+  // A server value that is not on any row the producer can emit. It is the kind
+  // of free text an invented `mcp_server` would carry.
+  const spoofed = 'attacker-controlled-server';
+
+  try {
+    const sse = await openSse(address.port, '/events/live');
+    await sse.waitFor((text) => text.includes('event: snapshot'));
+
+    await ingestThroughTailer(live, [
+      // The pair the producer really emits: name and captured server agree.
+      postToolLine(101, 'mcp__github__get_issue', 'github', 'mcp', 'portal', '外部サービスとの通信を確認しました'),
+      // ...and every combination it cannot: a missing server, a different one, a
+      // greedier capture, a plain tool carrying a server, an incomplete prefix,
+      // and a server segment past the producer's 64-character bound.
+      postToolLine(102, 'mcp__github__get_issue', null, 'mcp', 'portal', '外部サービスとの通信を確認しました'),
+      postToolLine(103, 'mcp__github__get_issue', spoofed, 'mcp', 'portal', '外部サービスとの通信を確認しました'),
+      postToolLine(104, 'mcp__github__get_issue', 'github__get_issue', 'mcp', 'portal', '外部サービスとの通信を確認しました'),
+      postToolLine(105, 'Bash', spoofed, 'exec', 'terminal', 'ターミナル処理を確認しました'),
+      postToolLine(106, 'mcp__github', 'github', 'mcp', 'portal', '外部サービスとの通信を確認しました'),
+      postToolLine(107, `mcp__${'a'.repeat(65)}__do`, 'a'.repeat(65), 'idle', 'desk', 'ツール処理を確認しました'),
+      // An incomplete prefix with no server is an ordinary unknown tool name.
+      postToolLine(108, 'mcp__github', null, 'idle', 'desk', 'ツール処理を確認しました'),
+    ]);
+    await sse.waitFor((text) => text.includes(hookEventId(108)));
+
+    assert.equal(live.stats.accepted, 2, 'only the two rows the producer can emit were folded');
+    assert.equal(live.stats.rejected_by_reason['contract_mismatch'], 6);
+    assert.equal(live.halted, false, 'a mismatched server is a per-line rejection');
+
+    const health = await httpGet(address.port, '/health');
+    const client = foldClient(sse.text());
+    const surfaces = [sse.text(), health.body, JSON.stringify(live.state), JSON.stringify(client)];
+    for (const surface of [...surfaces, JSON.stringify(live.stats)]) {
+      assert.equal(surface.includes(spoofed), false, 'a spoofed server must not be published');
+    }
+    // The desk shows the last accepted tool, and only tools that were accepted.
+    assert.equal(live.state.actors['sess-1:main']?.last_tool, 'mcp__github');
+
+    sse.close();
+  } finally {
+    await server.close();
+  }
+});
+
 test('an identity conflict is refused end to end, and moves no desk', async () => {
   const store = liveStore();
   await ingestThroughTailer(store, [

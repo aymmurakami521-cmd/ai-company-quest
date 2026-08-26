@@ -141,7 +141,7 @@ labelは単独では判定せず、`activity.kind` / `activity.facility` / `outc
 | `TaskCreated` | `task` | `desk` | 内部タスクが作成されました | `started` |
 | `TaskCompleted` | `task` | `desk` | 内部タスクが完了しました | `ok` |
 
-tool eventのtupleは **検証済みの `tool.name`（と `tool.mcp_server`）** とphaseから一意に決まります。
+tool eventのtupleは **検証済みの `tool.name`** とphaseから一意に決まります。
 `facility` は category の関数では **ありません**。正本 `scripts/quest-hook-emit.py` は
 `kind, facility = _category(tool_name, mcp_server)` として **名前から両方を同時に** 決めるため、
 同じ `search` でも `Grep` は `search-terminal`、`WebSearch` / `WebFetch` は `antenna` です。
@@ -157,7 +157,7 @@ consumer側の表も **tool名をkey** にしています（`HOOK_TOOL_CLASS`）
 | `Agent` | `delegate` | `meeting` |
 | `Skill` | `skill` | `desk` |
 | `TaskCreate` / `TaskUpdate` / `TaskGet` / `TaskList` / `TaskStop` / `TaskOutput` | `idle` | `desk` |
-| `mcp__<server>__…`（または `tool.mcp_server` あり） | `mcp` | `portal` |
+| `^mcp__([A-Za-z0-9_-]{1,64}?)__` に **完全一致** する名前 | `mcp` | `portal` |
 | 上記以外・`tool.name` が `null` | `idle` | `desk` |
 
 `Skill` は正本の表では `skill / workshop` ですが、`workshop` は出力facility語彙外で、
@@ -166,6 +166,33 @@ producer自身の `_safe_facility` が **出力前に** `desk` へ落とすた�
 `tool.category` は非nullが必須で、名前から導いた category と **一致** しなければなりません
 （不一致は `tool.category:not_fixed_for_tool`）。`tool.name` は非null必須では **ありません**:
 未知名・名前なしは正本と同じく `idle / desk` fallbackになります（labelもfallbackのものだけ）。
+
+#### `tool.mcp_server` は `tool.name` の関数
+
+正本は server を **名前だけ** から導きます。供給された `tool.mcp_server` は分類に使いません。
+
+```python
+RE_MCP_SERVER = re.compile(r"^mcp__([A-Za-z0-9_-]{1,64}?)__")
+mcp_match = RE_MCP_SERVER.match(tool_name) if tool_name else None
+mcp_server = mcp_match.group(1) if mcp_match else None
+kind, facility = _category(tool_name, mcp_server)
+```
+
+したがって `tool.mcp_server` は **正規表現の捕獲結果と完全一致**（非一致の名前・`null` 名なら `null`）
+でなければならず、それ以外はproducerが出力し得ない組み合わせとして
+`tool.mcp_server:not_derived_from_name` で拒否します（tool event以外の行も同じ規則: tool無し ⇒ server無し）。
+
+| 例 | 期待 `tool.mcp_server` | 判定 |
+|---|---|---|
+| `mcp__github__get_issue` | `github` | `mcp / portal` |
+| `mcp__a__b__tool`（lazy量指定子） | `a` | `mcp / portal` |
+| server部64文字 | その64文字 | `mcp / portal` |
+| server部65文字・`mcp__github`・`mcp__`・`mcp____x` | `null` | 未知名fallback `idle / desk` |
+| `Bash` など通常名 | `null` | 名前表どおり |
+
+`Bash` + 任意server、MCP名 + `null`/別/詐称server、不完全prefixのMCP主張は、
+すべてadapter / SSE / UIより **手前** で拒否されます。拒否detailはfield名とruleのみで、
+tool名やserver値を含みません。
 
 labelは category とphaseで決まります。
 

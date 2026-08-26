@@ -343,30 +343,65 @@ export const HOOK_TOOL_CLASS: ReadonlyMap<string, HookToolClass> = new Map<strin
   ['TaskOutput', { category: 'idle', facility: 'desk' }],
 ]);
 
-/** An MCP tool is named `mcp__<server>__<tool>` and reports its server. */
-export const HOOK_MCP_TOOL_PREFIX = 'mcp__';
+/**
+ * The producer's `RE_MCP_SERVER`, verbatim.
+ *
+ * An MCP tool is named `mcp__<server>__<tool>`, and the producer derives the
+ * server from the *name* alone:
+ *
+ * ```python
+ * RE_MCP_SERVER = re.compile(r"^mcp__([A-Za-z0-9_-]{1,64}?)__")
+ * mcp_match = RE_MCP_SERVER.match(tool_name) if tool_name else None
+ * mcp_server = mcp_match.group(1) if mcp_match else None
+ * ```
+ *
+ * `tool.name` and `tool.mcp_server` are therefore not independent fields: the
+ * second is a function of the first. A name that does not match this pattern -
+ * an ordinary tool, an unknown one, or an incomplete `mcp__` prefix - is emitted
+ * with a null server and goes through the known-name table like any other.
+ *
+ * The quantifier is lazy, exactly as upstream: `mcp__a__b__t` reports `a`.
+ */
+export const HOOK_MCP_SERVER_PATTERN = /^mcp__([A-Za-z0-9_-]{1,64}?)__/;
 export const HOOK_MCP_TOOL_CLASS: HookToolClass = { category: 'mcp', facility: 'portal' };
 
 /** The producer's own fallback for a tool it does not classify, and for none. */
 export const HOOK_TOOL_FALLBACK_CLASS: HookToolClass = { category: 'idle', facility: 'desk' };
 
 /**
- * Classifies a tool row exactly as the pinned producer does.
+ * The `tool.mcp_server` the producer emits for a tool name, or null.
  *
- * Both inputs are already validated: `tool.name` matched the identifier charset
- * and `tool.mcp_server` is a bounded, control-character-free string. The server
- * is read as a signal only - never as text - and the name is compared against a
- * closed table, so nothing here is derived from unvalidated content.
+ * This is the only source of the server. The value a row *supplies* is never
+ * used to decide anything; it is compared against this result and the row is
+ * refused when the two disagree.
+ */
+export function hookMcpServer(toolName: string | null): string | null {
+  if (toolName === null) return null;
+  // The capture group is not optional in the pattern, so a match always has it.
+  return HOOK_MCP_SERVER_PATTERN.exec(toolName)?.[1] ?? null;
+}
+
+/**
+ * Classifies a tool row exactly as the pinned producer does:
+ *
+ * ```python
+ * def _category(tool_name, mcp_server):
+ *     if mcp_server: return ("mcp", "portal")
+ *     if not tool_name: return ("idle", "desk")
+ *     return TOOL_CATEGORY.get(tool_name, ("idle", "desk"))
+ * ```
+ *
+ * with `mcp_server` being the producer's own capture, not a supplied field - so
+ * the whole classification is a function of the already-validated `tool.name`,
+ * which matched the identifier charset and is compared against a closed table.
  *
  * An unknown or absent name is the producer's `idle / desk` fallback rather than
  * a rejection: the producer emits that row, and refusing it would drop real
  * history. It stays safe because the label is still fixed by the class, so an
  * unknown name can only ever carry `作業中` / `ツール処理を確認しました`.
  */
-export function hookToolClass(toolName: string | null, mcpServer: string | null): HookToolClass {
-  if (mcpServer !== null || (toolName !== null && toolName.startsWith(HOOK_MCP_TOOL_PREFIX))) {
-    return HOOK_MCP_TOOL_CLASS;
-  }
+export function hookToolClass(toolName: string | null): HookToolClass {
+  if (hookMcpServer(toolName) !== null) return HOOK_MCP_TOOL_CLASS;
   if (toolName === null) return HOOK_TOOL_FALLBACK_CLASS;
   return HOOK_TOOL_CLASS.get(toolName) ?? HOOK_TOOL_FALLBACK_CLASS;
 }
@@ -546,19 +581,17 @@ type ActivitySeen = {
  * Resolves the one activity tuple the producer emits for a tool row.
  *
  * Everything it reads has already been validated: `tool.name` matched the
- * identifier charset, `tool.mcp_server` is bounded and control-free, and
- * `tool.category` is a member of the closed category vocabulary. The tuple is
- * derived from the *name* (through `hookToolClass`), and the category the
- * producer emitted must agree with it - so a row cannot pick a category to
- * borrow another tool's facility or label.
+ * identifier charset and `tool.category` is a member of the closed category
+ * vocabulary. The tuple is derived from the *name* (through `hookToolClass`),
+ * and the category the producer emitted must agree with it - so a row cannot
+ * pick a category to borrow another tool's facility or label.
  */
 function toolActivityContract(
   phase: 'pre' | 'post' | 'failure',
   category: HookToolCategory,
   toolName: string | null,
-  mcpServer: string | null,
 ): HookActivityContract {
-  const tool = hookToolClass(toolName, mcpServer);
+  const tool = hookToolClass(toolName);
   if (category !== tool.category) reject('contract_mismatch', 'tool.category:not_fixed_for_tool');
 
   const isResearch = toolName !== null && HOOK_RESEARCH_TOOL_NAMES.includes(toolName);
@@ -589,6 +622,17 @@ function toolActivityContract(
  * screen through this gap.
  */
 function checkActivityContract(seen: ActivitySeen): void {
+  // `tool.mcp_server` is not an independent field: the producer computes it from
+  // the sanitized tool name with `RE_MCP_SERVER` and emits null for every name
+  // that does not match. Any other pairing - a plain tool carrying a server, an
+  // MCP name with a null, different or invented server, or an incomplete
+  // `mcp__` prefix presented as MCP - is a row the producer cannot emit, so it
+  // is refused here rather than classified. This holds for every row, tool or
+  // not: a non-tool event reports no tool, and therefore no server.
+  if (seen.toolMcpServer !== hookMcpServer(seen.toolName)) {
+    reject('contract_mismatch', 'tool.mcp_server:not_derived_from_name');
+  }
+
   // The capacity control row. It is the only shape with a null `hook_event`, and
   // it is only that row if every one of its fixed fields matches.
   if (seen.hookEvent === null) {
@@ -605,7 +649,7 @@ function checkActivityContract(seen: ActivitySeen): void {
     // know, so the category is required. The *name* is not: an absent name is
     // the producer's own `idle / desk` fallback.
     if (seen.toolCategory === null) reject('contract_mismatch', 'tool.category:required_for_tool_event');
-    compareActivity(toolActivityContract(phase, seen.toolCategory, seen.toolName, seen.toolMcpServer), seen, 'tool');
+    compareActivity(toolActivityContract(phase, seen.toolCategory, seen.toolName), seen, 'tool');
     return;
   }
 
