@@ -28,7 +28,9 @@ import {
   selectBanner,
   selectDesks,
   selectHeader,
+  selectPlayer,
   setConnectionPhase,
+  setSelectedActor,
   visualForState,
 } from './quest-view.js';
 
@@ -47,6 +49,8 @@ const dom = {
   statDesks: document.getElementById('stat-desks'),
   banner: document.getElementById('banner'),
   desks: document.getElementById('desks'),
+  player: document.getElementById('player'),
+  playerName: document.getElementById('player-name'),
   emptyState: document.getElementById('empty-state'),
   legend: document.getElementById('legend'),
   log: document.getElementById('log'),
@@ -149,26 +153,101 @@ function renderLegend() {
   }
 }
 
+/**
+ * The desk projection currently in the DOM.
+ *
+ * A rendered select button carries only its position in this array, never an
+ * `actor_key`: identifiers off the wire reach the DOM as `textContent` and
+ * nothing else, and the two are always updated together, so the position cannot
+ * go stale.
+ */
+let renderedDesks = [];
+
+/**
+ * The <li> in the DOM for each seated `actor_key`.
+ *
+ * One colleague keeps one element for as long as they are seated, and the map
+ * is the only place their key is held - it never reaches an attribute.
+ *
+ * This exists for the keyboard. A busy LIVE stream re-renders on every frame,
+ * and an element removed from the document takes the focus with it: rebuilding
+ * the list wholesale would drop focus out of a desk button several times a
+ * second, which is exactly the case "select any colleague with a keyboard
+ * alone" has to survive. Reusing the element means the common re-render - the
+ * same colleagues, in the same order, with new status text - does not touch the
+ * focused node at all, so nothing has to give focus back and the script still
+ * never calls `focus()` on anything.
+ */
+let renderedNodes = new Map();
+
+function buildDeskNode() {
+  const fragment = dom.deskTemplate.content.cloneNode(true);
+  const item = fragment.querySelector('.desk');
+  return { item, select: item.querySelector('.desk__select'), badge: item.querySelector('.desk__badge') };
+}
+
+function fillDeskNode(node, desk, index) {
+  const { item, select, badge } = node;
+  item.dataset.state = desk.visual.state;
+  item.dataset.selected = String(desk.selected);
+  select.dataset.deskIndex = String(index);
+  // The state is exposed as `aria-pressed`, so it is never carried by the
+  // border colour alone.
+  select.setAttribute('aria-pressed', String(desk.selected));
+  text(item, '.desk__seat', `#${desk.seat}`);
+  text(item, '.desk__agent', desk.display_name);
+  badge.hidden = !desk.is_main_orchestrator;
+  text(item, '.desk__symbol', desk.visual.symbol);
+  text(item, '.desk__state-label', `${desk.visual.label} (${desk.visual.code})`);
+  // `role` is already null unless the collector resolved one.
+  text(item, '.desk__role', desk.role ?? '未解決');
+  text(item, '.desk__raw-status', desk.status_label ?? '—');
+  text(item, '.desk__tool', desk.last_tool ?? '—');
+  text(item, '.desk__session', desk.session_id);
+  text(item, '.desk__ts', desk.last_event_ts ?? '—');
+}
+
 function renderDesks(desks) {
-  dom.desks.replaceChildren();
-  for (const desk of desks) {
-    const node = dom.deskTemplate.content.cloneNode(true);
-    const item = node.querySelector('.desk');
-    item.dataset.state = desk.visual.state;
-    text(node, '.desk__seat', `#${desk.seat}`);
-    text(node, '.desk__agent', desk.display_name);
-    const badge = node.querySelector('.desk__badge');
-    badge.hidden = !desk.is_main_orchestrator;
-    text(node, '.desk__symbol', desk.visual.symbol);
-    text(node, '.desk__state-label', `${desk.visual.label} (${desk.visual.code})`);
-    // `role` is already null unless the collector resolved one.
-    text(node, '.desk__role', desk.role ?? '未解決');
-    text(node, '.desk__raw-status', desk.status_label ?? '—');
-    text(node, '.desk__tool', desk.last_tool ?? '—');
-    text(node, '.desk__session', desk.session_id);
-    text(node, '.desk__ts', desk.last_event_ts ?? '—');
-    dom.desks.append(node);
+  const next = new Map();
+  desks.forEach((desk, index) => {
+    const node = renderedNodes.get(desk.actor_key) ?? buildDeskNode();
+    fillDeskNode(node, desk, index);
+    next.set(desk.actor_key, node);
+  });
+
+  // Colleagues who left go first, so nothing stale is in the list while the
+  // rest is placed - and so focus that was on a departing desk is released
+  // rather than moved onto somebody else's button.
+  for (const [key, node] of renderedNodes) {
+    if (!next.has(key)) node.item.remove();
   }
+
+  // Place each remaining element only if it is not already where it belongs.
+  // For the ordinary frame - same colleagues, same order - that is zero DOM
+  // moves, so a focused button is never removed and re-inserted.
+  desks.forEach((desk, index) => {
+    const node = next.get(desk.actor_key);
+    const current = dom.desks.children[index] ?? null;
+    if (current !== node.item) dom.desks.insertBefore(node.item, current);
+  });
+
+  renderedNodes = next;
+  renderedDesks = desks;
+}
+
+/**
+ * The human player.
+ *
+ * Rendered outside the colleague list and with no control of its own: the
+ * player is not selectable, is not a seat, and is not something the operator
+ * acts on from here. `selectPlayer` returns null until a snapshot names one, and
+ * the whole figure is hidden until then rather than showing a placeholder
+ * person.
+ */
+function renderPlayer(player) {
+  dom.player.hidden = player === null;
+  if (player === null) return;
+  dom.playerName.textContent = player.display_name;
 }
 
 function renderLog(entries) {
@@ -263,7 +342,7 @@ function currentViewport() {
 function paintCanvas() {
   if (canvasContext === null || painted === null) return;
   const viewport = currentViewport();
-  const world = buildWorld({ desks: painted.desks, header: painted.header, viewport });
+  const world = buildWorld({ desks: painted.desks, player: painted.player, header: painted.header, viewport });
   paintedViewport = viewport;
   // Setting the buffer size also clears it; CSS keeps the displayed box at the
   // element's intrinsic ratio, so no inline style is ever written.
@@ -291,8 +370,8 @@ function repaintIfResized() {
   paintCanvas();
 }
 
-function renderCanvas(header, desks) {
-  painted = { header, desks };
+function renderCanvas(header, desks, player) {
+  painted = { header, desks, player };
   paintCanvas();
 }
 
@@ -308,6 +387,7 @@ if (canvasContext !== null) {
 function render() {
   const header = selectHeader(state);
   const desks = selectDesks(state);
+  const player = selectPlayer(state);
 
   dom.statMode.textContent = header.mode;
   dom.statConnection.textContent = `${header.connection.symbol} ${header.connection.label}`;
@@ -320,10 +400,11 @@ function render() {
   }
 
   renderBanner(header);
+  renderPlayer(player);
   renderDesks(desks);
   renderLog(state.log);
   dom.emptyState.hidden = !header.empty;
-  renderCanvas(header, desks);
+  renderCanvas(header, desks, player);
 }
 
 for (const button of dom.modeButtons) {
@@ -337,6 +418,27 @@ for (const button of dom.modeButtons) {
 
 dom.reconnect.addEventListener('click', () => {
   connect(state.namespace);
+});
+
+/**
+ * Selecting a colleague.
+ *
+ * One listener on the list rather than one per seat, so an office of any size
+ * costs the same. The event is a `click`, which a native <button> also fires for
+ * Enter and Space - that is what makes every desk selectable with the keyboard
+ * alone, with no key handler and no focus management of our own.
+ *
+ * Selecting the selected desk again clears it, which is what `aria-pressed`
+ * already promises a toggle button does.
+ */
+dom.desks.addEventListener('click', (event) => {
+  // A click inside the button lands on one of its spans, so the control is
+  // found by walking up rather than by comparing the target.
+  const button = event.target.closest('[data-action="select-desk"]');
+  if (button === null) return;
+  const desk = renderedDesks[Number(button.dataset.deskIndex)];
+  if (desk === undefined) return;
+  setState(setSelectedActor(state, desk.selected ? null : desk.actor_key));
 });
 
 window.addEventListener('hashchange', () => {

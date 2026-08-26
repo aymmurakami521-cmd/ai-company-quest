@@ -78,6 +78,26 @@
           </canvas>
         </div>
         <div class="office__floor">
+          <!--
+            The human player, from the server's own `state.player` entity.
+            Outside the colleague list on purpose: they are not an AI社員, they
+            hold no seat, they are not selectable, and no Claude event can ever
+            change them. Hidden until a snapshot names one - this screen never
+            invents a person.
+          -->
+          <div class="player" id="player" hidden>
+            <div class="player__sprite" aria-hidden="true">
+              <span class="sprite sprite--head"></span>
+              <span class="sprite sprite--body"></span>
+              <span class="sprite sprite--legs"></span>
+            </div>
+            <p class="player__info">
+              <span class="player__badge">YOU</span>
+              <span class="player__name" id="player-name"></span>
+              <span class="player__note">あなた（人間のplayer）。AI社員とは別のactorで、eventでは変化しません。</span>
+            </p>
+          </div>
+
           <!-- The complete list of actors, canvas overflow or not. -->
           <ul class="desks" id="desks" aria-label="AI社員一覧"></ul>
           <p class="office__empty" id="empty-state">
@@ -123,9 +143,17 @@
             <span class="sprite sprite--table"></span>
           </div>
           <div class="desk__info">
+            <!--
+              Selecting a colleague is a native <button>, so Tab reaches it and
+              Enter/Space activate it without a key handler of our own. The DOM
+              is the record of truth for who is selected; the canvas above stays
+              a decorative, aria-hidden layer and is never clicked or hit-tested.
+            -->
             <h3 class="desk__name">
-              <span class="desk__seat"></span>
-              <span class="desk__agent"></span>
+              <button class="desk__select" type="button" data-action="select-desk" aria-pressed="false">
+                <span class="desk__seat"></span>
+                <span class="desk__agent"></span>
+              </button>
               <span class="desk__badge" hidden>MAIN</span>
             </h3>
             <p class="desk__status">

@@ -5,7 +5,7 @@
  * contract is declared here and exercised by `test/ui-world.test.ts`.
  */
 
-import type { ActorVisualState, Desk, Header } from './quest-view.js';
+import type { ActorVisualState, Desk, Header, PlayerProjection } from './quest-view.js';
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
@@ -49,6 +49,27 @@ export type WorldActor = {
   state_label: WorldLabel;
 };
 
+/**
+ * The human player on the canvas: standing, in their own strip below the desk
+ * grid. No seat, no session, no state - and never an entry in `World.actors`.
+ */
+export type WorldPlayer = {
+  kind: 'player';
+  id: string;
+  appearance: Appearance;
+  cell: Rect;
+  head: Rect;
+  body: Rect;
+  arm_left: Rect;
+  arm_right: Rect;
+  leg_left: Rect;
+  leg_right: Rect;
+  badge: Rect;
+  /** This module's own literal, never a string off the wire. */
+  badge_text: string;
+  name_label: WorldLabel;
+};
+
 /** `pane` is a window in the office wall; the identifier avoids the global's name. */
 export type WorldProp = Rect & { kind: 'pane' | 'poster' | 'clock' };
 
@@ -67,6 +88,8 @@ export type WorldHud = {
   /** `desk_count - drawn_count`, stated on the canvas whenever it is not zero. */
   hidden_count: number;
   session_count: number;
+  /** Presence only. The player holds no seat, so `desk_count` excludes them. */
+  player_present: boolean;
 };
 
 /** How much of the office the canvas drew. `drawn + hidden === total`, always. */
@@ -94,6 +117,8 @@ export type World = {
   floor: Rect & { tile: number; cols: number; rows: number };
   props: WorldProp[];
   actors: WorldActor[];
+  /** Null when no snapshot has named a player yet. */
+  player: WorldPlayer | null;
   notice: WorldLabel;
   caption_box: { x: number; y: number; size: number };
   /** Empty text when nothing was left out of the drawing. */
@@ -115,6 +140,7 @@ export type CanvasMeasurement = {
 
 export type WorldInput = {
   desks?: readonly Desk[];
+  player?: PlayerProjection | null;
   header?: Header | null;
   viewport?: Partial<Viewport> | null;
 };
@@ -139,12 +165,18 @@ export declare const MAX_DEVICE_PIXELS: number;
 export declare const MIN_DEVICE_SCALE: number;
 export declare const VIEWPORT_HEIGHT_RATIO: number;
 export declare const APPEARANCE_KEYS: readonly string[];
+export declare const PLAYER_STRIP_UNITS: number;
+export declare const PLAYER_BADGE_TEXT: string;
+export declare const PLAYER_OUTFIT: { readonly shirt: string; readonly trouser: string };
+export declare const ACTOR_SHIRT_COLORS: readonly string[];
+export declare const ACTOR_TROUSER_COLORS: readonly string[];
 
 export declare function deviceScaleFor(cssWidth: number, cssHeight: number, dpr: number): number;
 export declare function measureCanvasViewport(source: CanvasMeasurement | null | undefined): Viewport;
 
 export declare function appearanceSeed(actorKey: unknown): number;
 export declare function appearanceFor(actorKey: unknown): Appearance;
+export declare function playerAppearanceFor(playerId: unknown): Appearance;
 export declare function textWidth(text: unknown, fontSize: number): number;
 export declare function fitLabel(text: unknown, boxPixels: number, fontSize: number): string;
 export declare function buildWorld(input: WorldInput | null | undefined): World;

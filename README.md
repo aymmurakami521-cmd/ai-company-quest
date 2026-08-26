@@ -274,12 +274,14 @@ canvasが上限で描き切れない席があっても、DOMの一覧は**常に
 
 | 項目 | 実装 |
 |------|------|
-| キーボード操作 | 操作はすべてnativeの `<button>` / `<a>`。LIVE/DEMO切替・再接続・skip linkはTabとEnter/Spaceだけで完結します。独自key handlerもcustom widgetもありません |
+| キーボード操作 | 操作はすべてnativeの `<button>` / `<a>`。LIVE/DEMO切替・再接続・skip link・**AI社員の選択**はTabとEnter/Spaceだけで完結します。独自key handlerもcustom widgetもありません |
+| 社員の選択 | 社員カードの見出しがnativeの `<button>`（`.desk__select`）です。Tabで全社員に届き、Enter/Spaceで選択・再度押すと解除します。選択状態は `aria-pressed` と `data-selected` で公開し、色だけには依存しません。listenerは一覧に1つのdelegationで、席数が増えても増えません |
+| 操作の正本 | 選択はDOM側だけで完結します。canvasにはlistenerを付けず、pointer座標から席を引く処理（hit test）も持ちません。選択中のactorは `actor_key`（`ClientState.selected_actor_key`）で保持し、席番号では保持しません |
 | tab順 | `tabindex` は `0` のみ。正の値も `-1` も使わず、scriptがfocusを奪うこともありません |
 | scroll領域 | 独自scrollbarを持つのはアクティビティログだけで、その容器が `tabindex="0"` + `aria-labelledby` の名前付きfocus stopです（keyboardだけでscrollできます） |
 | focus可視化 | `:focus-visible` のoutlineを1箇所で宣言し、どこでも `outline: none` しません |
 | accessible name | 社員一覧・mode group・log領域に名前があります。記号（`✖` `▶` など）はすべて `aria-hidden` の装飾で、隣に必ずtext labelがあります |
-| 現在選択 | LIVE/DEMOは `aria-pressed` で状態を公開します（色だけに依存しません） |
+| 現在選択 | LIVE/DEMOと社員選択はどちらも `aria-pressed` で状態を公開します（色だけに依存しません） |
 | 通知 | live regionは**status bannerの1つだけ**（`role="status"` + `aria-live="polite"`）。接続・再接続・gap・fail-closed・emptyはすべてここへ1回だけ出ます。HUDの数値は同じ事実の静的な再掲なのでlive regionにしていません（二重読み上げ回避） |
 | 色以外での識別 | 全状態が「記号 + code + label」を持ちます。bannerの `data-tone` は色だけで、意味はcode/記号側にあります |
 | reduced motion | animation / transition は `@media (prefers-reduced-motion: no-preference)` の中だけ。canvasはtimerもanimation frameも使わない完全な静止画です |
@@ -423,8 +425,31 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 - 画面のレンダリングを検証する自動testはDOM contract（要素・selector・状態style・
   reduced-motion）と純粋関数までで、実ブラウザでのpixel比較は行っていません。
 - **アクセシビリティのtestは配信assetに対する契約検証まで**です（`test/ui-a11y.test.ts`）。
-  実ブラウザでのfocus順、実screen readerでの読み上げ、contrast比の実測、
+  ただしfocusの保持だけは、shippedの `quest-app.js` を最小のfake DOM（`test/fakeDom.ts`）で
+  実際に動かして検証しています（`test/ui-dom.test.ts`）。このfake DOMは実browserと同じく
+  「DOMから外れたnodeはfocusを失う」を再現します。
+  実ブラウザでのTab順、実screen readerでの読み上げ、contrast比の実測、
   実際の200% zoom描画は自動化していません。手動確認が必要です。
+- **社員の選択は選択そのものだけです。** 選択してもrequestは1本も増えず、指示送信・行動指定・
+  詳細paneの展開はありません（Phase 3の範囲）。選択中のactorが在席しなくなると（`snapshot` で
+  officeが差し替わると）選択は自動的に解除され、古い座席が新しいlayoutへ持ち越されることは
+  ありません。選択状態はcanvasには反映しません（canvasは装飾層のままです）。
+- **本repoはruntime actor（Claude Code session）単位のofficeです。** 組織snapshot、部署、
+  社長室フロア、未所属・共用施設といったフロア構成、固定の社員rosterは実装していません。
+  `selectDesks` が席を決めるのはcollectorが解決したactorだけで、役職も配属も推測しません。
+- **人間playerはserverの `state.player` entityからのみ描画します。** `QUEST_PLAYER_NAME`
+  で決まる1人だけで、`snapshot` frameが名前を運んできて初めて表示されます（それまでは
+  非表示で、人物を捏造しません）。AI社員とは別のactorとして扱い、社員一覧にも在席数にも
+  入らず、選択もできません（選択できる状態を持たないため）。canvasでは机の下の専用stripに
+  立ち姿で描き、AI社員には決して割り当てられない服の色とYOU badgeで区別します。
+  `reduce` はplayerを書き換えないので、どのClaude eventもこの人物を動かせません
+  （`test/ui-view.test.ts` と `test/ui-dom.test.ts` で保証）。
+  歩行・行動・指示送信はPhase 3の範囲で、ここには含みません。
+- **社員一覧のDOM要素は `actor_key` 単位で再利用します。** LIVE streamはframeごとに再描画
+  しますが、在席者と並び順が変わらない限りDOMは動かしません。focus中の要素がDOMから外れると
+  browserはfocusを失うため、毎frame作り直すとkeyboard操作が成立しないからです。
+  席を離れたactorの要素は削除するので、存在しない社員のnodeがfocusを持つことも、
+  別人のnodeがfocusを引き継ぐこともありません（`test/ui-dom.test.ts`）。
 - 画面の文言は日本語のみです（`<html lang="ja">`）。i18nはMVPの対象外です。
 - DEMOは自動進行しません。fixtureは1回投入されて固定で、時間経過で状態が変わることも、
   UIからDEMO stateを変更することもできません。
@@ -443,6 +468,7 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
 - canvasの説明labelは名前・状態記号・状態codeだけです。role・last tool・session・最終event時刻は
   従来通りDOM側の社員カードで確認します。
 - `player` entityは初期stateにのみ存在し、eventからは絶対に変化しません（testで保証）。
+  画面へは `snapshot` 経由でしか届かず、client側でも同じ不変を保ちます。
 - rotation検出はinode変化に加え、offset直前64byteのsignature照合で行います。
   同一inodeのcopy-truncate後にpoll間で旧offsetと同一sizeまで再成長した場合も、
   旧offset超へ再成長した場合も検出し、新ファイルの先頭から読み直します

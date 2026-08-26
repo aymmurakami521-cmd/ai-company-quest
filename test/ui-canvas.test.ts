@@ -98,6 +98,7 @@ function desk(seat: number, state: ActorVisualState, overrides: Partial<Desk> = 
     last_tool: null,
     last_event_ts: null,
     event_count: 1,
+    selected: false,
     visual: visualForState(state),
     ...overrides,
   };
@@ -261,6 +262,51 @@ test('an empty office is drawn as a room with a notice, not as a blank canvas', 
     false,
     'and nobody is invented to fill it',
   );
+});
+
+test('the player is painted as a standing person, apart from every colleague', () => {
+  const desks = [desk(1, 'working', { is_main_orchestrator: true }), desk(2, 'idle')];
+  const player = { kind: 'player' as const, id: 'player', display_name: '歩' };
+  const world = buildWorld({ desks, player, header: emptyHeader(), viewport: VIEWPORT });
+  const ops = paint(world);
+  const rects = ops.filter((entry) => entry.op === 'fillRect');
+  const at = (box: { x: number; y: number }): Op[] =>
+    rects.filter((entry) => entry.args[0] === box.x && entry.args[1] === box.y);
+
+  assert.ok(world.player !== null);
+  for (const [name, box] of [
+    ['head', world.player.head],
+    ['body', world.player.body],
+    ['left leg', world.player.leg_left],
+    ['right leg', world.player.leg_right],
+    ['badge', world.player.badge],
+  ] as const) {
+    assert.ok(at(box).length > 0, `the player's ${name} is drawn`);
+  }
+
+  const painted = texts(ops);
+  assert.ok(painted.includes('歩'), 'the player is named on the canvas');
+  assert.ok(painted.includes(world.player.badge_text), 'and badged as the person at the keyboard');
+  assert.ok(painted.includes('agent-1'), 'the colleagues are still named too');
+
+  // The player's badge is not the MAIN badge: two different people, two
+  // different marks, in two different colours.
+  const badgeStyle = at(world.player.badge)[0]?.style;
+  const mainBadge = at(world.actors[0]?.badge ?? { x: -1, y: -1 })[0]?.style;
+  assert.ok(badgeStyle !== undefined && mainBadge !== undefined, 'both badges were painted');
+  assert.notEqual(badgeStyle, mainBadge, 'the player is not badged like the main orchestrator');
+
+  // No state colour is used on them, because they have no runtime state.
+  const shirt = at(world.player.body).map((entry) => entry.style);
+  for (const color of Object.values(STATE_COLORS)) {
+    assert.equal(shirt.includes(color), false, 'the player is never painted in a state colour');
+  }
+});
+
+test('a world without a player paints nobody extra', () => {
+  const desks = [desk(1, 'idle')];
+  const without = paint(buildWorld({ desks, header: emptyHeader(), viewport: VIEWPORT }));
+  assert.equal(texts(without).includes('YOU'), false, 'no badge for a player that was never named');
 });
 
 test('each visual state gets its own silhouette, not just its own colour', () => {

@@ -9,9 +9,9 @@
  * screen reader repeating "CONNECTED" forever.
  *
  * This suite runs the shipped `quest-app.js` against the smallest DOM it can
- * work with - one that counts every `textContent` assignment - and holds the
- * rule from both sides: an unchanged status writes nothing, and a changed one
- * writes exactly once.
+ * work with - `test/fakeDom.ts`, which counts every `textContent` assignment -
+ * and holds the rule from both sides: an unchanged status writes nothing, and a
+ * changed one writes exactly once.
  */
 
 import test from 'node:test';
@@ -21,154 +21,18 @@ import type { SanitizedEvent } from '../src/domain/event.ts';
 import { toWireEvent } from '../src/domain/wire.ts';
 import type { WireEvent } from '../src/domain/wire.ts';
 import { makeEvent, makeIngested } from './helpers.ts';
+import type { FakeElement } from './fakeDom.ts';
+import { installFakeDom, onlyStream } from './fakeDom.ts';
 
-// ------------------------------------------------------------- fake DOM ---
-
-/** A DOM node that remembers how often it was written to, unchanged text included. */
-class FakeElement {
-  className: string;
-  dataset: Record<string, string> = {};
-  attributes: Record<string, string> = {};
-  hidden = false;
-  children: FakeElement[] = [];
-  writes = 0;
-  #text = '';
-
-  constructor(className = '', children: FakeElement[] = []) {
-    this.className = className;
-    this.children = children;
-  }
-
-  get textContent(): string {
-    return this.#text;
-  }
-
-  set textContent(value: string) {
-    this.#text = String(value);
-    this.writes += 1;
-  }
-
-  descendants(): FakeElement[] {
-    return this.children.flatMap((child) => [child, ...child.descendants()]);
-  }
-
-  querySelector(selector: string): FakeElement | null {
-    const wanted = selector.replace(/^\./, '');
-    return this.descendants().find((node) => node.className === wanted) ?? null;
-  }
-
-  replaceChildren(): void {
-    this.children = [];
-  }
-
-  append(node: FakeElement): void {
-    this.children.push(node);
-  }
-
-  addEventListener(): void {
-    // The suite drives the app through the stream, never through a click.
-  }
-
-  setAttribute(name: string, value: string): void {
-    this.attributes[name] = value;
-  }
-}
-
-/** A <template>: every clone is a fresh flat fragment with the slots the app fills. */
-class FakeTemplate {
-  classes: readonly string[];
-
-  constructor(classes: readonly string[]) {
-    this.classes = classes;
-  }
-
-  get content(): { cloneNode: () => FakeElement } {
-    return {
-      cloneNode: () => new FakeElement('fragment', this.classes.map((name) => new FakeElement(name))),
-    };
-  }
-}
-
-const banner = new FakeElement('banner', [
-  new FakeElement('banner__symbol'),
-  new FakeElement('banner__code'),
-  new FakeElement('banner__message'),
-]);
-
-const elements = new Map<string, FakeElement | FakeTemplate>([
-  ['banner', banner],
-  ['desk-template', new FakeTemplate(['desk', 'desk__badge', 'desk__seat', 'desk__agent', 'desk__symbol'])],
-  ['log-template', new FakeTemplate(['log__row', 'log__symbol', 'log__seq', 'log__ts', 'log__actor'])],
-  ['legend-template', new FakeTemplate(['legend__row', 'legend__symbol', 'legend__label', 'legend__code'])],
-]);
-
-/** Anything else the app looks up is an ordinary element it may write to. */
-function elementById(id: string): FakeElement | FakeTemplate {
-  const known = elements.get(id);
-  if (known !== undefined) return known;
-  const made = new FakeElement(id);
-  elements.set(id, made);
-  return made;
-}
-
-const modeButtons = [new FakeElement('mode-button'), new FakeElement('mode-button')];
-modeButtons[0]!.dataset.mode = 'live';
-modeButtons[1]!.dataset.mode = 'demo';
-
-const fakeDocument = {
-  getElementById: elementById,
-  querySelector: () => new FakeElement('reconnect'),
-  querySelectorAll: (selector: string) => (selector === '[data-mode]' ? modeButtons : []),
-};
-
-/** The stream the app opens, held so the suite can push frames into it. */
-class FakeEventSource {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  readyState = FakeEventSource.OPEN;
-  listeners = new Map<string, ((event: { data: string }) => void)[]>();
-
-  constructor(_url: string) {
-    opened.push(this);
-  }
-
-  addEventListener(name: string, listener: (event: { data: string }) => void): void {
-    const existing = this.listeners.get(name) ?? [];
-    existing.push(listener);
-    this.listeners.set(name, existing);
-  }
-
-  close(): void {
-    this.readyState = 2;
-  }
-
-  emit(name: string, payload: unknown): void {
-    for (const listener of this.listeners.get(name) ?? []) listener({ data: JSON.stringify(payload) });
-  }
-}
-
-const opened: FakeEventSource[] = [];
-
-const fakeWindow = {
-  location: { hash: '' },
-  innerHeight: 800,
-  devicePixelRatio: 1,
-  addEventListener: () => {},
-  // Nothing in this suite depends on the clock, and a live timer would keep the
-  // test process alive.
-  setInterval: () => 0,
-};
-
-const globals = globalThis as unknown as Record<string, unknown>;
-globals.document = fakeDocument;
-globals.window = fakeWindow;
-globals.EventSource = FakeEventSource;
+const { document: fakeDocument } = installFakeDom();
 
 // The app is a module with side effects: importing it is what renders the page
 // and opens the stream, so it is imported once, here, for the whole file.
 await import(new URL('../src/ui/public/quest-app.js', import.meta.url).href);
 
 // ---------------------------------------------------------------- driving ---
+
+const banner = fakeDocument.element('banner');
 
 /** One of the three text slots inside the live region. */
 function slot(selector: string): FakeElement {
@@ -182,12 +46,6 @@ const codeSlot = slot('.banner__code');
 const messageSlot = slot('.banner__message');
 
 /** The one stream importing the app opened. */
-function onlyStream(): FakeEventSource {
-  const [first] = opened;
-  if (first === undefined || opened.length !== 1) throw new Error(`the app opened ${opened.length} streams`);
-  return first;
-}
-
 const stream = onlyStream();
 
 /** Total assignments into the live region, unchanged text included. */

@@ -27,6 +27,11 @@
   --state-ended: #99a2b8;
   --state-idle: #6ec5ff;
 
+  /* The human player. Not one of the state colours, and never used for a desk. */
+  --player-accent: #7fc8ff;
+  --player-shirt: #f2f4fb;
+  --player-trouser: #161b2b;
+
   --pixel: 4px;
   --font: ui-monospace, "SFMono-Regular", "DejaVu Sans Mono", Menlo, Consolas, monospace;
 }
@@ -325,6 +330,89 @@ h3 {
   gap: 12px;
 }
 
+/*
+ * The human player.
+ *
+ * Deliberately unlike a desk card: its own accent instead of a state colour,
+ * a standing sprite instead of a seated one, and no control inside it - there
+ * is nothing here to operate, so there is nothing here to tab to either.
+ */
+.player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px;
+  background: rgba(13, 16, 24, 0.88);
+  border: var(--pixel) solid var(--player-accent);
+  box-shadow: inset 0 0 0 2px #05070d;
+}
+
+/* `display: flex` above would otherwise defeat the `hidden` attribute. */
+.player[hidden] {
+  display: none;
+}
+
+.player__sprite {
+  position: relative;
+  width: 40px;
+  min-width: 40px;
+  height: 60px;
+}
+
+/* Standing: head, shirt, legs. No chair, no desk, no monitor. */
+.player__sprite .sprite--head {
+  left: 10px;
+  top: 2px;
+  width: 20px;
+  height: 20px;
+  background: #f2c9a0;
+  box-shadow: 0 -6px 0 0 #4a3728, -4px -2px 0 0 #4a3728, 4px -2px 0 0 #4a3728;
+}
+
+.player__sprite .sprite--body {
+  left: 6px;
+  top: 24px;
+  width: 28px;
+  height: 22px;
+  background: var(--player-shirt);
+}
+
+.player__sprite .sprite--legs {
+  left: 10px;
+  top: 46px;
+  width: 20px;
+  height: 14px;
+  background: var(--player-trouser);
+  box-shadow: inset 0 0 0 2px #05070d;
+}
+
+.player__info {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.player__badge {
+  font-size: 0.62rem;
+  padding: 1px 5px;
+  color: var(--ink);
+  background: var(--player-accent);
+}
+
+.player__name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.player__note {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
 .office__empty {
   margin: 8px 0 0;
   padding: 12px;
@@ -439,6 +527,39 @@ h3 {
   gap: 6px;
   flex-wrap: wrap;
   text-transform: none;
+}
+
+/*
+ * The select control keeps the heading's own look: it is a button for the
+ * keyboard and the pointer, not a second visual style. The global
+ * `:focus-visible` ring still applies, and nothing here removes an outline.
+ */
+.desk__select {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* Selection is a border and a marker, never a colour on its own. */
+.desk[data-selected='true'] .desk__card {
+  border-style: double;
+  box-shadow:
+    inset 0 0 0 2px #05070d,
+    0 0 0 var(--pixel) var(--accent);
+}
+
+.desk[data-selected='true'] .desk__seat::before {
+  content: '▸ ';
+  color: var(--accent);
 }
 
 .desk__seat {

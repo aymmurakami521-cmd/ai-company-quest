@@ -19,6 +19,7 @@ import type { ActorVisualState, ClientState } from '../src/ui/public/quest-view.
 import {
   ACTOR_VISUAL_STATES,
   MAX_LOG_ENTRIES,
+  PLAYER_NAME_MAX,
   UNATTRIBUTED_AGENT_LABEL,
   applyEvent,
   applyFrame,
@@ -32,10 +33,13 @@ import {
   haltLabel,
   normalizeGapReason,
   normalizeHaltReason,
+  normalizePlayer,
   selectBanner,
   selectDesks,
   selectHeader,
+  selectPlayer,
   setConnectionPhase,
+  setSelectedActor,
   visualForState,
 } from '../src/ui/public/quest-view.js';
 
@@ -596,6 +600,225 @@ test('seating is deterministic and puts the main orchestrator first', () => {
   assert.equal(first[0]?.session_id, 'demo-session-01');
 });
 
+// ------------------------------------------------------------- selection ---
+
+/** A live client state with `count` colleagues seated, folded from real events. */
+function officeOf(count: number): ClientState {
+  const store = new NamespaceStore({ namespace: 'live' });
+  const wires = record(store);
+  store.ingestObject(makeEvent({ event_type: 'session_start' }));
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'main', status: 'active' }));
+  for (let index = 1; index < count; index += 1) {
+    store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: `worker-${index}`, status: 'active' }));
+  }
+  return foldAll('live', wires);
+}
+
+test('a fresh office has nobody selected', () => {
+  const state = createClientState('live');
+  assert.equal(state.selected_actor_key, null);
+  assert.deepEqual(selectDesks(state), []);
+});
+
+test('every seated colleague can be selected, one at a time', () => {
+  const state = officeOf(15);
+  const desks = selectDesks(state);
+  assert.equal(desks.length, 15, 'the office the test set up is the office it checks');
+
+  // Reachable: each desk in turn, and the projection marks exactly that one.
+  for (const desk of desks) {
+    const selectedDesks = selectDesks(setSelectedActor(state, desk.actor_key));
+    const marked = selectedDesks.filter((candidate) => candidate.selected);
+    assert.equal(marked.length, 1, `exactly one desk is selected for seat ${desk.seat}`);
+    assert.equal(marked[0]?.actor_key, desk.actor_key, `seat ${desk.seat} is the one selected`);
+    // Seat numbers are unchanged by selecting: it is a view state, not a layout.
+    assert.deepEqual(
+      selectedDesks.map((candidate) => candidate.seat),
+      desks.map((candidate) => candidate.seat),
+    );
+  }
+});
+
+test('selecting is a pure step: the state it came from is untouched', () => {
+  const before = officeOf(3);
+  const key = selectDesks(before)[1]?.actor_key ?? '';
+  const after = setSelectedActor(before, key);
+
+  assert.equal(before.selected_actor_key, null, 'the original state did not change');
+  assert.equal(after.selected_actor_key, key);
+  assert.equal(setSelectedActor(after, key), after, 'selecting the same seat again is a no-op object');
+  assert.equal(setSelectedActor(after, null).selected_actor_key, null, 'and it can be cleared');
+});
+
+test('an actor_key nobody is seated under is refused, never stored', () => {
+  const state = officeOf(3);
+  for (const key of ['not-a-seated-actor', '__proto__', 'constructor', '']) {
+    assert.equal(setSelectedActor(state, key).selected_actor_key, null, `${key} selects nobody`);
+  }
+  // A key from a *different* office is a stale key like any other.
+  const other = officeOf(2);
+  const foreign = setSelectedActor(state, `${selectDesks(other)[0]?.actor_key}-x`);
+  assert.equal(foreign.selected_actor_key, null);
+});
+
+test('a snapshot that re-lays out the office drops a selection it no longer seats', () => {
+  const store = new NamespaceStore({ namespace: 'live' });
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'main', status: 'active' }));
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'worker-1', status: 'active' }));
+
+  let state = applySnapshot(createClientState('live'), snapshotOf(store));
+  const worker = selectDesks(state).find((desk) => desk.display_name === 'worker-1');
+  assert.ok(worker !== undefined, 'the office seats the colleague the test selects');
+  state = setSelectedActor(state, worker.actor_key);
+  assert.equal(state.selected_actor_key, worker.actor_key);
+
+  // A different office arrives: the same session, without that colleague.
+  const replacement = new NamespaceStore({ namespace: 'live' });
+  replacement.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'main', status: 'active' }));
+  const relaid = applySnapshot(state, snapshotOf(replacement));
+
+  assert.equal(relaid.selected_actor_key, null, 'the selection did not survive the re-layout');
+  assert.equal(
+    selectDesks(relaid).some((desk) => desk.selected),
+    false,
+    'and no desk in the new layout claims to be selected',
+  );
+  assert.deepEqual(
+    selectDesks(relaid).map((desk) => desk.display_name),
+    ['main'],
+    'the old colleague is not mixed into the new office either',
+  );
+
+  // A selection the new office *does* seat is kept, so a snapshot is not a reset.
+  const main = selectDesks(state).find((desk) => desk.is_main_orchestrator);
+  const kept = applySnapshot(setSelectedActor(state, main?.actor_key ?? ''), snapshotOf(replacement));
+  assert.equal(kept.selected_actor_key, main?.actor_key);
+});
+
+test('switching namespace leaves no selection behind', () => {
+  const live = setSelectedActor(officeOf(3), selectDesks(officeOf(3))[0]?.actor_key ?? '');
+  assert.notEqual(live.selected_actor_key, null, 'the office under test really had a selection');
+  assert.equal(createClientState('demo').selected_actor_key, null, 'a switch builds a state with none');
+});
+
+// ----------------------------------------------------------------- player ---
+
+test('the player comes from the snapshot entity, never from an event', () => {
+  const store = new NamespaceStore({
+    namespace: 'live',
+    player: { kind: 'player', id: 'player', display_name: '歩' },
+  });
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'main', status: 'active' }));
+
+  // Before any snapshot the screen knows of no player, and invents none.
+  const fresh = createClientState('live');
+  assert.equal(fresh.player, null);
+  assert.equal(selectPlayer(fresh), null);
+
+  const state = applySnapshot(fresh, snapshotOf(store));
+  assert.deepEqual(selectPlayer(state), { kind: 'player', id: 'player', display_name: '歩' });
+
+  // Every event path leaves it exactly as it was - the client-side echo of the
+  // reducer contract that no event can reach the player.
+  const wires = record(store);
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'player', status: 'active' }));
+  store.ingestObject(makeEvent({ event_type: 'agent_status', agent_id: 'player', status: 'busy' }));
+  store.ingestObject(makeEvent({ event_type: 'session_end' }));
+  let folded = state;
+  for (const event of wires) folded = applyEvent(folded, event);
+
+  assert.equal(Object.is(folded.player, state.player), true, 'not even a new object');
+  assert.deepEqual(selectPlayer(folded), { kind: 'player', id: 'player', display_name: '歩' });
+  // An *agent* named "player" is a colleague, and does not become the player.
+  assert.ok(
+    selectDesks(folded).some((desk) => desk.display_name === 'player'),
+    'the agent took a desk',
+  );
+});
+
+test('the player is never one of the colleagues, and cannot be selected', () => {
+  const store = new NamespaceStore({
+    namespace: 'live',
+    player: { kind: 'player', id: 'player', display_name: '歩' },
+  });
+  store.ingestObject(makeEvent({ event_type: 'agent_start', agent_id: 'main', status: 'active' }));
+  const state = applySnapshot(createClientState('live'), snapshotOf(store));
+
+  const desks = selectDesks(state);
+  assert.equal(desks.length, 1, 'the player added no seat');
+  assert.equal(
+    desks.some((desk) => desk.display_name === '歩'),
+    false,
+    'and is not in the colleague list',
+  );
+  assert.equal(selectHeader(state).desk_count, 1, 'nor in the seat count');
+
+  // `setSelectedActor` only ever accepts a key somebody is seated under, and
+  // the player is seated under none - so their id selects nobody.
+  for (const key of ['player', '歩', 'kind', 'display_name']) {
+    assert.equal(setSelectedActor(state, key).selected_actor_key, null, `${key} selects nobody`);
+  }
+});
+
+test('a player entity the screen cannot trust is refused rather than shown', () => {
+  for (const raw of [
+    null,
+    undefined,
+    'player',
+    42,
+    {},
+    { kind: 'actor', id: 'player', display_name: 'x' },
+    { kind: 'player', id: '', display_name: 'x' },
+    { kind: 'player', id: 7, display_name: 'x' },
+  ]) {
+    assert.equal(normalizePlayer(raw), null, `${JSON.stringify(raw) ?? 'undefined'} is not a player`);
+  }
+
+  // A name is re-clamped here, whatever the server said, and an empty one falls
+  // back to the entity's own default rather than rendering as a blank figure.
+  const long = normalizePlayer({ kind: 'player', id: 'player', display_name: 'あ'.repeat(500) });
+  assert.equal(long?.display_name.length, PLAYER_NAME_MAX);
+  assert.equal(normalizePlayer({ kind: 'player', id: 'player', display_name: '' })?.display_name, 'Player');
+  assert.equal(normalizePlayer({ kind: 'player', id: 'player' })?.display_name, 'Player');
+
+  // Only the three fields the entity contract defines survive; anything else a
+  // payload carried is dropped rather than passed on to the screen.
+  const extra = normalizePlayer({ kind: 'player', id: 'player', display_name: 'x', secret: 'no' });
+  assert.deepEqual(Object.keys(extra ?? {}).sort(), ['display_name', 'id', 'kind']);
+});
+
+test('a snapshot is the only thing that changes the player, in both directions', () => {
+  const withPlayer = new NamespaceStore({
+    namespace: 'live',
+    player: { kind: 'player', id: 'player', display_name: '歩' },
+  });
+  const state = applySnapshot(createClientState('live'), snapshotOf(withPlayer));
+  assert.notEqual(state.player, null);
+
+  // A snapshot that names none leaves none: the screen does not keep a person
+  // the server has stopped reporting.
+  const without = applySnapshot(state, {
+    namespace: 'live',
+    halted: false,
+    halt_reason: null,
+    last_ingest_seq: 0,
+    state: { actors: {}, sessions: {} },
+  });
+  assert.equal(without.player, null);
+  assert.equal(selectPlayer(without), null);
+
+  // And a frame from the other namespace changes nothing at all.
+  const foreign = applySnapshot(state, {
+    namespace: 'demo',
+    halted: false,
+    halt_reason: null,
+    last_ingest_seq: 0,
+    state: { actors: {}, sessions: {}, player: { kind: 'player', id: 'x', display_name: 'somebody else' } },
+  });
+  assert.deepEqual(selectPlayer(foreign), { kind: 'player', id: 'player', display_name: '歩' });
+  assert.equal(foreign.counters.foreign, 1, 'it was counted as the foreign frame it is');
+});
+
 test('a role is shown only once the collector resolved one', () => {
   const store = new NamespaceStore({ namespace: 'live' });
   const wires = record(store);
@@ -658,6 +881,9 @@ test('the projections expose only whitelisted wire fields', () => {
     'last_tool',
     'last_event_ts',
     'event_count',
+    // Screen-local: which desk the operator selected. Not off the wire, and it
+    // carries no content - a boolean derived from a key the screen already has.
+    'selected',
     'visual',
   ]);
   for (const desk of selectDesks(state)) {

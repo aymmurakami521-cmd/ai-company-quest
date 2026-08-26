@@ -24,6 +24,13 @@
 /** Shown instead of an `agent_id` the producer could not attribute. */
 export const UNATTRIBUTED_AGENT_LABEL = 'unattributed';
 
+/**
+ * Ceiling on the human player's display name, mirroring `loadConfig`'s own cap
+ * on `QUEST_PLAYER_NAME`. Applied again here because the screen trusts the
+ * length of nothing it did not measure itself.
+ */
+export const PLAYER_NAME_MAX = 64;
+
 /** Ceiling on the client-side activity log. */
 export const MAX_LOG_ENTRIES = 50;
 
@@ -123,6 +130,32 @@ const GAP_LABELS = Object.freeze({
   unknown_event_id: '再接続時のLast-Event-IDがreplay bufferにありませんでした',
   evicted: 'replay bufferから溢れた分があります',
 });
+
+/**
+ * The human player, from a snapshot's `state.player`, or null.
+ *
+ * The player is a *different kind of entity* from a seated actor and is kept
+ * apart from `actors` for exactly one reason: `reduce` in
+ * `src/domain/reducer.ts` never writes it, so no Claude event can move, rename
+ * or remove the person at the keyboard. Mirroring it into `actors` would put it
+ * on the path every event walks, which is the one thing that contract forbids.
+ *
+ * Only the three fields the entity contract defines are kept, and the name is
+ * re-clamped here: a payload is data to be checked, not to be trusted.
+ */
+export function normalizePlayer(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  if (raw.kind !== 'player') return null;
+  if (typeof raw.id !== 'string' || raw.id.length === 0) return null;
+  const name = typeof raw.display_name === 'string' ? raw.display_name : '';
+  return {
+    kind: 'player',
+    id: raw.id.slice(0, PLAYER_NAME_MAX),
+    // An empty name would render as a blank figure with no way to tell who it
+    // is, so the entity's own default stands in - never an invented person.
+    display_name: name.length === 0 ? 'Player' : name.slice(0, PLAYER_NAME_MAX),
+  };
+}
 
 /** A new prototype-less map: a `session_id` of `__proto__` is just a key. */
 function emptyMap() {
@@ -244,11 +277,39 @@ export function createClientState(namespace) {
     },
     sessions: emptyMap(),
     actors: emptyMap(),
+    /**
+     * The human player, once a `snapshot` has named one. Null until then: this
+     * screen never invents the person at the keyboard, it only repeats the
+     * entity the server already holds.
+     */
+    player: null,
     last_ingest_seq: 0,
     last_event_ts: null,
+    /**
+     * The actor the operator is currently looking at, or `null`.
+     *
+     * A pointer into `state.actors`, never a seat number: seats are positions in
+     * a deterministic ordering, so a new colleague joining renumbers them and a
+     * stored seat would silently move the selection to somebody else.
+     */
+    selected_actor_key: null,
     counters: { applied: 0, ignored: 0, out_of_order: 0, foreign: 0, snapshots: 0, gaps: 0, halts: 0 },
     log: [],
   };
+}
+
+/**
+ * Selects one seated actor, by key. `null` clears the selection.
+ *
+ * A key nobody is seated under is refused rather than stored - a selection that
+ * points at nobody is exactly the stale actor state a re-layout has to remove,
+ * and refusing it here means no other function has to defend against one.
+ */
+export function setSelectedActor(state, actorKey) {
+  const next =
+    typeof actorKey === 'string' && ownProp(state.actors, actorKey) !== undefined ? actorKey : null;
+  if (next === state.selected_actor_key) return state;
+  return { ...state, selected_actor_key: next };
 }
 
 export function setConnectionPhase(state, phase, atMs = null) {
@@ -450,8 +511,19 @@ export function applySnapshot(state, payload, atMs = null) {
     },
     sessions: copyMap(served.sessions),
     actors,
+    // The snapshot is the server's whole state, so it is also the only thing
+    // that can name the player. A snapshot without one leaves the screen with
+    // none rather than keeping a person the server no longer reports.
+    player: normalizePlayer(served.player),
     last_ingest_seq: typeof payload.last_ingest_seq === 'number' ? payload.last_ingest_seq : 0,
     last_event_ts: latestTs,
+    // A snapshot replaces the office wholesale, so an actor that was selected
+    // and is no longer seated has to go with it. Keeping the key would leave the
+    // new layout carrying a selection from the old one.
+    selected_actor_key:
+      state.selected_actor_key !== null && ownProp(actors, state.selected_actor_key) !== undefined
+        ? state.selected_actor_key
+        : null,
     counters: { ...state.counters, snapshots: state.counters.snapshots + 1 },
   };
 }
@@ -573,6 +645,9 @@ export function selectDesks(state) {
       session_id: actor.session_id,
       display_name: actor.agent_id === null ? UNATTRIBUTED_AGENT_LABEL : actor.agent_id,
       is_main_orchestrator: actor.is_main_orchestrator === true,
+      // Derived, never stored per desk: at most one desk is ever selected, and a
+      // key that no longer matches anybody simply selects nothing.
+      selected: actor.actor_key === state.selected_actor_key,
       // Roles are shown only when the collector actually resolved one. This
       // screen never guesses a job title from a structural fact.
       role: actor.resolved === true ? actor.role : null,
@@ -584,6 +659,21 @@ export function selectDesks(state) {
       visual,
     };
   });
+}
+
+/**
+ * The human player in the office, or null before a snapshot named one.
+ *
+ * Deliberately *not* a `Desk`: the player has no seat number, no `actor_key`, no
+ * session and no visual state, because none of those are facts about them. A
+ * desk is a runtime actor the collector resolved; this is the person the office
+ * belongs to. Keeping the two projections separate is what stops the player
+ * appearing in the colleague list, in the seat count, or in a selection.
+ */
+export function selectPlayer(state) {
+  const player = state === null || state === undefined ? null : state.player;
+  if (player === null || player === undefined) return null;
+  return { kind: 'player', id: player.id, display_name: player.display_name };
 }
 
 /** Header summary: mode, connection, counts and the emptiness of the office. */

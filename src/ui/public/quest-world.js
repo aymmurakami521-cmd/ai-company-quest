@@ -1,11 +1,16 @@
 /**
  * Pure world model for the retro office canvas.
  *
- * `buildWorld` turns the two projections the screen already trusts -
- * `selectDesks(state)` and `selectHeader(state)` from `quest-view.js` - plus a
- * viewport, into a fully resolved set of integer rectangles. Nothing else goes
- * in: no organisation snapshot, no player, no invented employee, no role that
- * the collector did not resolve.
+ * `buildWorld` turns the projections the screen already trusts -
+ * `selectDesks(state)`, `selectPlayer(state)` and `selectHeader(state)` from
+ * `quest-view.js` - plus a viewport, into a fully resolved set of integer
+ * rectangles. Nothing else goes in: no organisation snapshot, no invented
+ * employee, no role that the collector did not resolve.
+ *
+ * The player is drawn from `selectPlayer` and from nowhere else. They stand in
+ * their own strip below the desk grid, never in a seat: they are not a runtime
+ * actor, they take no seat number, and they are absent from `world.actors`
+ * entirely, so nothing that counts or iterates colleagues can pick them up.
  *
  * Like `quest-view.js` this module has no DOM, no network, no timer and no
  * clock. It draws on no randomness either: an actor's appearance is
@@ -103,6 +108,28 @@ const CELL_PARTS = Object.freeze({
   stateLabel: Object.freeze({ x: 36, y: 85, width: 68, height: 9 }),
 });
 
+/** Height of the strip the player stands in, below the desk grid, in units. */
+export const PLAYER_STRIP_UNITS = 58;
+
+/**
+ * The player's own silhouette, in units, relative to their strip's top-left.
+ *
+ * Standing, and made of different parts from a desk cell: legs instead of a
+ * chair, and no desk, monitor or state marker at all. A colleague's shape says
+ * "seated, working"; this one says "here, at the keyboard" - so the two read
+ * apart at a glance, before any colour or label is involved.
+ */
+const PLAYER_PARTS = Object.freeze({
+  head: Object.freeze({ x: 29, y: 4, width: 14, height: 14 }),
+  body: Object.freeze({ x: 25, y: 18, width: 22, height: 20 }),
+  armLeft: Object.freeze({ x: 20, y: 20, width: 5, height: 16 }),
+  armRight: Object.freeze({ x: 47, y: 20, width: 5, height: 16 }),
+  legLeft: Object.freeze({ x: 28, y: 38, width: 7, height: 8 }),
+  legRight: Object.freeze({ x: 37, y: 38, width: 7, height: 8 }),
+  badge: Object.freeze({ x: 4, y: 6, width: 17, height: 9 }),
+  nameLabel: Object.freeze({ x: 36, y: 54, width: 68, height: 10 }),
+});
+
 /**
  * Appearance palettes. Fixed, hand-authored colour lists - no external asset and
  * nothing copied from another game. An index into each list is derived from the
@@ -110,11 +137,29 @@ const CELL_PARTS = Object.freeze({
  */
 const SKIN_TONES = Object.freeze(['#f3cfa6', '#e3ad7e', '#c98d55', '#9a6336', '#6f4326', '#ffdcb8']);
 const HAIR_COLORS = Object.freeze(['#2b2118', '#5a3921', '#8c5a2b', '#c8a24a', '#7a2f2f', '#3b4a6b', '#8f8f9c']);
-const SHIRT_COLORS = Object.freeze([
+const HAIR_STYLES = Object.freeze(['short', 'bob', 'spiky', 'bun', 'cap']);
+
+/**
+ * The outfit colours a *runtime actor* can be given. Exported so the test suite
+ * can hold the one rule that matters here: the player's outfit is drawn from
+ * neither list, so no colleague can ever be mistaken for the human player.
+ */
+export const ACTOR_SHIRT_COLORS = Object.freeze([
   '#3f7fd6', '#4caf7d', '#d1603d', '#8558c4', '#d8b23a', '#3aa8b8', '#c85c8e', '#5b6b8c',
 ]);
-const TROUSER_COLORS = Object.freeze(['#2a3350', '#3a2f28', '#1f4038', '#403050', '#4a3a52']);
-const HAIR_STYLES = Object.freeze(['short', 'bob', 'spiky', 'bun', 'cap']);
+export const ACTOR_TROUSER_COLORS = Object.freeze(['#2a3350', '#3a2f28', '#1f4038', '#403050', '#4a3a52']);
+
+/**
+ * The player's outfit: two colours reserved for them and used by nobody else.
+ *
+ * Skin and hair still vary with the player's own id, so a renamed player is a
+ * recognisably different person - but the outfit is fixed, so "which one is me"
+ * never depends on remembering a colour that an AI colleague might also draw.
+ */
+export const PLAYER_OUTFIT = Object.freeze({ shirt: '#f2f4fb', trouser: '#161b2b' });
+
+/** Text on the player's badge. This module's own literal, never off the wire. */
+export const PLAYER_BADGE_TEXT = 'YOU';
 
 /** Every appearance channel, so tests can assert the set is closed. */
 export const APPEARANCE_KEYS = Object.freeze(['skin', 'hair', 'hair_style', 'shirt', 'trouser']);
@@ -163,8 +208,28 @@ export function appearanceFor(actorKey) {
     skin: pick(SKIN_TONES, seed, 'skin'),
     hair: pick(HAIR_COLORS, seed, 'hair'),
     hair_style: pick(HAIR_STYLES, seed, 'style'),
-    shirt: pick(SHIRT_COLORS, seed, 'shirt'),
-    trouser: pick(TROUSER_COLORS, seed, 'trouser'),
+    shirt: pick(ACTOR_SHIRT_COLORS, seed, 'shirt'),
+    trouser: pick(ACTOR_TROUSER_COLORS, seed, 'trouser'),
+  };
+}
+
+/**
+ * The look of the human player.
+ *
+ * Seeded from the player's own id under a salt of its own, so it is as
+ * deterministic as a colleague's - and dressed from `PLAYER_OUTFIT`, which no
+ * colleague can draw from. Same identity, same face, different clothes: the two
+ * are told apart by construction rather than by a lucky hash.
+ */
+export function playerAppearanceFor(playerId) {
+  const seed = appearanceSeed(`player:${typeof playerId === 'string' ? playerId : ''}`);
+  return {
+    seed,
+    skin: pick(SKIN_TONES, seed, 'skin'),
+    hair: pick(HAIR_COLORS, seed, 'hair'),
+    hair_style: pick(HAIR_STYLES, seed, 'style'),
+    shirt: PLAYER_OUTFIT.shirt,
+    trouser: PLAYER_OUTFIT.trouser,
   };
 }
 
@@ -364,7 +429,7 @@ function buildProps(roomX, roomY, scale, roomWidthUnits) {
  * wire - a `status` label, a `stream_gap` reason - stay in the DOM layer that
  * already renders them as text.
  */
-function buildHud(header, overflow) {
+function buildHud(header, overflow, player) {
   const source = header === null || header === undefined ? {} : header;
   const connection = source.connection === null || typeof source.connection !== 'object' ? {} : source.connection;
   return {
@@ -381,7 +446,22 @@ function buildHud(header, overflow) {
     drawn_count: overflow.drawn,
     hidden_count: overflow.hidden,
     session_count: typeof source.session_count === 'number' ? source.session_count : 0,
+    // Presence only. The player is not a seat, so it is deliberately absent
+    // from `desk_count` - which is what keeps "在席 N" a count of colleagues.
+    player_present: player !== null && player !== undefined,
   };
+}
+
+/**
+ * The player projection, reduced to what the canvas may paint: an identity and
+ * a name. Anything else on the object is ignored rather than carried along.
+ */
+function normalizePlayer(player) {
+  if (player === null || typeof player !== 'object') return null;
+  if (player.kind !== 'player') return null;
+  const id = typeof player.id === 'string' ? player.id : '';
+  if (id.length === 0) return null;
+  return { id, display_name: typeof player.display_name === 'string' ? player.display_name : '' };
 }
 
 /** Caption line, assembled from this module's own literals. */
@@ -432,6 +512,7 @@ export function buildWorld(input) {
   const source = input === null || typeof input !== 'object' ? {} : input;
   const rawDesks = Array.isArray(source.desks) ? source.desks : [];
   const desks = rawDesks.map(normalizeDesk);
+  const player = normalizePlayer(source.player ?? null);
   const viewport = normalizeViewport(source.viewport);
 
   const columns = columnsFor(desks.length, viewport.width);
@@ -443,10 +524,14 @@ export function buildWorld(input) {
   const drawn = desks.slice(0, Math.min(desks.length, rows * columns));
   const overflow = { total: desks.length, drawn: drawn.length, hidden: desks.length - drawn.length };
 
-  const hud = buildHud(source.header ?? null, overflow);
+  const hud = buildHud(source.header ?? null, overflow, player);
 
+  // The player's strip is added to the room, never taken out of the grid: the
+  // desks keep the seats and the coordinates they would have had without one,
+  // so whether a snapshot names a player changes nothing about the seating.
+  const playerStripUnits = player === null ? 0 : PLAYER_STRIP_UNITS;
   const roomWidthUnits = columns * CELL_UNITS.width + 2 * ROOM_PADDING;
-  const roomHeightUnits = WALL_UNITS + rows * CELL_UNITS.height + 2 * ROOM_PADDING;
+  const roomHeightUnits = WALL_UNITS + rows * CELL_UNITS.height + playerStripUnits + 2 * ROOM_PADDING;
 
   const scale = snapScale(
     Math.min(
@@ -464,9 +549,10 @@ export function buildWorld(input) {
   const margin = Math.round(OUTER_MARGIN * scale);
   const cellWidth = Math.round(CELL_UNITS.width * scale);
   const cellHeight = Math.round(CELL_UNITS.height * scale);
+  const playerStrip = player === null ? 0 : Math.round(PLAYER_STRIP_UNITS * scale);
 
   const roomWidth = 2 * pad + columns * cellWidth;
-  const roomHeight = wallHeight + 2 * pad + rows * cellHeight;
+  const roomHeight = wallHeight + 2 * pad + rows * cellHeight + playerStrip;
 
   // The room is centred in whatever width the canvas ends up with, so sideways
   // the outer margin decides one thing only: whether the canvas has to be wider
@@ -541,6 +627,38 @@ export function buildWorld(input) {
     };
   });
 
+  // The player stands in the strip below the last desk row, at the left edge of
+  // the grid. Their position comes from the grid's own geometry, so it is as
+  // reproducible as every seat and never overlaps one.
+  const worldPlayer =
+    player === null
+      ? null
+      : (() => {
+          const cellX = gridX;
+          const cellY = gridY + rows * cellHeight;
+          const name = place(cellX, cellY, scale, PLAYER_PARTS.nameLabel);
+          return {
+            kind: 'player',
+            id: player.id,
+            appearance: playerAppearanceFor(player.id),
+            cell: { x: cellX, y: cellY, width: cellWidth, height: playerStrip },
+            head: place(cellX, cellY, scale, PLAYER_PARTS.head),
+            body: place(cellX, cellY, scale, PLAYER_PARTS.body),
+            arm_left: place(cellX, cellY, scale, PLAYER_PARTS.armLeft),
+            arm_right: place(cellX, cellY, scale, PLAYER_PARTS.armRight),
+            leg_left: place(cellX, cellY, scale, PLAYER_PARTS.legLeft),
+            leg_right: place(cellX, cellY, scale, PLAYER_PARTS.legRight),
+            badge: place(cellX, cellY, scale, PLAYER_PARTS.badge),
+            badge_text: PLAYER_BADGE_TEXT,
+            name_label: {
+              x: name.x,
+              y: name.y,
+              size: nameSize,
+              text: fitLabel(player.display_name, labelBox, nameSize),
+            },
+          };
+        })();
+
   const buffer = buildBuffer(canvasWidth, canvasHeight, viewport.dpr);
   const captionY = roomY + roomHeight + margin + CAPTION_SIZE;
 
@@ -578,6 +696,9 @@ export function buildWorld(input) {
     },
     props: buildProps(roomX, roomY, scale, roomWidth / scale),
     actors,
+    // A field of its own, never an entry in `actors`: the seat count, the
+    // overflow arithmetic and every loop over colleagues stay untouched by it.
+    player: worldPlayer,
     notice: {
       x: roomX + Math.round(roomWidth / 2),
       y: floorY + Math.round(floorHeight / 2),
