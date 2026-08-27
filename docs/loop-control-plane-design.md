@@ -114,7 +114,7 @@ context を、harness が取得させない構成になっています。
 | **GitHub** | code / diff / issue / PR / review / CI / merge の **evidence source** | real-time な run state の唯一のデータベース | evidence source としては機能している。run state は持っていない |
 | **Run / Event Store** | run と遷移の永続 machine-readable 履歴 | 業務判断 | **無い**。Quest の state は process memory のみで、再起動で消える（`README.md:356-357`） |
 | **Management Console** | Human-on-the-Loop の運用監督と（将来の）認証済み介入 | 体験としての可視化、直接の executor 起動 | **無い**。GitHub の issue 画面が代替している |
-| **Claude Quest** | role / run / work / 承認待ち / stall / failure / 完了 の **read model・可視化・体験層** | 状態の書き込み、承認、command 実行 | Claude Code Hook stream の可視化までは実装済み。run の概念は無い |
+| **Claude Quest** | role / run / work / 承認待ち / stall / failure / 完了 の **read model・可視化・体験層** | 状態の書き込み、承認、command 実行、**control 要求の送信**（§12.2） | Claude Code Hook stream の可視化までは実装済み。run の概念は無い |
 
 ### 2.1 層をまたぐ規則
 
@@ -151,7 +151,10 @@ LoopContract (contract_version: 1)   ── 概念。実 field 名は実装 PR �
     escalation_rules[]    : deterministic に判定できる昇格条件
   approval
     required_before[]     : protected action の種別
-    approver_kind         : OWNER | ROLE | NONE
+    approver_kind         : OWNER | NONE（**`ROLE` は取りません**・§7.6）
+    role_attestation_required[] : 承認ではない role 検証の要求（§7.6）。
+                            `REVIEW` / `SECURITY_REVIEW` evidence として記録され、
+                            **`approval_present` を満たしません**
   budget
     max_attempts / max_wall_clock / max_agent_invocations / max_cost_unit
   roles[]                 : { role: ROLE_CODE, agent_contract_ref }
@@ -217,6 +220,7 @@ human report の言語指定が揃っています。
 | **単一 writer** | 遷移を書けるのは controller のみ。agent は proposal を返すだけで、遷移を宣言できない |
 | **guard は deterministic** | 各遷移に code で判定できる guard を置く。LLM の判断は guard の**入力**にはなるが、guard そのものにはならない |
 | **`APPLYING` の guard** | `evidence_bundle_complete == true` **かつ** (`risk_class ∈ {A, B}` **または** (`approval_present == true` **かつ** `approved_head_sha == observed_head_sha`)) |
+| **`approval_present` の定義** | **OWNER の `APPROVAL_RECORD` だけが `true` にできます**（§7.6）。role 由来の `REVIEW` / `SECURITY_REVIEW` / `POLICY_CHECK` は evidence bundle には寄与しますが、`approval_present` を満たしません |
 | **kill switch** | 任意の非終端状態から `STOPPED` へ遷移できる |
 | **承認は時間で進まない** | `AWAITING_APPROVAL` から先へ進むには approval record が必要。timeout は `EXPIRED` へ落とすだけで、承認したことにはしない |
 | **approval は SHA に紐づく** | `approved_head_sha` と実際の head が違えば approval は失効し、`AWAITING_APPROVAL` へ戻る |
@@ -305,7 +309,7 @@ Evidence (概念)
 | `SECURITY_REVIEW` | SECURITY_REVIEWER の判定 |
 | `RISK_ASSESSMENT` | diff 後の risk 再評価結果 |
 | `POLICY_CHECK` | policy gate の判定 |
-| `APPROVAL_RECORD` | owner 承認の記録（`approved_head_sha` を含む） |
+| `APPROVAL_RECORD` | **owner 承認**の記録（`approved_head_sha` を含む）。`approver_kind` は `OWNER` 固定で、role が生成することはできません（§7.6） |
 
 ### 6.2 原則
 
@@ -376,6 +380,26 @@ RISK_ASSESSOR（LLM）は、この一覧に無い懸念を**追加で**提案で
 workflow 側の修正は **C** に当たるため、**この文書は修正せず記録して停止**しています。
 つまり §7.2 の再評価と §7.3 の昇格を、今回は人手で 1 回実行した形です。
 Loop Control Plane の目的は、これを毎回の人手ではなく controller の常設機能にすることです。
+
+### 7.6 承認は OWNER のみ。role の検証は承認ではない
+
+**protected action（class C）の承認者は OWNER だけです。** logical role（§9.1）は、
+どれも protected な state 遷移を authorize できません。
+
+| 概念 | 誰が作るか | `approval_present` を満たすか | 記録先 |
+|------|-----------|------------------------------|--------|
+| **owner approval** | OWNER（人間） | **満たす**（唯一） | `APPROVAL_RECORD`（`approver_kind: OWNER`・`approved_head_sha` 必須） |
+| **role attestation**（検証・所見） | `REVIEWER` / `SECURITY_REVIEWER` / `RISK_ASSESSOR` / `POLICY_CHECK` 実行主体 | **満たさない** | `REVIEW` / `SECURITY_REVIEW` / `RISK_ASSESSMENT` / `POLICY_CHECK` evidence |
+
+- role attestation は **非 authorizing な review evidence** です。`required_evidence[]`（§3）の
+  一部として `evidence_bundle_complete` に寄与しますが、**それ単独でも全部揃っても、
+  `APPLYING` / merge / protected な支出 / 介入操作を authorize しません**。
+- したがって `approver_kind` に `ROLE` は存在しません（§3）。role による検証を要求したい場合は
+  `role_attestation_required[]` を使い、`approval` とは別の field に分けます。
+- `approver_kind: NONE` を選べるのは、`required_before[]` が空、すなわち protected action を
+  一切含まない contract の場合だけです。**class C 以上を含む contract は `OWNER` 固定**です。
+- これは §9.1 の「`EXECUTOR` 以外は read-only」「agent は遷移を宣言できない」（§4.2 単一 writer）と
+  同じ理由づけです。**変更主体も検証主体も、自分の作業を通す権限を持ちません。**
 
 ---
 
@@ -470,6 +494,7 @@ AgentContract (agent_contract_version: 1)
     max_actionable_class : この role が行動してよい上限 class
     may_escalate         : true
     may_deescalate       : false            ← 例外なく false（§7.3）
+    may_approve          : false            ← 例外なく false（§7.6。承認は OWNER のみ）
   determinism_expectation: PROPOSAL_ONLY | VERIFIABLE_OUTPUT
 ```
 
@@ -549,13 +574,17 @@ mapping が変わっても内容規則が効き続けます。
 |------|------|-----------|
 | M0 | 現在の provider 構成を Role Binding 表として**文書化するだけ** | なし |
 | M1 | core の state code / event code / evidence kind を provider 中立で確定 | なし（docs） |
-| M2 | Run Read Model を Quest が read-only で受ける | あり（read-only の範囲） |
-| M3 | Run/Event Store と deterministic controller | あり |
+| M2 | **最小の権威ソース**（Run/Event Store と単一 writer の deterministic controller）を先に立てる | あり |
+| M3 | Run Read Model を Quest が read-only で受ける（供給元は M2） | あり（read-only の範囲） |
 | M4 | provider 追加は adapter + binding 行の追加のみ。contract / state machine / Quest read model は不変 | adapter のみ |
 | M5 | provider 撤去は binding 行の差し替え。過去 run の履歴は Store に残り、provider に依存しない | binding のみ |
 
 **M1 を M2 より先に置くことが重要です。** provider 名を含む event code を一度でも作ると、
 以後の置換が必ず read model まで波及します。
+
+**M2 を M3 より先に置くことも同じく重要です。** read model は権威ソースの射影であり、
+権威ソースより先に production の read model を置くと、供給のために一時的な第 2 の権威を
+発明することになります（§15 の依存順もこの理由で組んでいます）。
 
 ---
 
@@ -586,7 +615,7 @@ mapping が変わっても内容規則が効き続けます。
 
 | | **Loop Control Plane** | **Management Console** | **Claude Quest** |
 |---|---|---|---|
-| run state への権限 | **唯一の writer** | 認証済み Control API 経由で**要求**する | **読まない側ではなく、書かない側**（read-only） |
+| run state への権限 | **唯一の writer** | 認証済み Control API 経由で**要求**する | **要求もしない**（strictly read-only・§12.2） |
 | 中心に置くもの | goal / contract / state / policy / risk / approval / evidence / budget | 同じものの運用ビュー + 介入 | role / run / work / 承認待ち / stall / failure / 完了 の**体験**  |
 | 主な利用者 | machine | owner（運用・監督） | owner（把握・体験） |
 | provider 名 | 持たない（Role Binding のみ） | **出さない**（§17） | **知らない**（§17） |
@@ -597,20 +626,28 @@ mapping が変わっても内容規則が効き続けます。
 Quest は **Control Plane ではありません。** AI Company の Run State / Event を可視化する
 **read model / experience layer** です。この文書はこの位置づけを固定します。
 
+「read-only」は **server が GET のみを受ける**という意味に留まりません。Quest は
+**control 要求を送る client にもなりません**。表示している事実に対して操作を発生させる手段を、
+Quest の server 側にも UI 側にも持たせません。
+
 ### 12.2 この計画で緩めない Quest の安全境界
 
 - **GET のみ**（`src/server/server.ts:174`）、**loopback 固定**（`:31`、bind host は設定不可）、
   **CORS header なし**、**Host allowlist**（`README.md:377-378`）。
 - **既存の SSE surface に、shell 実行 / GitHub mutation / approval mutation / POST control
   endpoint を直接足しません。**
-- 将来 mutation が必要になった場合も、経路は次のみです。
+- **Quest は将来の mutation / 介入の要求経路に一切現れません。** 送信元にも中継にもしません。
+- 将来 mutation が必要になった場合、要求の起点は **Management Console**、または
+  **明示的に分離された認証済みの運用 client** のみです。経路は次だけです。
 
   ```
-  Quest / Management UI → authenticated Control API → Policy / Approval Gate → Executor
+  Management Console（または明示的に分離された認証済み運用 client）
+    → authenticated Control API → Policy / Approval Gate（§7.6：承認は OWNER のみ）
+    → Executor
   ```
 
-  この経路は **Quest の process の外**にあります。Quest 側に増えるのは、
-  「承認待ちが存在する」という read-only な事実の表示だけです。
+  この経路は **Quest の process にも UI にも属しません**。Quest 側に増えるのは、
+  「承認待ちが存在する」という read-only な事実の表示だけで、そこから操作へは繋ぎません。
 - 静的 asset の exact match 解決、`textContent` 経由のみの DOM 挿入、
   whitelist field のみの出力（`README.md:365-390`）は不変です。
 
@@ -746,14 +783,29 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 | **DOC-1** | `docs/automation-protocol.md` の新規作成（§1.3）。内容は owner が確定 | owner の内容決定 | **A** |
 | **WF-1** | §1.3 の workflow 側参照の整合、および LCP-2 の gate の**実装** | LCP-2 / DOC-1 | **C**（workflow 変更。owner 承認・owner 実施） |
 | **ORG-PR-2** | 既存 §5 PR-2。org snapshot 読み取りと検証 | ORG-PR-1 | **B** |
-| **LCP-3** | Run Read Model を Quest が read-only で受ける。独立 namespace、GET のみ、既存 SSE surface に mutation を足さない | LCP-1 / ORG-PR-2（取り込みの型を共有） | **B** |
+| **STORE-1** | **最小の権威 run source**。永続 Run / Event Store と単一 writer の deterministic controller（§4.2）。**run state の供給元はここに一本化される** | LCP-1 / LCP-2 | **C**（永続化基盤の導入。owner 承認必須） |
+| **LCP-3** | Run Read Model を Quest が read-only で受ける。独立 namespace、GET のみ、既存 SSE surface に mutation を足さない。**供給元は STORE-1** | LCP-1 / ORG-PR-2（取り込みの型を共有）／**STORE-1**（供給元） | **B** |
 | **ORG-PR-3** | 既存 §5 PR-3。roster projection + 汎用 status 面での縮退表示 | ORG-PR-2 / LCP-3 | **B** |
-| **MC-1** | read-only Management Console（Goal / Run / State / Role / Risk / Approval / Evidence 中心） | LCP-3 | **B** |
+| **MC-1** | read-only Management Console（Goal / Run / State / Role / Risk / Approval / Evidence 中心） | **STORE-1** / LCP-3 | **B** |
 | **ORG-PR-4** | 既存 §5 PR-4。決定論的 layout と固定席座標 | ORG-PR-3 | **B** |
-| **STORE-1** | 永続 Run / Event Store と deterministic controller の統合 | MC-1 | **C**（永続化基盤の導入。owner 承認必須） |
 | **OBS-1** | Eval / post-merge observer / recovery | STORE-1 | **C** |
 | **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** |
-| **CTRL-1** | 認証済み介入操作（Control API + Policy/Approval Gate） | STORE-1 / OBS-1 | **C**（安全基盤が揃うまで着手しない） |
+| **CTRL-1** | 認証済み介入操作（Control API + Policy/Approval Gate）。**起点は Management Console または明示的に分離された認証済み運用 client のみで、Quest は含みません**（§12.2） | STORE-1 / OBS-1 / MC-1 | **C**（安全基盤が揃うまで着手しない） |
+
+### 15.0 権威ソースと consumer の順序規則
+
+**production の run projection（Quest / Management Console）は、権威 run source より先に
+出しません。** STORE-1 を LCP-3 / MC-1 より前に置き、`STORE-1 → LCP-3 → MC-1` の
+一方向依存にしているのはこのためです。**STORE-1 が MC-1 に依存する形は取りません。**
+source と consumer の所有関係が反転するからです。
+
+- STORE-1 より前に read model / Console の見た目を試したい場合、それは
+  **fixture 専用の非 production prototype に限ります**。fixture 由来の run state は
+  **runtime の権威になれません**。production 経路へ昇格させず、STORE-1 の完成後に
+  供給元を STORE-1 へ差し替えます。
+- この順序規則は **将来の provider-independent run / control plane** に対するものです。
+  **既存の検証済み Quest MVP（loopback / GET-only の Claude Code Hook event 表示）は
+  対象外**で、そのまま維持します（§12.2）。
 
 ### 15.1 推奨する次の 1 件
 
@@ -802,13 +854,30 @@ DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依�
 | 1 | `PLANNER` の provider を差し替えても **Loop Contract と Run State Machine が変わらない** | Role Binding の 1 行だけが変わる diff になること |
 | 2 | `REVIEWER` の provider を差し替えても **Event Schema が変わらない** | core event code 一覧に diff が出ないこと |
 | 3 | ChatGPT Work を撤去しても **永続 run state が失われない** | Run/Event Store が provider を跨いだ履歴を保持していること |
-| 4 | provider 固有の変更が **adapter / 設定境界に局所化**される | provider 名で全文検索したとき、hit が adapter と binding の中だけであること |
+| 4 | provider 固有の変更が **adapter / 設定境界に局所化**される | **provider 中立面（§17.1 の対象集合）に限定**して provider 名を検索し、hit が **0** であること。repository 全文検索ではありません |
 | 5 | Quest が **provider 固有の event 名を必要とせず** role / run state を描画できる | Quest の read model に provider 名の field が存在しないこと |
 | 6 | Management Console が **Goal / Run / State / Role / Risk / Approval / Evidence を中心に据える**（provider / model 名ではなく） | 画面の主要 field に provider / model が現れないこと |
 | 7 | webhook / workflow の**重複配信を controller が冪等に扱える** | 同一 trigger の 2 回配信が 1 本の run に落ち、遷移が二重適用されないこと（§8.1） |
-| 8 | **owner 承認が必要な risk 昇格が protected action の前で停止できる** | `RISK_ESCALATED` 後、承認なしに `APPLYING` へ到達する経路が存在しないこと（§4.2） |
+| 8 | **owner 承認が必要な risk 昇格が protected action の前で停止できる** | `RISK_ESCALATED` 後、承認なしに `APPLYING` へ到達する経路が存在しないこと。かつ **role 由来の attestation が `approval_present` を満たす経路が存在しないこと**（§4.2 / §7.6） |
 | 9 | role の追加が **既存 role の contract を変えない** | 新 role 追加の diff が binding と新 contract のみであること |
 | 10 | Quest の安全境界が **provider 構成に依存しない** | GET のみ / loopback 固定 / CORS なし が、どの provider 構成でも不変であること（§12.2） |
+
+### 17.1 基準 4 の検索対象と除外（executable にするための scope）
+
+このリポジトリは **意図的に provider 名を含みます**（README、`.github/workflows/claude.yml`、
+Claude Code Hook 取り込み経路、test、そしてこの設計文書自身）。したがって
+**repository 全文検索では、provider 分離が正しく実装されていても基準 4 は必ず失敗します。**
+基準 4 は次の集合に限定して評価します。
+
+| | 対象 |
+|---|---|
+| **検索対象**（hit が 0 であるべき面） | provider 中立な core contract（Loop Contract / Agent Contract）／event schema・state schema／reducer・read model の interface と型／Management Console と Quest の projection contract |
+| **除外**（provider 名が現れてよい面） | `docs/**`（本文書を含む）／`.github/workflows/**`／`test/**` と fixture／Provider Adapter の実装・設定・Role Binding（§10.1：provider 名が現れてよい唯一の場所）／既存の provider 固有 integration surface（現行の Claude Code Hook 取り込み経路と `README.md` の該当記述） |
+
+- 検索対象の path 集合は、実装が進んだ時点で **LCP-1 が確定する語彙とともに固定**します。
+  対象集合が決まって初めて、この基準は CI で機械的に実行できます。
+- **除外は「見逃してよい」ではありません。** 除外面に provider 名が増えること自体は正常で、
+  基準 4 が見ているのは「中立面へ漏れたか」だけです。
 
 ---
 
@@ -830,7 +899,7 @@ DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依�
 |---|------|-----------|
 | 4 | 確定した state code / event code / evidence kind の一覧 | **LCP-1** |
 | 5 | Run/Event Store の実体（file / 埋め込み / 外部）。**依存追加・DB 導入は本フェーズの禁止事項**なので、選択肢の評価も STORE-1 まで先送り | STORE-1 |
-| 6 | Quest が run event を受ける経路（既存 namespace 分離の作法は決定済み・§5.3、供給経路は未決） | LCP-3 |
+| 6 | Quest が run event を受ける経路の具体（既存 namespace 分離の作法は決定済み・§5.3。**供給元が STORE-1 であることは §15.0 で決定済み**、受け口の形が未決） | LCP-3 |
 | 7 | 汎用 status 表示面の具体（banner 拡張か第 2 面か、code 名、DOM 構造） | ORG-PR-1（方式）／ORG-PR-3（実装） |
 | 8 | `org-snapshot-design.md` §4.1〜§4.6 の未決事項 | ORG-PR-1（変更なし） |
 | 9 | budget の単位（cost unit の定義） | LCP-1 以降 |
