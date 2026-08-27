@@ -67,22 +67,44 @@ test('the DEMO scenario needs no credential, no LIVE input and no network', () =
   const manifest = JSON.parse(readFileSync(new URL('package.json', REPO_ROOT), 'utf8')) as {
     scripts: Record<string, string>;
   };
-  const script = manifest.scripts['demo'] ?? '';
+  // Two demos, and both have to be safe: `demo` plays the scripted mission,
+  // `demo:static` folds in the fixed frame the legend is read against.
+  const play = manifest.scripts['demo'] ?? '';
+  const still = manifest.scripts['demo:static'] ?? '';
 
-  assert.ok(script.includes('QUEST_DEMO=1'), 'npm run demo opts into the fixtures');
-  assert.ok(
-    script.includes('QUEST_INPUT_PATH:-/dev/null'),
-    'npm run demo falls back to /dev/null, so no LIVE file is required',
-  );
-  // Nothing that could reach a secret, a personal path or the network.
-  assert.equal(/https?:\/\/|curl|wget|token|key|secret|password/i.test(script), false, 'demo script is offline');
-  assert.equal(/\/(Users|home|root)\/|~\//.test(script), false, 'demo script embeds no personal path');
+  assert.ok(play.includes('QUEST_DEMO_PLAY=1'), 'npm run demo opts into the scripted mission');
+  assert.ok(still.includes('QUEST_DEMO=1'), 'npm run demo:static opts into the fixtures');
+  assert.equal(play.includes('QUEST_DEMO=1'), false, 'the two demos are not both on at once');
 
-  // The env `npm run demo` produces really does seed, and does not need a path
-  // beyond the one the script defaults in.
-  const config = loadConfig({ QUEST_DEMO: '1', QUEST_INPUT_PATH: '/dev/null' });
-  assert.equal(config.seedDemo, true);
-  assert.equal(config.inputPath, '/dev/null');
+  for (const [name, script] of [['demo', play], ['demo:static', still]] as const) {
+    assert.ok(
+      script.includes('QUEST_INPUT_PATH:-/dev/null'),
+      `npm run ${name} falls back to /dev/null, so no LIVE file is required`,
+    );
+    // Nothing that could reach a secret, a personal path or the network.
+    assert.equal(
+      /https?:\/\/|curl|wget|token|key|secret|password/i.test(script),
+      false,
+      `npm run ${name} is offline`,
+    );
+    assert.equal(
+      /\/(Users|home|root)\/|~\//.test(script),
+      false,
+      `npm run ${name} embeds no personal path`,
+    );
+  }
+
+  // The env each script produces really does what its name says, and needs no
+  // path beyond the one the script defaults in.
+  const still_ = loadConfig({ QUEST_DEMO: '1', QUEST_INPUT_PATH: '/dev/null' });
+  assert.equal(still_.seedDemo, true);
+  assert.equal(still_.demoPlay, false, 'the still frame starts no timer');
+  assert.equal(still_.inputPath, '/dev/null');
+
+  const play_ = loadConfig({ QUEST_DEMO_PLAY: '1', QUEST_INPUT_PATH: '/dev/null' });
+  assert.equal(play_.demoPlay, true);
+  assert.equal(play_.seedDemo, false, 'the mission does not also fold in the still frame');
+  assert.equal(play_.inputPath, '/dev/null');
 });
 
 test('the fixtures are a fixed, bounded, read-only list', () => {

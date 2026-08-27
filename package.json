@@ -9,7 +9,8 @@
   },
   "scripts": {
     "live": "node src/live.ts",
-    "demo": "QUEST_DEMO=1 QUEST_INPUT_PATH=${QUEST_INPUT_PATH:-/dev/null} node src/live.ts",
+    "demo": "QUEST_DEMO_PLAY=1 QUEST_INPUT_PATH=${QUEST_INPUT_PATH:-/dev/null} node src/live.ts",
+    "demo:static": "QUEST_DEMO=1 QUEST_INPUT_PATH=${QUEST_INPUT_PATH:-/dev/null} node src/live.ts",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

@@ -113,6 +113,18 @@ export type StoreOptions = {
   org?: OrgState;
   /** Per-limit overrides; anything omitted keeps `DEFAULT_STATE_LIMITS`. */
   stateLimits?: Partial<StateLimits>;
+  /**
+   * Called once, when this store gains its first subscriber.
+   *
+   * The DEMO playback uses it so the scripted office starts when somebody is
+   * actually watching rather than when the process boots - a demo that has
+   * already finished by the time a browser opens shows nothing at all. It fires
+   * on the 0 -> 1 transition only, so reconnecting or opening a second tab never
+   * restarts it.
+   *
+   * Ingestion never calls this, and LIVE never sets it.
+   */
+  onFirstSubscriber?: () => void;
 };
 
 export const DEFAULT_REPLAY_CAPACITY = 500;
@@ -141,6 +153,8 @@ export class NamespaceStore {
    * when it happened can still be told the same fact on the same frame shape.
    */
   haltNotice: HaltNotice | null;
+  /** Cleared as it fires; see `StoreOptions.onFirstSubscriber`. */
+  onFirstSubscriber: (() => void) | undefined;
 
   constructor(options: StoreOptions) {
     this.namespace = options.namespace;
@@ -156,6 +170,7 @@ export class NamespaceStore {
     this.listeners = new Set();
     this.haltListeners = new Set();
     this.haltNotice = null;
+    this.onFirstSubscriber = options.onFirstSubscriber;
     this.stats = {
       lines_seen: 0,
       accepted: 0,
@@ -177,7 +192,21 @@ export class NamespaceStore {
   }
 
   subscribe(listener: WireListener): () => void {
+    const first = this.listeners.size === 0;
     this.listeners.add(listener);
+    // Fired after the listener is registered, so anything the callback starts
+    // is already being observed. It is still the caller's job not to ingest
+    // synchronously from here: `server.ts` writes the opening snapshot after
+    // `subscribe()` returns, and an event emitted before that would arrive
+    // ahead of the snapshot that replaces it. `DemoPlayer` defers its first
+    // event for exactly that reason.
+    if (first && this.onFirstSubscriber !== undefined) {
+      const notify = this.onFirstSubscriber;
+      // Once only: a second subscriber, a reconnect or a second tab must not
+      // restart anything, so the hook is dropped as it fires.
+      this.onFirstSubscriber = undefined;
+      notify();
+    }
     return () => {
       this.listeners.delete(listener);
     };
