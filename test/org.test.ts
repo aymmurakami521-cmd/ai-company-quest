@@ -24,6 +24,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   DEFAULT_ORG_LIMITS,
@@ -34,7 +37,7 @@ import {
   validateOrgSnapshot,
   type OrgSnapshot,
 } from '../src/domain/org.ts';
-import { loadOrgState } from '../src/collector/orgLoader.ts';
+import { loadOrgState, readSnapshotBytes } from '../src/collector/orgLoader.ts';
 import { createInitialState, reduce } from '../src/domain/reducer.ts';
 import { NamespaceStore } from '../src/collector/store.ts';
 import { loadConfig } from '../src/config.ts';
@@ -369,6 +372,65 @@ test('the exact ceiling is accepted and one past it is not', () => {
   assert.equal(result.rule, 'limit_exceeded');
 });
 
+// -- display-name length is counted the way upstream counts it --------------
+
+/**
+ * Upstream's `org.schema.json` says `maxLength: 100`, and JSON Schema measures
+ * that in *characters* - Unicode code points. JavaScript's `String.length`
+ * measures UTF-16 code units, which charges two for anything outside the BMP.
+ * Counting code units here would refuse a fifty-emoji department name that the
+ * producer's own validator accepts, so the same document would be valid on one
+ * side of the boundary and invalid on the other.
+ */
+const ASTRAL = '𝐀'; // U+1D400: one code point, two UTF-16 code units.
+
+function withDepartmentName(name: string): Record<string, unknown> {
+  const value = doc();
+  (value['departments'] as Record<string, unknown>[])[0]!['name'] = name;
+  return value;
+}
+
+test('an astral name is measured in code points, not UTF-16 code units', () => {
+  assert.equal(ASTRAL.length, 2);
+  assert.equal([...ASTRAL].length, 1);
+
+  // 100 code points, 200 code units: accepted, because upstream accepts it.
+  const atLimit = validateOrgSnapshot(withDepartmentName(ASTRAL.repeat(100)));
+  assert.equal(atLimit.ok, true);
+
+  // 101 code points: refused, on the same rule as any other over-long name.
+  const overLimit = validateOrgSnapshot(withDepartmentName(ASTRAL.repeat(101)));
+  assert.equal(overLimit.ok, false);
+  if (overLimit.ok) throw new Error('unreachable');
+  assert.equal(overLimit.field, 'departments[0].name');
+  assert.equal(overLimit.rule, 'field_too_long');
+});
+
+test('the code-point boundary is exact for BMP names too', () => {
+  assert.equal(validateOrgSnapshot(withDepartmentName('x'.repeat(100))).ok, true);
+  assert.equal(validateOrgSnapshot(withDepartmentName('部'.repeat(100))).ok, true);
+
+  for (const name of ['x'.repeat(101), '部'.repeat(101)]) {
+    const result = validateOrgSnapshot(withDepartmentName(name));
+    assert.equal(result.ok, false);
+    if (result.ok) throw new Error('unreachable');
+    assert.equal(result.rule, 'field_too_long');
+  }
+});
+
+test('a mixed astral and BMP name counts each code point once', () => {
+  // 99 BMP characters plus one astral character: 100 code points, 101 units.
+  const mixed = 'x'.repeat(99) + ASTRAL;
+  assert.equal(mixed.length, 101);
+  assert.equal(validateOrgSnapshot(withDepartmentName(mixed)).ok, true);
+
+  const one_over = 'x'.repeat(100) + ASTRAL;
+  const result = validateOrgSnapshot(withDepartmentName(one_over));
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error('unreachable');
+  assert.equal(result.rule, 'field_too_long');
+});
+
 // -- the three-state vocabulary ---------------------------------------------
 
 test('the state is exactly three closed values and always readable', () => {
@@ -388,6 +450,21 @@ test('the state is exactly three closed values and always readable', () => {
 
 // -- the loader -------------------------------------------------------------
 
+/** The injectable reader is a test seam; it hands back bytes, like the real one. */
+function bytesOf(text: string): (path: string, maxBytes: number) => Promise<Uint8Array> {
+  return async () => new TextEncoder().encode(text);
+}
+
+/** A scratch directory for the tests that must exercise the real filesystem. */
+async function withTempDir(body: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'quest-org-'));
+  try {
+    await body(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 test('no configured path is absent, which is a supported mode', async () => {
   assert.deepEqual(await loadOrgState({ path: null }), ORG_ABSENT);
 });
@@ -395,7 +472,7 @@ test('no configured path is absent, which is a supported mode', async () => {
 test('an unreadable file is rejected without echoing the path', async () => {
   const state = await loadOrgState({
     path: '/Users/someone/private/org.snapshot.json',
-    read: async () => { throw new Error('ENOENT'); },
+    readForTest: async () => { throw new Error('ENOENT'); },
   });
   assert.equal(state.status, 'rejected');
   const detail = orgStatusDetail(state);
@@ -405,13 +482,13 @@ test('an unreadable file is rejected without echoing the path', async () => {
 });
 
 test('unparseable and oversized documents are rejected, never thrown', async () => {
-  const bad = await loadOrgState({ path: 'org.json', read: async () => 'not json' });
+  const bad = await loadOrgState({ path: 'org.json', readForTest: bytesOf('not json') });
   assert.equal(bad.status, 'rejected');
 
   const huge = await loadOrgState({
     path: 'org.json',
     maxBytes: 16,
-    read: async () => JSON.stringify(validDocument()),
+    readForTest: bytesOf(JSON.stringify(validDocument())),
   });
   assert.equal(orgStatusDetail(huge), 'rejected:(file):limit_exceeded');
 });
@@ -419,11 +496,133 @@ test('unparseable and oversized documents are rejected, never thrown', async () 
 test('a valid file loads into the accepted state', async () => {
   const state = await loadOrgState({
     path: 'org.json',
-    read: async () => JSON.stringify(validDocument()),
+    readForTest: bytesOf(JSON.stringify(validDocument())),
   });
   assert.equal(state.status, 'accepted');
   if (state.status !== 'accepted') throw new Error('unreachable');
   assert.equal(state.snapshot.roles.length, ROLE_COUNT);
+});
+
+// -- the byte ceiling is a limit, not a report ------------------------------
+
+/**
+ * The bound has to hold *before* the document is in memory, otherwise the
+ * advertised ceiling only describes what was already loaded and decoded. The
+ * evidence is the reader itself: whatever the file's size, it never surfaces
+ * more than one byte past the ceiling, and that one byte is only there to tell
+ * "fits" from "does not fit".
+ */
+test('the real reader never holds more than maxBytes + 1 bytes', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'org.snapshot.json');
+    await writeFile(path, 'x'.repeat(64 * 1024));
+
+    for (const maxBytes of [0, 1, 16, 1024]) {
+      const bytes = await readSnapshotBytes(path, maxBytes);
+      assert.equal(bytes.length, maxBytes + 1);
+    }
+
+    // A file below the ceiling is returned whole, so nothing is silently cut.
+    await writeFile(path, 'abcde');
+    assert.equal((await readSnapshotBytes(path, 1024)).length, 5);
+  });
+});
+
+test('a real file past the ceiling is rejected through bounded I/O', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'org.snapshot.json');
+    // Valid JSON, so only the ceiling can be what refuses it.
+    await writeFile(path, JSON.stringify(validDocument()));
+
+    const state = await loadOrgState({ path, maxBytes: 64 });
+    assert.equal(orgStatusDetail(state), 'rejected:(file):limit_exceeded');
+  });
+});
+
+test('the ceiling is exact: maxBytes accepted, maxBytes + 1 refused', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'org.snapshot.json');
+    const text = JSON.stringify(validDocument());
+    const size = Buffer.byteLength(text, 'utf8');
+    await writeFile(path, text);
+
+    assert.equal((await loadOrgState({ path, maxBytes: size })).status, 'accepted');
+    assert.equal(
+      orgStatusDetail(await loadOrgState({ path, maxBytes: size - 1 })),
+      'rejected:(file):limit_exceeded',
+    );
+
+    // One byte past the ceiling is refused even when everything else is fine.
+    await writeFile(path, text + ' ');
+    assert.equal(
+      orgStatusDetail(await loadOrgState({ path, maxBytes: size })),
+      'rejected:(file):limit_exceeded',
+    );
+  });
+});
+
+test('a real valid file loads through the real reader', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'org.snapshot.json');
+    await writeFile(path, JSON.stringify(validDocument()));
+
+    const state = await loadOrgState({ path });
+    assert.equal(state.status, 'accepted');
+    if (state.status !== 'accepted') throw new Error('unreachable');
+    assert.equal(state.snapshot.roles.length, ROLE_COUNT);
+  });
+});
+
+test('a missing real file is rejected, never thrown, and never echoes the path', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'does-not-exist.json');
+    const state = await loadOrgState({ path });
+    assert.equal(orgStatusDetail(state), 'rejected:(file):not_object');
+    assert.equal(orgStatusDetail(state).includes(dir), false);
+  });
+});
+
+test('malformed and truncated UTF-8 is rejected deterministically and content free', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'org.snapshot.json');
+    const text = JSON.stringify(validDocument());
+    const encoded = Buffer.from(text, 'utf8');
+
+    // A lone continuation byte, and a multi-byte sequence cut in half.
+    for (const bad of [
+      Buffer.concat([encoded.subarray(0, encoded.length - 1), Buffer.from([0x80]), Buffer.from('}')]),
+      Buffer.concat([Buffer.from([0xe3, 0x81]), encoded]),
+    ]) {
+      await writeFile(path, bad);
+      const first = await loadOrgState({ path });
+      const second = await loadOrgState({ path });
+      assert.equal(orgStatusDetail(first), 'rejected:(file):not_object');
+      assert.deepEqual(first, second);
+    }
+  });
+});
+
+/**
+ * A lossy decode would turn the bad byte into U+FFFD, leaving a perfectly valid
+ * JSON document carrying a department name nobody wrote. Repairing producer
+ * output is exactly what this boundary refuses to do, so the document is
+ * rejected instead - and the reason still names no content.
+ */
+test('a bad byte inside a name is refused, not repaired into a name nobody wrote', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'org.snapshot.json');
+    const document = doc();
+    (document['departments'] as Record<string, unknown>[])[0]!['name'] = 'A@B';
+
+    const encoded = Buffer.from(JSON.stringify(document), 'utf8');
+    const at = encoded.indexOf('A@B') + 1;
+    assert.ok(at > 0);
+    encoded[at] = 0x80; // a continuation byte with nothing to continue
+
+    await writeFile(path, encoded);
+    const state = await loadOrgState({ path });
+    assert.equal(orgStatusDetail(state), 'rejected:(file):not_object');
+  });
 });
 
 // -- the stream cannot touch it ---------------------------------------------
