@@ -153,14 +153,14 @@ retry、provider 側の切り上げを観測できない）。したがって:
 | `business_category` | 任意 | 業務カテゴリ（営業支援 / 開発 / 問い合わせ対応 等） | `null` |
 | `department_id` | 任意 | 部署。`org-snapshot-design.md` の区画識別子と**同じ値域**を使う | `null` |
 | `agent_instance_id` | 任意 | **dynamic agent の実体識別子**（§5） | 固定 agent や instance を持たない場合は `null` |
-| `provider_id` | **必須** | adapter 境界の**内側**で正規化された provider 識別子 | 不明なら記録を拒否（推測しない） |
-| `model_id` | **必須** | 同上 | 同上 |
+| `provider_dimension` | **必須** | `{ id, resolution }` の構造。`id` は adapter 境界の**内側**で正規化された provider 識別子（nullable）、`resolution` は `resolved` / `unresolved` の**閉じた語彙** | `{ id: null, resolution: "unresolved" }`。**record は破棄しません**（§3.5） |
+| `model_dimension` | **必須** | `{ id, resolution }` の構造。同上 | 同上 |
 | `usage_quantities` | **必須** | provider が報告した単位付き数量の集合（input / output / cache_read / cache_write / tool_call / seconds など）。**単位を値と分離して保持する** | provider が報告しない単位は key ごと欠落させる（0 で埋めない） |
 | `service_cost_items` | 任意 | tool / 外部 service の費用（検索 API、sandbox 実行時間 等） | `null` |
-| `cost_amount` | 任意 | 金額 | 未算出なら `null`（0 にしない） |
+| `cost_amount` | `cost_status` に従属（§3.6） | 金額。**0 は「0円と分かっている」という既知の値**であり、「未算出」ではありません | 未算出なら `cost_status = unpriced` かつ `null`（0 にしない） |
 | `cost_currency` | `cost_amount` があれば必須 | **ISO 4217**。provider が請求した通貨をそのまま | — |
-| `cost_status` | **必須** | `estimated` / `finalized` / `unpriced` の**閉じた語彙** | `unpriced` |
-| `pricing_source` | `estimated` / `finalized` なら必須 | 価格の出所（provider 請求 / 価格表 version / 契約単価）と `effective_at`、または evidence reference | — |
+| `cost_status` | **必須** | `estimated` / `finalized` / `unpriced` の**閉じた語彙**。§3.6 の cross-field invariant を必ず満たす | `unpriced` |
+| `pricing_source` | `estimated` / `finalized` なら必須（§3.6） | 価格の出所（provider 請求 / 価格表 version / 契約単価）と `effective_at`、または evidence reference | — |
 | `occurred_at` | **必須** | 消費が発生した時刻（ISO-8601） | — |
 | `recorded_at` | **必須** | Store が記録した時刻。**`occurred_at` と別 field**（遅延請求の判定に使う） | — |
 | `evidence_ref` | **必須** | 本体文書の Evidence Bundle への参照（run/event id、provider 明細 id 等） | — |
@@ -170,8 +170,10 @@ retry、provider 側の切り上げを観測できない）。したがって:
 
 **必須にしたのは「後から復元できないもの」だけです。**
 
-- `tenant_id` / `run_id` / `logical_role` / `provider_id` / `model_id` /
+- `tenant_id` / `run_id` / `logical_role` / `provider_dimension` / `model_dimension` /
   `occurred_at` は、その時点で記録しないと**永久に復元できません**。
+  ただし**「必須」なのは次元そのものであって、解決済みの id ではありません。**
+  正規化できなかった場合は `resolution = unresolved` として**記録を残します**（§3.5）。
 - `department_id` / `business_category` は Company Brain 側の対応表から
   **後から join できる**ため任意です。
 - `cost_amount` は価格表があれば `usage_quantities` から**後から算出できる**ため任意です。
@@ -188,7 +190,10 @@ retry、provider 側の切り上げを観測できない）。したがって:
   適当な tenant へ割り振ることも、按分することも、黙って捨てることもしません。
 - 不明な次元は `null` であって `"unknown"` という**文字列でも 0 でもありません**。
   0 は「消費が無かった」という別の事実です。
-- **`unattributed` の総額は常に集計可能でなければなりません。**
+- **「捏造しない」は「捨ててよい」ではありません。** 帰属先や次元が決まらないことは、
+  その消費を**記録しない理由になりません**。推測して埋めることと、
+  記録ごと落とすことは**どちらも同じ「合計が合わない」を生みます**（§3.5）。
+- **`unattributed` および `unresolved` の総額は常に集計可能でなければなりません。**
   「合計が合わない」を検知できないと、帰属漏れが静かに蓄積します。
 - 未帰属分を後から帰属させ直す場合、元の record を上書きせず
   **訂正 record を追加**します（監査証跡の追記のみ・本体文書の audit trail 原則）。
@@ -204,6 +209,65 @@ retry、provider 側の切り上げを観測できない）。したがって:
 - provider 明細の照合は **id 参照**で行い、明細本文を複製しません。
 - 拒否理由・異常検知の理由は、既存の halt reason と同じく
   **field名 + rule名のみ**で、内容文字列を含めません。
+
+### 3.5 provider / model が正規化できない場合（unresolved dimension）
+
+**正規化できないことを理由に、usage / cost の record を破棄しません。**
+
+provider 側の新 model 追加、mapping 表の更新漏れ、明細の書式変更などで
+`provider_id` / `model_id` が決まらないことは**必ず起きます**。
+ここで record を落とすと、その消費は
+「`unattributed` にも計上されない・budget 評価にも入らない・後から訂正もできない」
+という**最悪の消え方**をします。§3.3 が禁じている「黙って捨てる」そのものです。
+
+したがって:
+
+- `provider_dimension` / `model_dimension` は **次元の存在自体が必須**で、
+  `id` は nullable、`resolution` が `resolved` / `unresolved` を明示します。
+  **`"unknown_provider"` のような偽の id を発行しません**（捏造の禁止・§3.3）。
+- `resolution = unresolved` の record も **`usage_quantities` / `occurred_at` /
+  `recorded_at` / `evidence_ref` / `tenant_id` を通常どおり保持**します。
+  帰属できる軸（tenant / run / logical_role）が分かっているなら、
+  provider が不明でも**その軸では正しく集計されます**。
+- **budget 評価は unresolved を除外しません。** 未解決の消費額（または
+  `unpriced` で金額未確定なら数量）は、`unattributed` と同様に
+  **常に別掲で集計可能**でなければなりません（→ C2）。
+  除外は「消費0として続行する」と実質同じであり、§6.4 で禁じています。
+- 後から mapping を足して解決できるよう、**正規化できなかった元の識別子への
+  参照（provenance）を adapter 境界の内側に保持**し、`evidence_ref` から辿れる形にします。
+  これは §3.4 の秘匿境界を緩めません（prompt 本文・secret・credential は対象外のままです）。
+- 解決したときは **元の record を上書きせず訂正 record を追加**します
+  （append-only / 監査可能・§3.3 と同じ規則）。訂正 record は
+  どの record を訂正したか、どの mapping version で解決したかを持ちます。
+
+これは §4.1 の「正規化できない usage 単位は `unmapped` として数量を捨てない」と
+**同じ規則を provider / model 次元へ適用したもの**です。新しい原則ではありません。
+
+### 3.6 `cost_status` ごとの cross-field invariant（閉じた契約）
+
+`cost_status` は金額 field の**必須性を支配**します。
+status と金額が独立だと、`finalized` なのに金額が無い record や、
+`unpriced` なのに金額がある record が契約上許されてしまい、
+C3（`estimated` と `finalized` を混同できない）が実装できません。
+
+| `cost_status` | `cost_amount` | `cost_currency` | `pricing_source` | 意味 |
+|---------------|---------------|-----------------|------------------|------|
+| `estimated` | **必須**（数値。0 も可） | **必須**（ISO 4217） | **必須**。価格表 version / 契約単価と `effective_at` を伴う | 見積り。確定請求に置き換わり得る |
+| `finalized` | **必須**（数値。**0 も有効な確定値**） | **必須**（ISO 4217） | **必須**。provider 請求・精算 evidence の参照を伴う | 確定。provider 側の請求事実と一致する |
+| `unpriced` | **必ず `null` / 不在** | **必ず `null` / 不在** | 不在でよい | **金額が未確定**。数量と provenance は保持する |
+
+規則:
+
+- **`unpriced` は「0円」を意味しません。** 0 は「0円と分かっている」既知の値であり、
+  `estimated` または `finalized` として記録します。両者を同一視した時点で
+  §6.4 の「黙って消費0として扱わない」が破れます（→ §8.4 / C11）。
+- `estimated` / `finalized` は**原本の請求通貨と金額**を保持します。
+  reporting 通貨への換算は別 field で、FX evidence を伴います（§4.2）。上書きしません。
+- **上表を満たさない組み合わせは契約違反**です。deterministic code は
+  黙って補正せず、**取り込みを失敗させて理由を記録**します
+  （理由は field 名 + rule 名のみ・§3.4）。**推測して金額を埋めることも、
+  status を書き換えることもしません。**
+- `estimated` → `finalized` の遷移は**上書きではなく訂正 record の追加**です（§6.4）。
 
 ---
 
@@ -223,6 +287,8 @@ retry、provider 側の切り上げを観測できない）。したがって:
 - provider 固有の usage 単位名（provider ごとに異なる cache 種別など）は
   **adapter が正規化**します。正規化できない単位は `unmapped` として
   数量を保持しつつ**捨てません**（後から mapping を足せるように）。
+- **provider / model 自体が正規化できない場合も同じです。** `resolution = unresolved`
+  として record を保持し、**破棄しません**（§3.5）。
 
 このrepositoryには既に同型の実装先例があります:
 `hookWire.ts`（外部wireのmodel）→ `hookAdapter.ts`（mapping表の行だけを使う）
@@ -326,13 +392,20 @@ cost 専用の停止経路を新設しません。
 provider の確定請求は遅れて届きます。見積りしか無い時点で
 「現在の正確な消費額」と称してはいけません。
 
-- 表示・判断・報告は常に **`estimated` / `finalized` を区別**します（§3.1 の `cost_status`）。
-  混在した合計は「うち見積り X 円」を必ず併記します。
+- 表示・判断・報告は常に **`estimated` / `finalized` / `unpriced` を区別**します
+  （§3.1 の `cost_status`、必須性は §3.6）。
+  混在した合計は「うち見積り X 円」「うち未算出 N 件」を必ず併記します。
 - **請求データが欠落・遅延している間の既定挙動を policy として明示的に決めます。**
   選択肢は「見積りで判断を続ける」「保守側へ倒して承認要求へ昇格する」「停止する」で、
-  **黙って「消費0」として扱うことだけは禁止**です。0 と「不明」は別の事実です。
+  **黙って「消費0」として扱うことだけは禁止**です。0 と「不明」は別の事実です
+  （`unpriced` は 0 ではありません・§3.6）。
+- **`unpriced` の件数・数量と、`resolution = unresolved` の消費は、
+  budget 評価の入力から除外しません。** 別掲で必ず可視化し、
+  policy が定めた既定挙動（継続 / 昇格 / 停止）を適用します。
+  除外は「消費0として続行する」と同じ結果になります（§3.5 / C2 / C9）。
 - 確定額が見積りと乖離した場合、見積り record を上書きせず**訂正 record を追加**し、
   遡って閾値超過が判明した場合の扱い（次期間へ持ち越すか、即時昇格か）を policy に持ちます。
+  **provider / model が後から解決した場合の訂正も同じ経路**です（append-only・§3.5）。
 - `recorded_at` と `occurred_at` を分けているのは、この遅延を**測定可能にする**ためです。
 
 ---
@@ -350,38 +423,86 @@ business value は人間が方法論を選んで**推定する値**だからで�
 | 概念 | 内容 |
 |------|------|
 | `value_metric_type` | 価値指標の種別（§7.2 の閉じた語彙） |
+| `value_kind` | **必須**。`monetary` / `non_monetary` の**閉じた語彙**。金額として合算・ROI 計算に使えるのは `monetary` だけ |
+| `realization_status` | **必須**。`realized` / `estimated` の**閉じた語彙**。**`value_metric_type` からも `confidence` からも独立した軸**（§7.1.1） |
 | `baseline` | 比較基準。**baseline が無い value は成立しません** |
 | `observed` | 観測値 |
-| `unit` | 単位（時間 / 件 / 率 / 通貨） |
-| monetary conversion | 任意。金額換算する場合は**換算率と根拠**を必ず伴う |
+| `unit` | 単位（時間 / 件 / 率 / 通貨）。`value_kind = monetary` なら **ISO 4217 の通貨コード** |
+| monetary conversion | 任意。金額換算する場合は**換算率と根拠**を必ず伴い、**別 record** として持つ（§7.1.1） |
 | `measurement_window` | 測定期間 |
+| `attribution_scope` | 帰属範囲（tenant / project / task / workflow / department / role 等）。ROI 計算時の突合に使う（§8.2） |
 | `attribution_method` | 帰属方法（AI の寄与をどう切り出したか） |
-| `confidence` / quality | 確度。**推定であることを消さない** |
+| `confidence` / quality | 確度。**推定であることを消さない。`realization_status` の代用にはなりません** |
 | `methodology_version` | 方法論の版。版が変われば過去値と単純比較しない |
 | `evidence_ref` | 裏付け evidence への参照 |
 
+#### 7.1.1 なぜ `realization_status` を独立の field にするか
+
+`value_metric_type` から実現・推定を導けると考えるのは**誤り**です。
+`revenue_contribution` も `gross_profit_contribution` も、
+**実現（確定した売上・粗利）でも推定（見込み）でもあり得ます**。
+型だけを見て小計を分けると、**同じ型の record が読み手ごとに違う小計へ入り**、
+「実現 / 推定を分けた小計」（§7.3）が定義できません。
+
+`confidence` でも代用できません。確度は「推定がどれだけ確からしいか」であって、
+「実現したか」ではありません。**確度99%の推定は、実現ではありません。**
+
+したがって:
+
+- `realization_status` は **`value_metric_type` と `confidence` の両方から独立**した必須軸です。
+- `realized` は「実際に発生した（発生しなくなった）事実として evidence がある」ことを意味します。
+- `estimated` は「方法論と前提から導いた値」であり、`confidence` はその中の確からしさです。
+- **`value_kind` も独立です。** `time_saved`（時間）を金額換算した値は、
+  元 record を書き換えるのではなく **`value_kind = monetary` の別 record**として作り、
+  換算率・根拠・`methodology_version` を伴います。
+  これにより「非金額の観測値」と「金額の推定 / 実現」が**混ざらずに区別できます**。
+
+#### 7.1.2 cross-field 制約（契約違反となる組み合わせ）
+
+| 制約 | 理由 |
+|------|------|
+| `time_value_proxy` は **`realization_status = estimated` 固定**。`realized` を取れない | 代理指標は定義上、実現した費用削減ではありません（§7.3） |
+| `realized_cost_saving` は **`value_kind = monetary` かつ `realization_status = realized` 固定** | 「実際に発生しなくなった費用」以外をこの型に入れさせないため |
+| `value_kind = monetary` なら `unit` は **ISO 4217 必須** | 通貨不明の金額は合算も ROI 計算もできません（§8.2） |
+| `value_kind = non_monetary` の record を**金額として合算しない** | 時間・件数・率は金額と次元が違います（§8.2） |
+| `revenue_contribution` / `gross_profit_contribution` は `realized` / `estimated` の**両方を取り得る** | だからこそ型ではなく `realization_status` で分けます |
+
+上表を満たさない組み合わせは**契約違反**とし、deterministic code は
+黙って補正せず取り込みを失敗させ、理由を記録します（§3.6 と同じ扱い）。
+
 ### 7.2 value metric type（少なくともこれらを区別する）
 
-| type | 内容 | 実現性 |
-|------|------|--------|
-| `time_saved` | 削減時間そのもの | 観測寄り |
-| `time_value_proxy` | 削減時間 × 単価による**代理**金額 | **推定** |
-| `realized_cost_saving` | 実際に発生しなくなった費用 | **実現** |
-| `revenue_contribution` | 売上寄与 | 帰属方法に強く依存 |
-| `gross_profit_contribution` | 粗利寄与 | 同上 |
-| `quality_error_reduction` | エラー・欠陥の削減 | 観測寄り |
-| `response_time_improvement` | 対応時間の短縮 | 観測寄り |
-| `throughput_improvement` | 処理件数の増加 | 観測寄り |
+**この表は `value_kind` と、その型が取り得る `realization_status` を定めます。
+実現・推定の判定は型ではなく、各 record の `realization_status` が持ちます**（§7.1.1）。
+
+| type | 内容 | `value_kind` | 取り得る `realization_status` |
+|------|------|--------------|------------------------------|
+| `time_saved` | 削減時間そのもの | `non_monetary` | `realized` / `estimated` |
+| `time_value_proxy` | 削減時間 × 単価による**代理**金額 | `monetary` | **`estimated` のみ** |
+| `realized_cost_saving` | 実際に発生しなくなった費用 | `monetary` | **`realized` のみ** |
+| `revenue_contribution` | 売上寄与 | `monetary` | `realized` / `estimated` |
+| `gross_profit_contribution` | 粗利寄与 | `monetary` | `realized` / `estimated` |
+| `quality_error_reduction` | エラー・欠陥の削減 | `non_monetary` | `realized` / `estimated` |
+| `response_time_improvement` | 対応時間の短縮 | `non_monetary` | `realized` / `estimated` |
+| `throughput_improvement` | 処理件数の増加 | `non_monetary` | `realized` / `estimated` |
 
 **商談獲得のような事象も、`revenue_contribution` の帰属方法として扱い、
 専用の特別扱いを作りません**（軸を増やすほど比較不能になるため）。
+その事象が受注確定なら `realized`、見込みなら `estimated` で、**型は同じです**。
 
 ### 7.3 推定を実現利益として提示しない
 
 - `time_value_proxy` は **代理指標**です。人件費が実際に減っていない限り、
   `realized_cost_saving` ではありません。両者を同じ合計に足しません。
-- 集計・報告では **実現 / 推定を分けた小計**を必ず出します。
+  契約上も `time_value_proxy` は `realized` を取れません（§7.1.2）。
+- 集計・報告では **`realization_status` で分けた小計**（実現 / 推定）を必ず出します。
+  小計は `value_metric_type` ではなく **`realization_status` を key に算出**します。
+  そうしないと `revenue_contribution` のように両方を取り得る型が
+  どちらの小計にも確定的に入りません（§7.1.1）。
+- **金額小計は `value_kind = monetary` の record のみ**から作り、
+  `non_monetary`（時間 / 件数 / 率）は**単位ごとに別掲**します。混ぜて合算しません。
 - `confidence` を落として合計だけを見せる表示を作りません。
+  また `confidence` を**実現の代用として提示しません**（確度99%の推定は推定です）。
 - 人間向け報告（日本語）でも「推定」「前提」を明示します
   （本体文書の言語policy: 人間向け要約は日本語、機械間は schema）。
 
@@ -391,6 +512,8 @@ business value は人間が方法論を選んで**推定する値**だからで�
 
 **「ROI 13倍」のような曖昧な表記を使いません。** 分子・分母が読み手ごとに違うためです。
 
+### 8.1 用語
+
 | 用語 | 定義 |
 |------|------|
 | **benefit-cost ratio** | `business_value / ai_cost` |
@@ -399,20 +522,82 @@ business value は人間が方法論を選んで**推定する値**だからで�
 
 例（前提を明示した上での計算）:
 
-> business value 40,000 円、AI cost 3,000 円のとき
+> business value 40,000 **JPY**（`value_kind = monetary`）、AI cost 3,000 **JPY** のとき
 > - benefit-cost ratio ≈ **13.3倍**
 > - net ROI ≈ **12.3倍**（約 **1,233%**）
 >
 > この2つは同じ状況を指しますが**数値が異なります**。どちらを指すか明示せずに
 > 「13倍」とだけ書くことを禁じます。
 
-規則:
+### 8.2 分子と分母は commensurate（同次元）でなければならない
+
+**比率は「同じ単位・同じ通貨・同じ範囲・同じ期間」のときにしか意味を持ちません。**
+`business_value` は時間・件数・率も取り得（§7.1）、`ai_cost` は
+provider 請求通貨のまま保持されます（§4.2）。そのまま割ると
+**次元の合わない比率や、通貨の混ざった比率**が「benefit-cost ratio」の名で流通します。
+
+benefit-cost ratio / net ROI を**計算してよいのは、次を全て満たすときだけ**です。
+
+| 前提 | 内容 |
+|------|------|
+| 金額であること | 分子は `value_kind = monetary` の record のみ。**時間・件数・率からは計算しません**（§7.1.2） |
+| 通貨が一致 | 分子・分母が**同一の reporting 通貨**（ISO 4217）に揃っていること |
+| 期間が一致 | `measurement_window`（value）と budget period / 集計期間（cost）が同一 |
+| 範囲が一致 | `attribution_scope`（tenant / project / task / workflow / department / role 等）が同一 |
+| 方法論が整合 | `attribution_method` / `methodology_version` が比較可能であること |
+| 実現区分が一致 | `realization_status` が揃っていること（§8.3） |
+
+通貨が異なる場合:
+
+- **原本（provider 請求通貨・金額、value の原単位）は保持したまま**、
+  FX rate / rate source / effective time を伴う**明示的な換算 evidence** を作り、
+  reporting 通貨へ揃えた金額で計算します（§4.2）。
+- **黙って換算しません。** 換算した旨と rate 出所を報告に併記します。
+
+### 8.3 実現 ROI と 推定 ROI を混ぜない
+
+- `realization_status = realized` の value のみで作った比率を **realized ROI**、
+  `estimated` を含む比率を **estimated ROI** として**別々に報告**します。
+- **両者を1つの無印の比率へ合算しません。** 合算すると、推定が
+  実現の顔をして経営判断に入ります（§7 の分離理由と同じ）。
+- 同様に `ai_cost` 側も `estimated` / `finalized` の別を併記します（§6.4）。
+
+### 8.4 `ratio_status` — 計算できない場合を明示する
+
+計算不能な場合に「0」「—」「∞」を出すのではなく、
+**理由を持つ閉じた語彙 `ratio_status`** を返します。
+
+| `ratio_status` | 意味 |
+|----------------|------|
+| `computed` | §8.2 の前提を全て満たし、比率を算出した |
+| `undefined_zero_denominator` | **`ai_cost` が既知の 0**（`finalized` または `estimated` で amount = 0）。値は既知だが比率は数学的に未定義 |
+| `blocked_unpriced_cost` | `ai_cost` に `unpriced`（金額未確定）が含まれる。**0 ではなく不明** |
+| `blocked_unresolved_cost` | `resolution = unresolved` の消費が範囲に含まれ、cost が確定していない（§3.5） |
+| `blocked_non_monetary_operand` | 分子に `value_kind = non_monetary` が含まれる |
+| `blocked_currency_mismatch` | 通貨が揃っておらず、FX evidence も無い |
+| `blocked_scope_mismatch` | `attribution_scope` または `measurement_window` が一致しない |
+| `blocked_methodology_mismatch` | `methodology_version` / `attribution_method` が比較可能でない |
+
+**`undefined_zero_denominator` と `blocked_unpriced_cost` は別物です。**
+
+- `ai_cost = 0` は「0円と分かっている」**既知の金額**です。
+  `cost_status` は `finalized`（または `estimated`）**のまま**であり、
+  無償枠での確定 0 円は正当な確定 evidence です。
+  ここで `unpriced` と表示すると「価格が未確定」という**別の事実**にすり替わり、
+  §3.6 が守っている「0 と不明は別」が崩れます。
+- `unpriced` は **金額・価格が無いときだけ**に予約された語です（§3.6）。
+
+いずれの `blocked_*` / `undefined_*` でも、**比率の代わりに 0 や ∞ を表示しません。**
+status と理由をそのまま人間へ提示します。
+
+### 8.5 報告規則
 
 - 報告時は **用語名を必ず併記**します（「benefit-cost ratio 13.3倍」）。
-- **`business_value` に推定が含まれる場合、その旨と推定の内訳を併記**します。
-- **`ai_cost` に `estimated` が含まれる場合も同様**です（§6.4）。
+- **通貨・期間・範囲・`methodology_version` を必ず併記**します（§8.2 の前提）。
+- **`business_value` に推定が含まれる場合、その旨と推定の内訳を併記**します（§8.3）。
+- **`ai_cost` に `estimated` / `unpriced` / `unresolved` が含まれる場合も同様**です（§6.4 / §3.5）。
 - `methodology_version` が異なる期間の比率を、断りなく時系列比較しません。
-- `ai_cost = 0` のとき比率を計算しません（無限大を表示しない。`unpriced` と表示）。
+- 比率が出せないときは **`ratio_status` と理由**を提示します（§8.4）。
 
 ---
 
@@ -435,8 +620,9 @@ LCP-1 は state code / event code / evidence kind / 失敗種別の**閉じた�
 docs タスクでした。ここへ **additive / optional** として次を加えます。
 
 - **usage/cost attribution envelope の次元名と必須・任意の別**（§3.1 / §3.2）
-- **`cost_status` の閉じた語彙**（`estimated` / `finalized` / `unpriced`）
-- **`unattributed` / `unknown_role` の扱い**（§3.3）
+- **`cost_status` の閉じた語彙**（`estimated` / `finalized` / `unpriced`）と、
+  **status ごとの cross-field invariant**（§3.6）
+- **`unattributed` / `unknown_role` / `resolution`（`resolved` / `unresolved`）の扱い**（§3.3 / §3.5）
 - **usage event の evidence linkage**（Evidence Bundle への参照方法）
 - **provider 非依存の event code 命名規則**（provider 名を code に入れない・§4.1）
 
@@ -457,7 +643,7 @@ LCP-1 に含めると、docs-only ではなくなり、Quest MVP の前に大き
 | **COST-1** | 低コストな telemetry の取得と正規化。provider adapter が usage を正規化して記録するところまで。**Quest MVP を止めない**。UI 変更なし | COST-0 受理 | **B**（code / runtime影響） |
 | **COST-2** | read-only の cost / budget projection。集計は行うが**判断も enforcement もしない** | COST-1 が信頼できる telemetry を出していること | **B** |
 | **COST-3** | deterministic budget enforcement（閾値判断・承認要求・停止） | Policy / Approval / Stop の基盤（本体文書の該当フェーズ）＋ 価格品質規則（§6.4） | **C**（保護対象操作を止める権限を持つため owner 承認必須） |
-| **VALUE-1** | business value の baseline と方法論の定義（docs） | COST-0 | **A** |
+| **VALUE-1** | business value の baseline と方法論の定義（docs）。`value_kind` / `realization_status` の閉じた語彙と cross-field 制約（§7.1.1 / §7.1.2）、`ratio_status` の語彙（§8.4）を含む | COST-0 | **A** |
 | **VALUE-2** | value capture と ROI 算出 | VALUE-1 で baseline / methodology が確定していること | **B** |
 | **MC-COST** | Management Console の cost / budget / ROI dashboard | Management Console フェーズ | **B**（read-only の間）／介入を含めるなら **C** |
 
@@ -487,15 +673,17 @@ code 変更ゼロ、runtime 影響ゼロ、338 test に影響ゼロ、owner 承�
 | # | 基準 |
 |---|------|
 | C1 | **Provider / Model を替えても、core の cost / value contract が変わらない。** provider 名は dimension の値としてしか現れない |
-| C2 | **全ての cost は帰属されるか、明示的に `unattributed` と記録されるかのいずれかである。** 黙って消える cost が存在しない。`unattributed` の総額が常に集計できる |
-| C3 | **`estimated` と `finalized` を混同できない。** 合計値は必ず内訳を持ち、片方だけを見て「確定額」と読める表示が存在しない |
+| C2 | **全ての cost は帰属されるか、明示的に `unattributed` / `unresolved` と記録されるかのいずれかである。** **provider / model が正規化できないことは record を破棄する理由にならない**（§3.5）。黙って消える cost が存在せず、`unattributed` と `unresolved` の総額が常に集計でき、budget 評価の入力から除外されない |
+| C3 | **`estimated` / `finalized` / `unpriced` を混同できない。** `cost_status` が金額 field の必須性を支配し（§3.6）、`finalized` なのに金額が無い record や `unpriced` なのに金額がある record が契約上作れない。合計値は必ず内訳を持ち、片方だけを見て「確定額」と読める表示が存在しない |
 | C4 | **dynamic agent の消費が、恒久的な employee identity 無しに集計できる。** roster 未実装でも cost 集計が成立する |
 | C5 | **budget の判断が、policy（version付き）+ evidence から再現できる。** 同じ入力から同じ判断が導けない状態を作らない |
 | C6 | **cost の閾値超過が、保護対象の支出の**前**で承認要求または停止へ到達できる。** 事後通知しかできない設計にしない |
-| C7 | **business value の推定が、方法論 / evidence / 確度を保持したまま流通する。** 推定が観測の顔をして集計に混ざらない |
+| C7 | **business value の推定が、方法論 / evidence / 確度を保持したまま流通する。** 推定が観測の顔をして集計に混ざらない。**`realization_status` が `value_metric_type` と `confidence` から独立した必須軸として存在し**（§7.1.1）、`revenue_contribution` のように両方を取り得る型でも実現 / 推定の小計が一意に定まる |
 | C8 | **Management Console が Task / Workflow / Department / Role / Provider / Model の各軸を比較できる。** かつ **Quest は enforcement を一切所有しない** |
-| C9 | **provider 請求が遅延・欠落しても、fail-safe な既定挙動が policy から決まる。** 「消費0」として黙って続行しない |
+| C9 | **provider 請求が遅延・欠落しても、fail-safe な既定挙動が policy から決まる。** 「消費0」として黙って続行しない。`unpriced` / `unresolved` を budget 評価から除外しない |
 | C10 | **ROI の報告に benefit-cost ratio / net ROI の別が明記される。** 曖昧な「N倍」表記が残らない |
+| C11 | **ROI の分子・分母が commensurate である。** 両者が金額（`value_kind = monetary`）で、同一の reporting 通貨 / 期間 / `attribution_scope` / 方法論であるときにのみ算出される。通貨差は FX evidence を伴い、黙って換算されない。**realized ROI と estimated ROI が分離**され、無印の合成比率が存在しない（§8.2 / §8.3） |
+| C12 | **既知の 0 と未算出が区別される。** `ai_cost = 0` は `finalized` / `estimated` のまま既知の金額として扱われ、比率は `undefined_zero_denominator` として提示される。**`unpriced` は金額・価格が無い場合にのみ使われ**、0 や ∞ が比率の代わりに表示されない（§3.6 / §8.4） |
 
 ---
 
