@@ -4,8 +4,8 @@ Phase 2の未達条件2つについて、**実装せずに責務境界だけを�
 
 | # | 条件 | 現状 |
 |---|------|------|
-| 1 | 6部署・社長室・未所属・共用施設のフロア構成 | **未実装** |
-| 2 | 15名の固定着席 | **未実装** |
+| 1 | 6部署・社長室・未所属・共用施設のフロア構成 | **未実装**（入力契約は確定済み → §4） |
+| 2 | 15名の固定着席 | **未実装**（入力契約は確定済み → §4） |
 
 この文書はコードを変更しません。新しいwire schema、API、SSE event、runtime挙動も定義しません。
 **新規の内部API名・field名・関数名も決めません**（仮称も置きません）。未実装の要素は役割だけを書き、
@@ -28,6 +28,11 @@ Phase 2の未達条件2つについて、**実装せずに責務境界だけを�
 >   stream 状態を隠さない）は変えません。
 > - この推奨により、**§5 PR-1 の §4.7 決定部分**は Run/Event contract の語彙確定（LCP-1）に依存します。
 >   §4.1〜§4.6 の外部事実確認は依存せず、並行して進められます。
+>
+> **PR-1（Issue #23）での解決**: §4.7 は「**表示面の契約**（banner とは別の第2面である・閉じた語彙である・
+> stream 状態を隠さない・汎用面として設計する）」までを確定し、**語彙の中身は org 分だけ先に定義**する形で
+> 決着させました。run state 側の code は LCP-1 確定後に**同じ面へ追加**します。表示面を2度決めないという
+> 本注記の目的は満たしたまま、**PR-3 は LCP-1 の完了を待ちません**。詳細は §4.7。
 > - §5 PR-4（決定論的 layout）は Loop Control Plane の前提ではないため、後ろへ移動しても構いません
 >   （分割はしません）。
 >
@@ -182,7 +187,7 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 
 | 項目 | 内容 |
 |------|------|
-| authoritative source | ai-company側の org 定義（`company/org.yaml` 想定。**実在・形式ともに未確認 → §4.1**） |
+| authoritative source | ai-company側の **検証済みスナップショット `company/org.snapshot.json`**（**実在・形式ともに確認済み → §4.1**）。社長室だけは org 定義に無く、player 由来で扱う（§4.1） |
 | 必要入力 | 区画の**識別子と順序**のみ。部署id、表示名、区画種別（部署 / 社長室 / 未所属 / 共用施設）、並び順 |
 | 入力に**含めない**もの | 座標、pixel、幅、色。layoutはQuest側が決める（§2.2） |
 | consumer | ① org snapshotのprojection層（新規・未実装。関数名は決めない）が区画一覧を projection する ② `buildWorld()` が区画ごとにroom矩形を割り当てる ③ DOMの社員一覧が区画ごとにgroup化する |
@@ -196,9 +201,9 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 
 | 項目 | 内容 |
 |------|------|
-| authoritative source | 同上のorg定義の社員roster（**未確認 → §4.1**）。15という数はrosterの結果であって、**定数として焼き込まない**（§4.3） |
+| authoritative source | 同上の snapshot の `roles[]`（**確認済み: 15件 → §4.1**）。15という数はrosterの結果であって、**定数として焼き込まない**（§4.3） |
 | 必要入力 | 社員ごとに: 安定した社員識別子、表示名、所属区画id、区画内の並び順、runtime actorとの照合key |
-| 照合keyの候補 | `ActorDirectory` のkey体系（`actorKeyOf(session_id, agent_id)` またはbare `agent_id`、`src/domain/actor.ts:40`）を**そのまま流用する**のが既存事実に最も近い。ただし `session_id` はrun毎に変わるため、固定rosterが持てるのは実質bare `agent_id` 側のみ → **§4.2 未決** |
+| 照合key | **`runtime_agent_type`（確認済み → §4.2）**。wire の19 keyに既に存在し（`src/domain/wire.ts:49`）、`hookAdapter.ts:205` が `wire.agent.type` から載せ、ai-company 側 `roles[].runtime_agent_type` と対になる。bare `agent_id` ではない。`session_id` は照合に使わない |
 | consumer | ① roster projection（新規・未実装。関数名は決めない） ② `selectDesks` 相当が roster席 × actor状態を突き合わせる ③ `buildWorld` がroster順から席座標を決める |
 | 席番号の意味の変更 | 現行 `seat` は「並べ替え後のactor index+1」（`quest-view.js:640-643`）で**動く**。固定着席では席はrosterに属し、actorの増減で動かない。これは既存の `seat` の意味を変えるため、置き換えではなく**別fieldとして導入**すべき（§4.4） |
 | fail-closed時の挙動 | roster不在・検証失敗 → **現行の動的着席へ縮退**し、閉じた語彙で明示。roster社員を推測で生成しない。1件でも不正なら部分適用せずroster全体を不採用にする（部分rosterは「誰がいないのか」を誤って伝えるため）。**この明示が実装される前にroster-backed UIを有効化しない**（§2.4の順序制約・§5） |
@@ -210,72 +215,147 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 
 ---
 
-## 4. 未決事項
+## 4. 確認結果（旧: 未決事項）
 
-**推測で埋めてはいけない項目**です。次PRの着手前に、実物を確認して決める必要があります。
+**PR-1（Issue #23）で §4.1〜§4.6 を実物に対して確認しました。** 以下は推測ではなく観測した事実です。
+観測日: 2026-08-28 / 観測対象: `ai-company` repository（このrepositoryの外部）。
 
-### 4.1 ai-company側 `company/org.yaml` の実在と形式 — **未決**
+観測時点の値の同定子:
 
-このrepositoryには存在せず、本タスクの範囲で外部repositoryを確認していません。
-issue本文に名前が出ているだけです。以下がすべて未確認:
+| 項目 | 値 |
+|------|-----|
+| `org_definition_hash` | `sha256:5b65bf110d6e19dbd…` |
+| `agent_definitions_hash` | `sha256:09000ad8da7c6d8b8…` |
+| `validation_warnings` | `[]`（0件） |
 
-- fileが実在するか、pathとfile名は何か
-- 部署が6つ、社員が15名で固定されているか
-- 社員に安定した識別子があるか、その値域は何か
-- Quest側が読める形（LIVE運用時にどう届くのか、fileを直接読むのか、ai-company側が出力するのか）
+> **hash は「観測した版」を同定するためだけに引用しています。**Quest 側がこの値を定数として
+> 焼き込むことは意図していません（§4.3）。
 
-**この確認が全ての前提**です。確認できるまで、Quest側にorg schemaを定義してはいけません。
+### 4.1 ai-company側 `company/org.yaml` の実在と形式 — **確認済み**
 
-### 4.2 roster社員 ↔ runtime actor の照合key — **未決**
+**実在します。** 加えて、Quest が読むべき対象は yaml 本体ではなく**検証済みスナップショット**です。
 
-`ActorDirectory` のkey体系は `session_id` を含むscoped keyとbare `agent_id` の2段です
-（`src/domain/actor.ts:36-38`）。固定rosterは特定sessionに属さないため、
-成立するのはbare `agent_id` 側だけに見えますが、
-**ai-company側が社員に安定した `agent_id` を割り当てているかは未確認**（§4.1依存）。
+| 確認項目 | 観測した事実 |
+|---|---|
+| file の実在 | `company/org.yaml`（定義の正本・人間が編集する）、`company/org.schema.json`（検証schema）、`company/org.snapshot.json`（**検証済みスナップショット**）の3点が実在 |
+| 生成経路 | `scripts/validate_org.py --check`（検証）/ `--emit`（snapshot 生成）。生成物の drift は `scripts/check_artifacts.py` が一括検査する |
+| 部署 | **6件**（`dept-development` / `dept-automation` / `dept-pm-consulting` / `dept-sales-strategy` / `dept-content` / `dept-finance`）。各件に `display_order`（10〜60・重複なし） |
+| 社員（役職） | **15件**。内訳は `executive` 4 / `staff` 1 / `department` 6 / `assistant` 4 |
+| 共用施設 | **7件**、すべて `type: "shared"`（`skill-workshop` / `meeting-room` / `artifact-gallery` / `external-gateway` / `scheduler-room` / `ops-dashboard` / `security-zone`） |
+| 社長室 | **org定義には存在しません。**社長／CEO「歩」は Human（Player）であり Agent 定義を持たないため、`roles` に登録されていません（`company/org.yaml` 冒頭コメントに明記） |
+| 安定した識別子 | あります。`roles[].id` / `departments[].id` / `facilities[].id`。値域は `^[a-z0-9][a-z0-9-]{0,63}$`（`org.schema.json` `#/$defs/identifier`）。15件すべてがこの文法に一致することを確認済み |
+| 表示名 | `displayName` = 1〜100文字。**日本語を含みます**（`開発部` / `Skill工房` 等） |
+| `roles[].kind` | 閉じた列挙 `executive` / `department` / `staff` / `assistant` |
+| 所属 | `roles[].department_id`。**非nullは6件のみ**（`department` kind だけ）。`executive` / `staff` / `assistant` は `null` = 部署に属さない |
+| 参照整合性 | `roles[].department_id` の集合が `departments[].id` の集合と一致することを確認済み |
 
-同一社員が複数sessionで同時に動く場合の扱い（席が2つになるのか、1席に集約するのか）も未決です。
+**条件1の「社長室」と「未所属」について（重要）**
 
-### 4.3 「15名」「6部署」を定数として持つか — **未決**
+- **社長室は org 定義から作れません。**歩は `roles` に存在しないため、社長室区画を org snapshot から
+  projection することはできません。Quest 側は歩を既に `state.player` として event から分離して
+  保持しています（§1.5）。したがって社長室は **org snapshot 由来ではなく player 由来の区画**として
+  扱う必要があります。これは §3.1 の入力契約の想定と異なるため、**PR-4 の layout 設計で
+  区画種別「社長室」の供給元を player 側に読み替えます**（この読み替え自体が PR-1 の確認成果です）。
+- **「未所属」は org 定義に区画として存在しません。**存在するのは `department_id: null` の役職 9件
+  （executive 4 / staff 1 / assistant 4）です。「未所属」区画は **Quest 側が projection で作る器**であって、
+  org 側の宣言ではありません。§2.3 の「roster外actorを未所属へ」という規則は維持しつつ、
+  **`department_id: null` の roster 社員も同じ器に入る**ことを PR-3 の実装契約に含めます。
 
-現時点の判断は「持たない」（数はrosterの結果）です。ただしこれは
-「条件が満たされたことをどう検証するか」と衝突します。
-rosterが14名になったとき、それは正常な変更なのか回帰なのか。
-**org定義側で人数が固定されている保証があるかどうか（§4.1）で答えが変わります。**
+### 4.2 roster社員 ↔ runtime actor の照合key — **確認済み（設計記録の想定を訂正）**
 
-### 4.4 現行 `seat` field の後方互換 — **未決**
+**bare `agent_id` ではありません。照合keyは `runtime_agent_type` です。**
 
-`Desk.seat`（`quest-view.js:643`）は現在「actor index+1」です。
-固定着席の席番号を同じfieldに載せると意味が静かに変わり、
-`quest-world.js:492` の `normalizeDesk` と `test/ui-world.test.ts` の前提に影響します。
-別fieldとして導入する（§3.2）のが安全ですが、両方を並存させる期間の扱いは未決です。
+§3.2 は「成立するのはbare `agent_id` 側だけに見える」と書いていましたが、これは誤りでした。
+実際には**専用の照合fieldが既に wire 上に存在し、両端で繋がっています**:
 
-### 4.5 org snapshotの供給経路 — **未決**
+| 層 | 事実 |
+|---|---|
+| ai-company `org.snapshot.json` | `roles[].runtime_agent_type` を持つ。値は Agent frontmatter の `name` の**実値**から補完される（手入力は禁止・`org.yaml` 冒頭コメント） |
+| ai-company emitter | `scripts/quest-hook-emit.py` が `agent.type` に `agent_type` をサニタイズして載せる。同 file のコメントが「downstream の照合（`runtime_agent_type` との突き合わせ）」を明示している |
+| Quest hook adapter | `src/domain/hookAdapter.ts:205` — `runtime_agent_type: wire.agent.type` |
+| Quest wire | `runtime_agent_type` は19 keyのうちの1つ（`src/domain/wire.ts:26,49,74`） |
+| Quest validator | `src/domain/validate.ts:188-189` が `LABEL_SLUG` で検証する nullable label として受理 |
 
-環境変数によるpath指定、固定path、ai-company側からの受け渡しのいずれか。
-現行の `QUEST_INPUT_PATH` と同じく**設定由来のpathのみ**という境界は動かせません
-（`README.md:376`: event内容からpathを組み立てない）が、
-新しい環境変数を増やすかどうかは§4.1の結論に依存します。
+**文法の互換性を機械的に確認済み**（観測時点の15件すべて）:
 
-### 4.6 LIVE/DEMO それぞれのorg snapshot — **未決**
+- 15件の `runtime_agent_type` すべてが Quest の `LABEL_SLUG` (`^[A-Za-z0-9_.:@#| -]{1,128}$`) に一致
+- 15件すべてが `ID_SLUG` にも一致
+- 15件の `runtime_agent_type` は**一意**
+- 観測時点では全件で `roles[].id` と `runtime_agent_type` が同値だが、**これは偶然であり同一視しない**
+  （前者は org 定義の識別子、後者は Agent 定義の実値で、供給元が別）。照合には必ず
+  `runtime_agent_type` を使う
 
-DEMOは「固定13 event・timerも乱数も外部I/Oも無し」（`README.md:80-81`）です。
-DEMO用のorg snapshotをfixtureとして持つのか、DEMOではorg機能を無効にするのかは未決。
-**DEMO stateがLIVEへ混ざらないという不変条件（`README.md:302-310`）は、どちらを選んでも維持します。**
+**`session_id` は照合に使いません。**固定 roster は特定 session に属さないためです。
+`ActorDirectory` の scoped key はそのまま runtime 側の同定に使い続け、roster との突き合わせだけを
+`runtime_agent_type` で行います。
 
-### 4.7 縮退状態をどの表示面で示すか — **未決**
+**同一社員が複数 session で同時に動く場合 — 設計判断: 1席に集約する。**
+roster の席は「社員」に属し session には属しません。同一 `runtime_agent_type` を持つ actor が
+複数在席する場合、席は1つのまま、その席の状態は**在席中の actor 群から決定論的に決めます**
+（決め方の規則は PR-3 の実装範囲）。席を session 数だけ増やすと「15名固定着席」が壊れるため採りません。
+roster 外 actor は従来どおり未所属区画へ置き、捨てません。
 
-現行bannerは8 codeの閉じた語彙で、**常にちょうど1 codeだけ**表示されます
-（`src/ui/public/quest-view.js:712` `BANNER_CODES`、`README.md:202-211`）。
-org縮退を既存bannerで示す場合、stream側の `FAIL_CLOSED` / `DISCONNECTED` を
-org側のcodeが押しのけて **stream異常を隠す** 可能性があります。したがって
+### 4.3 「15名」「6部署」を定数として持つか — **設計判断: 持たない**
 
-- 既存bannerの語彙を1 code増やすのか
-- bannerとは別の閉じた語彙のstatus表示面を置くのか
+観測時点では 15名 / 6部署 / 7施設ですが、**org 定義側にこの件数を固定する仕組みはありません**
+（`org.schema.json` に件数の下限・上限はなく、`departments` / `roles` は可変長配列）。
+したがって「15」「6」は**rosterの結果**であり、Quest 側の定数にしません。
 
-は未決です。**どちらを選んでも「閉じた語彙のみ・自由記述なし」「stream状態を隠さない」は満たす**必要があり、
-この決定はorg-backed UIを有効化するPR（§5 PR-3）の前提です。
-**決定するのは §5 PR-1** です（どちらの表示面を採るかという設計判断までをdocsで確定し、
-code名・schema・実装はPR-1では決めません）。
+条件が満たされたことの検証は、件数の定数比較ではなく**取り込んだ snapshot 自身に対する不変条件**で行います
+（例: 全 roster 社員に席がちょうど1つ / 席座標が roster 順から決定論的 / actor 増減で既存席が動かない）。
+「15名着席」は、観測した snapshot を fixture として使った時にちょうど15席になることを示す
+**回帰 test** として表現します（定数の焼き込みではなく fixture に対する事実）。
+
+### 4.4 現行 `seat` field の後方互換 — **設計判断: 別fieldとして導入し、`seat` の意味は変えない**
+
+`Desk.seat`（`src/ui/public/quest-view.js:643`）は「並べ替え後の actor index+1」のまま据え置きます。
+固定着席の席番号は**別 field** として導入します（field名は PR-3 / PR-4 の実装範囲）。
+
+並存期間の扱い — **設計判断**: org snapshot が採用されていない間は現行 `seat` のみが意味を持ち、
+採用された後は両方が存在します。`normalizeDesk`（`quest-world.js:492`）と `test/ui-world.test.ts` の
+既存前提は変更しません。**片方だけを見て他方を推測することを禁止**し、どちらの field も
+「無ければ無い」として扱います（欠損を index で補完しない）。
+
+### 4.5 org snapshotの供給経路 — **設計判断: 設定由来のpathのみ。新しい環境変数を1本増やす**
+
+現行の `QUEST_INPUT_PATH` と同じ境界を維持します（**event 内容から path を組み立てない**・
+`README.md:376`）。org snapshot も**設定由来の path からのみ**読み、既定は「未設定 = org機能なし」です。
+
+- 環境変数を**1本**追加する（変数名は PR-2 の実装範囲。この文書では固定しません）
+- **cross-repository の固定 path を焼き込みません。**`ai-company` の位置を Quest が知っている前提を作らない
+- 読むのは `company/org.yaml` ではなく **`company/org.snapshot.json`**（検証済みスナップショット）です。
+  yaml parser を Quest に持ち込まず、`ai-company` 側の検証（`validate_org.py`）を経た成果物だけを受けます。
+  これは「Quest は組織の意味を発明しない」（§2.1）と一致します
+- 未設定 / 読めない / 検証に落ちる → **org機能のみ無効**（現行表示へ縮退）。**ingest は halt させません**
+
+### 4.6 LIVE/DEMO それぞれのorg snapshot — **設計判断: DEMOは組み込みfixture、LIVEは設定path**
+
+DEMO の不変条件（固定 event・timer なし・乱数なし・**外部I/Oなし**・`README.md:80-81`）を維持するため、
+DEMO で file を読むことはしません。
+
+- **DEMO**: 組み込みの org fixture を使う（`src/demo/fixtures.ts` と同じ扱いの静的データ）。
+  これにより DEMO だけで区画・固定着席・縮退表示のすべてを再現できます
+- **LIVE**: §4.5 の設定 path のみ。未設定なら org 機能なしで動作する
+- **DEMO state が LIVE へ混ざらない不変条件（`README.md:302-310`）は維持します。**
+  DEMO fixture は LIVE 保存領域へ書かず、LIVE 経路は DEMO fixture を参照しません
+
+### 4.7 縮退状態をどの表示面で示すか — **設計判断: bannerとは別の、閉じた語彙の第2 status面**
+
+既存 banner は**常にちょうど1 code**だけを表示します（`src/ui/public/quest-view.js:712` `BANNER_CODES`、
+`README.md:202-211`）。org 縮退を既存 banner の語彙に足すと、org 側の code が
+`FAIL_CLOSED` / `DISCONNECTED` を押しのけて **stream 異常を隠す**ため、採りません。
+
+**採用: banner とは別の、閉じた語彙の第2 status 表示面を置く。**
+
+- 判断基準は維持: **閉じた語彙のみ・自由記述なし・stream 状態を隠さない**
+- 第2面は org 専用ではなく**汎用の第2 status 面**として設計します
+  （[loop-control-plane-design.md](loop-control-plane-design.md) §14 の推奨と一致）。
+  将来 run state・承認待ち・stall が同じ面を使えるようにし、表示面を2度決めません
+- **LCP-1 との関係（重要）**: 本文書冒頭の改訂注記は §4.7 の決定を LCP-1 の語彙確定に依存させていました。
+  ここでは**表示面の存在と契約**（第2面である・閉じた語彙である・banner を隠さない）までを確定し、
+  **語彙の中身は org 分だけ先に定義**します。run state 側の code は LCP-1 確定後に同じ面へ追加します。
+  これにより PR-3 は LCP-1 を待たずに着手できます
+- 具体的な code 名・文言・DOM 構造は **PR-3 の実装範囲**です（この文書では決めません）
 
 ---
 
@@ -287,16 +367,32 @@ code名・schema・実装はPR-1では決めません）。
 **同じPRで**必ず含みます。表示契約が入るまでは、org snapshotを読み・検証・保持していても
 UIはorg非対応のまま据え置き、無言の縮退状態を作りません。
 
-### PR-1: org定義の事実確認と入力契約の確定（分類A: docs のみ）
+### PR-1: org定義の事実確認と入力契約の確定（分類A: docs のみ）— ✅ **完了**（Issue #23）
+
+**§4 が「未決事項」から「確認結果」に変わりました。**§4.1〜§4.6 は `ai-company` の実物に対する
+観測結果、§4.7 は現行 `BANNER_CODES` の事実に基づく設計判断です。PR-2 の着手条件は満たされています。
+
+主要な確認結果（詳細は §4）:
+
+| # | 結論 |
+|---|---|
+| 4.1 | 実在。読む対象は `company/org.snapshot.json`（検証済み）。**6部署 / 15役職 / 7共用施設**。**社長室は org 定義に無い**（player 由来で扱う）。「未所属」は Quest 側が作る器 |
+| 4.2 | 照合keyは **`runtime_agent_type`**（bare `agent_id` ではない）。wire に既存・両端で接続済み・15件すべて文法互換を機械確認 |
+| 4.3 | 件数は定数にしない。fixture に対する回帰 test で表現する |
+| 4.4 | `seat` の意味は変えず、固定席番号は別 field |
+| 4.5 | 設定由来 path のみ。環境変数を1本追加。cross-repo の固定 path は焼き込まない |
+| 4.6 | DEMO は組み込み fixture（外部I/Oなし）、LIVE は設定 path |
+| 4.7 | banner とは別の**汎用の第2 status 面**。表示面の契約までを確定し、語彙は org 分から始める（LCP-1 を待たない） |
 
 - **前提**: なし
 - **成果契約**: §4.1〜§4.7 の未決事項に対する**確認結果**をこの文書へ追記する。org定義が実在するなら、そのkeyと値域を「観測した事実」として記録する。§4.1〜§4.6 は外部事実の確認、**§4.7 は事実確認（現行 `BANNER_CODES` が単一codeであること）に基づく設計判断**で、「既存bannerの語彙を1増やす / 別の閉じた語彙のstatus面を置く」のどちらを採るかと、その判断基準（閉じた語彙のみ・自由記述なし・stream状態を隠さない）をこの文書で確定する
 - **対象外**: schema定義、code変更、環境変数追加、**新規のfield名・関数名**（PR-2 / PR-3の実装範囲）、**§4.7で採る側の具体的なcode名・文言・DOM構造**（PR-3の実装範囲）
 - **完了判定**: §4.1〜§4.7 の未決事項がすべて「確認済み」「設計判断済み」「実在しないため対象外」のいずれかに変わっている
+  → **達成**（§4 参照）
 
 ### PR-2: org snapshot読み取りと検証（分類B: code、runtime影響あり）
 
-- **前提**: PR-1
+- **前提**: PR-1 → ✅ **充足済み**
 - **成果契約**: org snapshotを読み、`src/domain/validate.ts` と同等の禁止内容checkを通し、検証失敗時はfail closed（org機能のみ無効、ingestはhaltさせない）。`QuestState` へ**独立fieldとして**置く（**field名はこのPRで決める**。この文書では固定しない）。`reduce` は触らない。あわせて **採用 / 不在 / 拒否のいずれであるかを閉じた語彙で読み取れる状態**を同じ独立fieldに保持する（拒否理由は field名 + rule名のみ・§2.4）。表示面の選択は§4.7の結論に従う
 - **対象外**: UI（org非対応の現行表示のまま据え置く）、layout、wire schema変更、SSE frame追加
 - **完了判定**: 不正なsnapshotが1件でもあればorg全体を不採用にするtestが通る。採用/不在/拒否の状態が閉じた語彙で読めるtestが通る。既存のingest系testが全て不変。**UIの描画結果が現行と一致する**（このPRではorg-backed UIを有効化しない）
@@ -305,7 +401,7 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 
 **最初のorg-backed UI consumerであるため、縮退表示契約をこのPRに同梱します**（§2.4順序制約・§4.7）。
 
-- **前提**: PR-2（§4.7 の決定はPR-1で確定済み）
+- **前提**: PR-2（§4.7 の決定は PR-1 で確定済み → 第2 status 面。**LCP-1 の完了を待ちません** — §4.7）
 - **成果契約**: §2.3 の3規則を純粋関数として実装（**関数名・DOM構造・表示codeはこのPRで決める**。この文書では固定しない）。対応actor不在のroster社員に状態を捏造せず、roster外actorを未所属へ置く。DOM側の社員一覧に区画groupingを反映。**同時に**、PR-2が保持する採用/不在/拒否の状態を閉じた語彙で表示し、org非採用時は現行表示へ縮退したことを利用者へ示す。stream側の状態表示を隠さない
 - **対象外**: canvas layout、席座標、自由記述メッセージ
 - **完了判定**: §3.2 の検証方法 ④⑤⑥⑦ と §3.1 検証方法 ③ が通る。org拒否時に無言で現行表示へ落ちるcaseがtestで再現できない
