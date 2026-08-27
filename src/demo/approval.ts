@@ -23,7 +23,10 @@
  *   player; there is no LIVE player and no namespace argument to point at one.
  * - not unbounded. A line longer than `MAX_SIGNAL_CHARS` is discarded rather
  *   than buffered, so a process writing endlessly without a newline cannot grow
- *   this reader's memory, and the discarded line can never partially match.
+ *   this reader's memory, and the discarded line can never partially match. The
+ *   limit is the line's, not the leftover buffer's: a line that arrives whole,
+ *   newline and all, in one write is measured exactly like one that arrives in
+ *   pieces, so padding a command out to hide it behind the limit does nothing.
  */
 
 import type { ApprovalOutcome } from './timeline.ts';
@@ -31,7 +34,7 @@ import type { ApprovalOutcome } from './timeline.ts';
 /** The only word this reader acts on. Compared after trimming and lowercasing. */
 export const APPROVAL_COMMAND = 'approve';
 
-/** Longest line held while waiting for its newline. Anything longer is dropped. */
+/** Longest line this reader will read at all. Anything longer is refused. */
 export const MAX_SIGNAL_CHARS = 64;
 
 /**
@@ -74,9 +77,15 @@ export class ApprovalSignalReader {
     for (;;) {
       const newline = rest.indexOf('\n');
       if (newline === -1) break;
-      const line = this.#partial + rest.slice(0, newline);
+      // The limit is applied to the whole line, before the line is assembled or
+      // classified. Measuring only the leftover after the last newline would let
+      // a line that arrived complete - padding, command and newline in one write
+      // - be classified unmeasured, and `<64 spaces>approve` trims to `approve`.
+      // The length is read off the newline's index so an over-long line is never
+      // copied out of the chunk either.
+      const tooLong = this.#discarding || this.#partial.length + newline > MAX_SIGNAL_CHARS;
+      const signal = tooLong ? 'unrecognized' : classify(this.#partial + rest.slice(0, newline));
       rest = rest.slice(newline + 1);
-      const signal = this.#discarding ? 'unrecognized' : classify(line);
       this.#partial = '';
       this.#discarding = false;
       this.counts[signal] += 1;
@@ -84,13 +93,15 @@ export class ApprovalSignalReader {
     }
 
     if (this.#discarding) return signals;
-    this.#partial += rest;
-    if (this.#partial.length > MAX_SIGNAL_CHARS) {
+    if (this.#partial.length + rest.length > MAX_SIGNAL_CHARS) {
       // Dropped, not truncated: a truncated line could end in `approve` and be
       // acted on, which is exactly what an over-long line must not be able to do.
+      // Dropped before the append, so the over-long text is never held at all.
       this.#partial = '';
       this.#discarding = true;
+      return signals;
     }
+    this.#partial += rest;
     return signals;
   }
 }

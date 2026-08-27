@@ -238,6 +238,58 @@ test('an over-long line is dropped rather than buffered or truncated', () => {
   assert.deepEqual(reader.read(`${APPROVAL_COMMAND}\n`), ['approve']);
 });
 
+test('a line completed inside one chunk gets the same length limit as a fragmented one', () => {
+  // The hole this case exists for: the limit used to be checked only on the
+  // leftover after the last newline, so a line that arrived complete - padding,
+  // command and newline in a single write - was classified without ever being
+  // measured. `MAX_SIGNAL_CHARS` spaces followed by `approve` then reads as
+  // `approve`, and a person who never typed approves the mission.
+  const padded = `${' '.repeat(MAX_SIGNAL_CHARS)}${APPROVAL_COMMAND}\n`;
+  assert.deepEqual(new ApprovalSignalReader().read(padded), ['unrecognized'], 'an over-long line is refused whole');
+
+  // Arriving in pieces must reach the same verdict; that is the point of judging
+  // the line rather than the leftover.
+  const fragmented = new ApprovalSignalReader();
+  assert.deepEqual(fragmented.read(' '.repeat(MAX_SIGNAL_CHARS)), []);
+  assert.deepEqual(fragmented.read(`${APPROVAL_COMMAND}\n`), ['unrecognized'], 'the same line, split, is refused too');
+
+  // The boundary itself: at the limit it is still a line, one over it is not.
+  const atLimit = `${' '.repeat(MAX_SIGNAL_CHARS - APPROVAL_COMMAND.length)}${APPROVAL_COMMAND}\n`;
+  assert.deepEqual(new ApprovalSignalReader().read(atLimit), ['approve'], 'exactly at the limit is still read');
+  const overLimit = `${' '.repeat(MAX_SIGNAL_CHARS - APPROVAL_COMMAND.length + 1)}${APPROVAL_COMMAND}\n`;
+  assert.deepEqual(new ApprovalSignalReader().read(overLimit), ['unrecognized'], 'one character over it is not');
+});
+
+test('an over-long line poisons only itself, wherever it sits in the chunk', () => {
+  const flood = 'x'.repeat(MAX_SIGNAL_CHARS * 4);
+  const reader = new ApprovalSignalReader();
+
+  // Several lines in one write, the middle one over the limit: the over-long one
+  // is refused and its neighbours are read normally, in order.
+  assert.deepEqual(
+    reader.read(`${APPROVAL_COMMAND}\n${flood}${APPROVAL_COMMAND}\n${APPROVAL_COMMAND}\n`),
+    ['approve', 'unrecognized', 'approve'],
+  );
+  assert.deepEqual(reader.counts, { approve: 2, blank: 0, unrecognized: 1 });
+
+  // And an over-long line does not bleed into what follows it in the same chunk.
+  const trailing = new ApprovalSignalReader();
+  assert.deepEqual(trailing.read(`${flood}\n${APPROVAL_COMMAND}\n`), ['unrecognized', 'approve']);
+});
+
+test('a huge newline-terminated write is refused without being held', () => {
+  // A megabyte with a newline on the end used to be copied into `line` and
+  // classified; nothing about it may be buffered or acted on.
+  const reader = new ApprovalSignalReader();
+  const huge = 'x'.repeat(1_000_000);
+  assert.deepEqual(reader.read(`${huge}\n`), ['unrecognized']);
+  assert.deepEqual(reader.read(`${huge}${APPROVAL_COMMAND}\n`), ['unrecognized'], 'even ending in the command word');
+  assert.deepEqual(reader.read(huge), [], 'and an unterminated one is dropped, not held');
+  assert.deepEqual(reader.read('\n'), ['unrecognized']);
+  assert.deepEqual(reader.read(`${APPROVAL_COMMAND}\n`), ['approve'], 'the reader still works afterwards');
+  assert.deepEqual(reader.counts, { approve: 1, blank: 0, unrecognized: 3 });
+});
+
 // ------------------------------------------------------------ the console ---
 
 /** A stand-in for `process.stdin`: the four calls the console actually makes. */
@@ -313,6 +365,28 @@ test('typing it twice does not advance twice', () => {
   assert.equal(player.progress, GATE_INDEX + 2, 'and one beat');
   assert.equal(written.filter((line) => /承認を受け付けました/.test(line)).length, 1);
   assert.equal(written.filter((line) => /承認待ちのものはありません/.test(line)).length, 2);
+});
+
+test('an over-long line typed at the gate approves nothing', () => {
+  // The same hole, at the place it would have mattered: the gate is still shut
+  // afterwards, and the ordinary word still opens it.
+  const store = demoStore();
+  const player = playerFor(store);
+  const { input, written } = consoleFor(player);
+  stepToGate(player);
+
+  input.emit(`${' '.repeat(MAX_SIGNAL_CHARS)}${APPROVAL_COMMAND}\n`);
+  input.emit(`${'x'.repeat(MAX_SIGNAL_CHARS * 4)}\n${' '.repeat(MAX_SIGNAL_CHARS * 2)}${APPROVAL_COMMAND}\n`);
+  assert.equal(player.awaitingApproval, true, 'no padded line approved anything');
+  assert.equal(player.approvals, 0);
+  assert.equal(player.progress, GATE_INDEX + 1);
+  assert.equal(resumeBeatIngested(store), false);
+  assert.equal(written.length, 3, 'each was answered as unrecognized, and nothing else');
+  assert.equal(written.every((line) => /認識できない/.test(line)), true);
+
+  input.emit(`${APPROVAL_COMMAND}\n`);
+  assert.equal(player.approvals, 1, 'and a real approval still works');
+  assert.equal(resumeBeatIngested(store), true);
 });
 
 test('detaching leaves nothing attached and nothing later can resume the run', () => {
