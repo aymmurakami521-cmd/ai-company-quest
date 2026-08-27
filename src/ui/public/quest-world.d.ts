@@ -5,7 +5,7 @@
  * contract is declared here and exercised by `test/ui-world.test.ts`.
  */
 
-import type { ActorVisualState, Desk, Header, PlayerProjection } from './quest-view.js';
+import type { ActorDisplayState, Desk, Header, PlayerProjection } from './quest-view.js';
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
@@ -29,7 +29,7 @@ export type WorldActor = {
   seat: number;
   actor_key: string;
   session_id: string;
-  state: ActorVisualState | string;
+  state: ActorDisplayState | string;
   symbol: string;
   code: string;
   is_main_orchestrator: boolean;

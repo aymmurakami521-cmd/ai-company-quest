@@ -27,7 +27,18 @@ export type QuestConfig = {
   pollIntervalMs: number;
   maxLineBytes: number;
   startFrom: 'beginning' | 'end';
+  /** `QUEST_DEMO=1`: fold the fixed fixtures in at startup, in one go. */
   seedDemo: boolean;
+  /**
+   * `QUEST_DEMO_PLAY=1`: play the scripted mission instead, starting when the
+   * first DEMO subscriber connects. The two are independent - the still frame
+   * and the moving picture are different demos, not two settings of one.
+   */
+  demoPlay: boolean;
+  /** Gap between beats of the scripted mission. */
+  demoPlayIntervalMs: number;
+  /** Gap before its first beat; see `DemoPlayerOptions.firstDelayMs`. */
+  demoPlayFirstDelayMs: number;
   playerName: string;
 };
 
@@ -68,6 +79,9 @@ export function loadConfig(env: EnvLike): QuestConfig {
     maxLineBytes: readInt(env, 'QUEST_MAX_LINE_BYTES', DEFAULT_MAX_LINE_BYTES, 256, 8 * 1024 * 1024),
     startFrom: rawStartFrom,
     seedDemo: env['QUEST_DEMO'] === '1',
+    demoPlay: env['QUEST_DEMO_PLAY'] === '1',
+    demoPlayIntervalMs: readInt(env, 'QUEST_DEMO_PLAY_INTERVAL_MS', 1500, 100, 60_000),
+    demoPlayFirstDelayMs: readInt(env, 'QUEST_DEMO_PLAY_FIRST_DELAY_MS', 1200, 0, 60_000),
     playerName,
   };
 }

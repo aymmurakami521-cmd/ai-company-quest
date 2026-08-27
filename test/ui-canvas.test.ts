@@ -19,9 +19,9 @@ import { seedDemoStore } from '../src/demo/fixtures.ts';
 import type { QuestState } from '../src/domain/reducer.ts';
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
 
-import type { ActorVisualState, Desk, Header } from '../src/ui/public/quest-view.js';
+import type { ActorDisplayState, Desk, Header } from '../src/ui/public/quest-view.js';
 import {
-  ACTOR_VISUAL_STATES,
+  ACTOR_LEGEND_STATES,
   applySnapshot,
   createClientState,
   selectDesks,
@@ -85,7 +85,7 @@ function texts(ops: readonly Op[]): string[] {
 
 const VIEWPORT = { width: 960, height: 560, dpr: 2 };
 
-function desk(seat: number, state: ActorVisualState, overrides: Partial<Desk> = {}): Desk {
+function desk(seat: number, state: ActorDisplayState, overrides: Partial<Desk> = {}): Desk {
   return {
     seat,
     actor_key: `sess-1::agent-${seat}`,
@@ -100,6 +100,10 @@ function desk(seat: number, state: ActorVisualState, overrides: Partial<Desk> = 
     event_count: 1,
     selected: false,
     visual: visualForState(state),
+    // A helper desk is a live one: the stream is confirming it, so its effective
+    // visual and its last observed visual are the same thing.
+    stale: false,
+    last_known_visual: visualForState(state),
     ...overrides,
   };
 }
@@ -313,7 +317,7 @@ test('each visual state gets its own silhouette, not just its own colour', () =>
   const signatures = new Map<string, string>();
   const colors = new Set<string>();
 
-  for (const state of ACTOR_VISUAL_STATES) {
+  for (const state of ACTOR_LEGEND_STATES) {
     const world = buildWorld({ desks: [desk(1, state)], header: emptyHeader(), viewport: VIEWPORT });
     const actor = world.actors[0];
     assert.ok(actor !== undefined);
@@ -333,9 +337,32 @@ test('each visual state gets its own silhouette, not just its own colour', () =>
     colors.add(STATE_COLORS[state] ?? '');
   }
 
-  assert.equal(new Set(signatures.values()).size, ACTOR_VISUAL_STATES.length, 'five distinguishable shapes');
-  assert.equal(colors.size, ACTOR_VISUAL_STATES.length, 'and five distinguishable colours as a second cue');
-  assert.equal(new Set(Object.values(MARKER_BITMAPS).map((rows) => rows.join('/'))).size, ACTOR_VISUAL_STATES.length);
+  assert.equal(
+    new Set(signatures.values()).size,
+    ACTOR_LEGEND_STATES.length,
+    'one distinguishable shape per displayable state',
+  );
+  assert.equal(
+    colors.size,
+    ACTOR_LEGEND_STATES.length,
+    'and one distinguishable colour per state as a second cue',
+  );
+  assert.equal(
+    new Set(Object.values(MARKER_BITMAPS).map((rows) => rows.join('/'))).size,
+    ACTOR_LEGEND_STATES.length,
+  );
+  // A state with no entry of its own would silently paint as `idle`, which is
+  // exactly the kind of quiet wrong answer this screen must not give.
+  for (const state of ACTOR_LEGEND_STATES) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(MARKER_BITMAPS, state),
+      `${state} has its own marker, not the idle fallback`,
+    );
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(STATE_COLORS, state),
+      `${state} has its own colour, not the idle fallback`,
+    );
+  }
 });
 
 test('the same actor is painted the same way whatever its neighbours are doing', () => {

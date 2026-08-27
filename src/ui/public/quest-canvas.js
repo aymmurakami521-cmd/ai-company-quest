@@ -53,10 +53,12 @@ export const PALETTE = Object.freeze({
 /** Per-state accent, used together with - never instead of - the marker shape. */
 export const STATE_COLORS = Object.freeze({
   working: '#56d97e',
+  planning: '#c79bff',
   awaiting_approval: '#ffb347',
   error: '#ff6b6b',
   ended: '#99a2b8',
   idle: '#6ec5ff',
+  unknown: '#8b8fa3',
 });
 
 /**
@@ -65,10 +67,12 @@ export const STATE_COLORS = Object.freeze({
  */
 export const MARKER_BITMAPS = Object.freeze({
   working: Object.freeze(['#....', '##...', '###..', '##...', '#....']),
+  planning: Object.freeze(['..#..', '.###.', '#####', '.###.', '..#..']),
   awaiting_approval: Object.freeze(['..#..', '..#..', '..#..', '.....', '..#..']),
   error: Object.freeze(['#...#', '.#.#.', '..#..', '.#.#.', '#...#']),
   ended: Object.freeze(['#####', '#...#', '#...#', '#...#', '#####']),
   idle: Object.freeze(['.....', '.....', '#.#.#', '.....', '.....']),
+  unknown: Object.freeze(['.###.', '...#.', '..##.', '.....', '..#..']),
 });
 
 const MONOSPACE = 'ui-monospace, monospace';

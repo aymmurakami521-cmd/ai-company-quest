@@ -19,11 +19,13 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
 
-import type { ActorVisualState, Desk, Header } from '../src/ui/public/quest-view.js';
+import type { ActorDisplayState, ActorVisualState, Desk, Header } from '../src/ui/public/quest-view.js';
 import {
+  ACTOR_LEGEND_STATES,
   ACTOR_VISUAL_STATES,
   BANNER_CODES,
   applyFrame,
@@ -401,6 +403,8 @@ test('an office larger than the canvas still lists every actor in the DOM', () =
     event_count: 1,
     selected: false,
     visual: visualForState('idle'),
+    stale: false,
+    last_known_visual: visualForState('idle'),
   }));
 
   const world = buildWorld({
@@ -455,5 +459,106 @@ test('the accessibility layer needs no new asset, dependency or request', () => 
     const text = assetText(pathname);
     assert.equal(/https?:\/\//.test(text), false, `${pathname}: external URL`);
     assert.equal(/@import|url\(/.test(text), false, `${pathname}: external asset`);
+  }
+});
+
+test('every displayable state has its own colour rule, in the CSS that ships', () => {
+  // The desk and legend fall back to the idle colour for a state with no rule of
+  // its own. That fallback is silent, so a state added to the vocabulary without
+  // a matching rule would render as a plausible wrong colour rather than fail.
+  for (const state of ACTOR_LEGEND_STATES) {
+    assert.ok(
+      CSS.includes(`--state-${state}:`),
+      `quest.css defines a --state-${state} token`,
+    );
+    assert.ok(
+      CSS.includes(`.desk[data-state='${state}']`),
+      `quest.css binds the desk colour for ${state}`,
+    );
+    assert.ok(
+      CSS.includes(`.legend__row[data-state='${state}']`),
+      `quest.css binds the legend swatch for ${state}`,
+    );
+  }
+});
+
+test('every desk slot the app fills exists in the shipped template and in the fake DOM', () => {
+  // Three copies of the same list have to agree: the <template> the browser
+  // clones, the selectors `quest-app.js` fills, and the slots `test/fakeDom.ts`
+  // provides. A slot missing from the page makes `querySelector` return null and
+  // the desk list stop rendering; one missing from the fake DOM makes the
+  // focus-retention suite blind. Both have happened, so both are pinned here.
+  const fake = readFileSync(new URL('./fakeDom.ts', import.meta.url), 'utf8');
+  const filled = new Set(
+    [...APP.matchAll(/'(\.desk__[a-z-]+)'/g)].map((match) => (match[1] as string).slice(1)),
+  );
+  assert.ok(filled.size >= 8, 'the selectors were actually found in the app');
+  for (const slot of filled) {
+    assert.ok(HTML.includes(`class="${slot}"`), `index.html has a .${slot} element`);
+    assert.ok(fake.includes(`'${slot}'`), `test/fakeDom.ts provides a .${slot} slot`);
+  }
+});
+
+test('a frozen desk keeps what was last observed, in text', () => {
+  // The freeze must be readable without the palette: the state itself says
+  // 状態不明 and this line names what it was, so nothing is silently dropped.
+  assert.ok(HTML.includes('class="desk__frozen"'), 'the template carries the frozen line');
+  assert.ok(HTML.includes('凍結'), 'and labels it in text, not by colour');
+  assert.ok(APP.includes('停止時点'), 'the app names the last observed state');
+  assert.ok(APP.includes('frozen.hidden = !desk.stale'), 'and shows it only while stale');
+});
+
+test('the detail panel is named, referenced, and not a second live region', () => {
+  assert.ok(HTML.includes('id="detail-panel"'), 'the panel exists');
+  assert.ok(HTML.includes('id="detail-heading"'), 'and has a heading');
+  assert.ok(
+    HTML.includes('aria-labelledby="detail-heading"'),
+    'the region is named by that heading',
+  );
+  assert.ok(
+    HTML.includes('aria-controls="detail-panel"'),
+    'the desk select button says what it controls',
+  );
+
+  // Selecting a colleague must not interrupt a screen reader mid-sentence, so
+  // the banner stays the only live region on the page.
+  const liveRegions = HTML.match(/aria-live=/g) ?? [];
+  assert.equal(liveRegions.length, 1, 'exactly one live region on the page');
+  const statuses = HTML.match(/role="status"/g) ?? [];
+  assert.equal(statuses.length, 1, 'and exactly one role="status"');
+});
+
+test('the detail panel opens no request and injects no markup', () => {
+  // Selection stays a screen-local fact: it must not become a fetch, and stream
+  // text must not become HTML.
+  assert.equal(/innerHTML|insertAdjacentHTML|outerHTML/.test(APP), false, 'nothing becomes markup');
+  assert.equal(/fetch\(|XMLHttpRequest|\.src\s*=/.test(APP), false, 'the app opens no new request');
+});
+
+test('the detail panel says what the contract cannot supply', () => {
+  // A blank row reads as "there was none of that". These rows say something
+  // different and more accurate: this stream does not carry it.
+  assert.ok(APP.includes('NOT_REPORTED'), 'unreported facts are labelled');
+  assert.ok(APP.includes('NO_EVIDENCE_IN_CONTRACT'), 'and missing evidence is explained');
+  assert.ok(HTML.includes('担当タスク'), 'the task row exists');
+  assert.ok(HTML.includes('最新の概要'), 'and is a different row from the event summary');
+});
+
+test('the page requests nothing the asset table does not serve', () => {
+  // A 404 in the console is noise a reader has to rule out before trusting the
+  // rest of it. The only browser-initiated extra request is the favicon, and it
+  // is answered inline rather than by widening the served surface.
+  assert.ok(HTML.includes('rel="icon"'), 'the favicon request is answered');
+  assert.ok(HTML.includes('href="data:,"'), 'and answered with nothing, not a fetch');
+
+  // Every href/src in the document is either a data: URI or a path the fixed
+  // asset table serves.
+  const refs = [...HTML.matchAll(/(?:href|src)="([^"]+)"/g)].map((match) => match[1] as string);
+  for (const ref of refs) {
+    if (ref.startsWith('data:') || ref.startsWith('#')) continue;
+    assert.ok(
+      UI_ASSET_PATHS.includes(ref),
+      `${ref} is served by the asset table (nothing else may be requested)`,
+    );
   }
 });

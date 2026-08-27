@@ -34,14 +34,30 @@ export const PLAYER_NAME_MAX = 64;
 /** Ceiling on the client-side activity log. */
 export const MAX_LOG_ENTRIES = 50;
 
-/** Every visual state a desk can be in, in banner priority order. */
+/**
+ * Every visual state a *status label* can be classified into, in priority order.
+ *
+ * `unknown` is deliberately absent: it is not something a status can match, it
+ * is where the screen lands when it refuses to guess. See `classifyActor`.
+ */
 export const ACTOR_VISUAL_STATES = Object.freeze([
   'error',
   'awaiting_approval',
+  'planning',
   'working',
   'ended',
   'idle',
 ]);
+
+/**
+ * Every state the screen can actually display, including `unknown`.
+ *
+ * The legend and `selectHeader`'s per-state counts iterate this list, not
+ * `ACTOR_VISUAL_STATES`: a desk that lands on `unknown` must have a legend row
+ * to explain it and a counter bucket to land in. Counting into an uninitialised
+ * bucket would produce `NaN` in the header instead of a number.
+ */
+export const ACTOR_LEGEND_STATES = Object.freeze([...ACTOR_VISUAL_STATES, 'unknown']);
 
 /**
  * Visual vocabulary. Each state carries a symbol AND a readable label, so the
@@ -55,9 +71,16 @@ const ACTOR_VISUALS = Object.freeze({
     label: '承認待ち',
     symbol: '‼',
   }),
+  planning: Object.freeze({ state: 'planning', code: 'PLANNING', label: '計画中', symbol: '◆' }),
   working: Object.freeze({ state: 'working', code: 'WORKING', label: '作業中', symbol: '▶' }),
   ended: Object.freeze({ state: 'ended', code: 'ENDED', label: '完了 / 終了', symbol: '■' }),
   idle: Object.freeze({ state: 'idle', code: 'IDLE', label: '待機中', symbol: '⋯' }),
+  /**
+   * Not a state the session reported - the state the screen has when it will
+   * not guess. Reached two ways: a status label this vocabulary does not know,
+   * and a desk whose stream is no longer live (see `selectDesks`).
+   */
+  unknown: Object.freeze({ state: 'unknown', code: 'UNKNOWN', label: '状態不明', symbol: '?' }),
 });
 
 /**
@@ -74,9 +97,29 @@ const STATUS_TOKENS = Object.freeze({
     'approval', 'approve', 'approvals', 'permission', 'permissions', 'confirm', 'confirmation',
     'consent', 'authorize', 'authorization', 'ask', 'asking',
   ]),
+  /**
+   * Only labels that say the session is *in a planning phase*. Deliberately
+   * narrow: `thinking`, `reasoning` and `designing` are what an agent does while
+   * working, not a declared planning phase, so they stay in `working` below. The
+   * screen must never infer "planning" from a word that merely sounds like it.
+   *
+   * `statusTokens` splits on non-alphanumerics, so `plan_mode` and `plan-mode`
+   * both reduce to the `plan` token and are covered here.
+   */
+  planning: Object.freeze(['plan', 'planning']),
   working: Object.freeze([
     'active', 'running', 'run', 'working', 'work', 'busy', 'thinking', 'executing', 'execute',
     'streaming', 'started', 'start', 'progress', 'tool',
+    // `ok` is the outcome of one step, not the end of the actor: the LIVE
+    // adapter emits it for every successful `PostToolUse`, and a colleague whose
+    // last tool call succeeded is still at work. Without it here, every
+    // successful step in LIVE would read as 状態不明 - which is exactly what it
+    // did the first time this screen was opened against the scripted mission.
+    'ok',
+    // Listed explicitly so they classify as work rather than falling through to
+    // `unknown` now that an unrecognised label no longer guesses.
+    'reasoning', 'designing', 'design', 'implementing', 'implement', 'building', 'build',
+    'testing', 'test', 'reviewing', 'review', 'verifying', 'verify',
   ]),
   ended: Object.freeze([
     'ended', 'end', 'stopped', 'stop', 'completed', 'complete', 'done', 'finished', 'finish',
@@ -211,16 +254,25 @@ export function visualForState(state) {
  * The one place a desk's appearance is decided.
  *
  * - a recognised `status` wins, because it is what the session actually said;
- * - an unrecognised or absent status falls back to the `active` flag the shared
- *   reducer maintains;
  * - a "working" status on an actor the reducer has already deactivated reads as
- *   ended, since the stop event is the newer fact.
+ *   ended, since the stop event is the newer fact;
+ * - a status that is *present but unrecognised* reads as `unknown`. The producer
+ *   said something this screen cannot interpret, and reporting that honestly is
+ *   the only correct answer - guessing "working" or "idle" from the `active`
+ *   flag would be the screen inventing a state the session never claimed;
+ * - a status that is *absent* still falls back to `active`, because that flag is
+ *   a structural fact the shared reducer derives from `event_type` (an
+ *   `agent_start` happened, or an `agent_stop` did). That is an observation, not
+ *   a guess, which is why it survives while the case above does not.
  */
 export function classifyActor(actor) {
-  const active = actor !== null && actor !== undefined && actor.active === true;
-  const classified = classifyStatus(actor === null || actor === undefined ? null : actor.status);
+  const present = actor !== null && actor !== undefined;
+  const active = present && actor.active === true;
+  const status = present ? actor.status : null;
+  const classified = classifyStatus(status);
   if (classified === 'working' && !active) return ACTOR_VISUALS.ended;
   if (classified !== null) return ACTOR_VISUALS[classified];
+  if (typeof status === 'string' && status.length > 0) return ACTOR_VISUALS.unknown;
   return active ? ACTOR_VISUALS.working : ACTOR_VISUALS.idle;
 }
 
@@ -251,6 +303,38 @@ export function normalizeGapReason(value) {
 export function gapLabel(reason) {
   const token = normalizeGapReason(reason);
   return token === null ? null : GAP_LABELS[token];
+}
+
+/**
+ * Connection phases that mean "this office was being fed by a stream, and is
+ * not any more".
+ *
+ * `offline` is deliberately NOT one of them. It is the phase a client state is
+ * born in and the one it returns to when the namespace is switched, and both of
+ * those rebuild the office from empty - so `offline` means "no stream yet",
+ * never "the stream we had is gone". `connecting` is excluded for the same
+ * reason: it is the first moment of a fresh stream, before the snapshot that
+ * fills the office has even arrived.
+ *
+ * `error` and `reconnecting` are the two phases the app reports when a live
+ * stream drops, which is exactly the case this guards.
+ */
+const STALE_PHASES = Object.freeze(['reconnecting', 'error']);
+
+/**
+ * Whether what the screen holds is still being confirmed by a live stream.
+ *
+ * A halt (fail-closed) counts, and so does a socket that is gone or retrying:
+ * in every one of those cases the newest fact on screen is as old as the
+ * disconnection, and continuing to paint it as a current state would be the
+ * screen asserting something it cannot know. Deliberately derived from the
+ * connection the app already tracks - there is no age threshold and no clock
+ * here, so nothing goes stale merely because a session was quiet.
+ */
+export function isStale(connection) {
+  if (connection === null || connection === undefined) return true;
+  if (connection.halted === true) return true;
+  return STALE_PHASES.includes(connection.phase);
 }
 
 /** Connection banner. A halted (fail-closed) namespace outranks every phase. */
@@ -335,6 +419,9 @@ function emptyActor(wire) {
     status: null,
     active: false,
     last_tool: null,
+    last_summary: null,
+    last_event_type: null,
+    runtime_agent_type: null,
     last_event_ts: null,
     last_ingest_seq: 0,
     event_count: 0,
@@ -352,6 +439,9 @@ function logEntry(wire, visual) {
     ts: wire.ts,
     event_type: wire.event_type,
     actor: wire.agent_id === null ? UNATTRIBUTED_AGENT_LABEL : wire.agent_id,
+    // The identity, kept beside the display name so the detail view can filter
+    // this log to one desk without matching on a name two actors could share.
+    actor_key: wire.actor_key,
     session_id: wire.session_id,
     status: wire.status,
     tool_name: wire.tool_name,
@@ -382,9 +472,17 @@ export function applyEvent(state, wire, atMs = null) {
   let status = previousActor.status;
   let active = previousActor.active;
   let lastTool = previousActor.last_tool;
+  // Mirrors `reducer.ts` exactly, including the out-of-order rule: a value only
+  // moves when the event carried one, and a late event moves nothing.
+  let lastSummary = previousActor.last_summary;
+  let runtimeAgentType = previousActor.runtime_agent_type;
   let ignored = false;
 
   if (!outOfOrder) {
+    if (wire.summary !== null && wire.summary !== undefined) lastSummary = wire.summary;
+    if (wire.runtime_agent_type !== null && wire.runtime_agent_type !== undefined) {
+      runtimeAgentType = wire.runtime_agent_type;
+    }
     switch (wire.event_type) {
       case 'session_start':
         break;
@@ -426,6 +524,9 @@ export function applyEvent(state, wire, atMs = null) {
     status,
     active,
     last_tool: lastTool,
+    last_summary: lastSummary,
+    last_event_type: outOfOrder ? previousActor.last_event_type : wire.event_type,
+    runtime_agent_type: runtimeAgentType,
     last_event_ts: outOfOrder ? previousActor.last_event_ts : wire.ts,
     last_ingest_seq: wire.ingest_seq,
     event_count: previousActor.event_count + 1,
@@ -610,6 +711,9 @@ function compareStrings(left, right) {
  * last. The same state always produces the same office layout.
  */
 export function selectDesks(state) {
+  // One decision for the whole office: either the stream is confirming these
+  // states or it is not. Derived once so every desk agrees with the banner.
+  const stale = isStale(state.connection);
   const sessions = Object.keys(state.sessions).sort((a, b) => {
     const left = state.sessions[a];
     const right = state.sessions[b];
@@ -638,7 +742,13 @@ export function selectDesks(state) {
   });
 
   return actors.map((actor, index) => {
-    const visual = classifyActor(actor);
+    // What the stream last said this desk was doing...
+    const lastKnown = classifyActor(actor);
+    // ...and what the screen is entitled to claim right now. While the stream is
+    // not confirming anything, that is `UNKNOWN` - but `last_known_visual` keeps
+    // the observation itself, so the card can show "停止時点: ◯◯" rather than
+    // quietly dropping what was already learned.
+    const visual = stale ? ACTOR_VISUALS.unknown : lastKnown;
     return {
       seat: index + 1,
       actor_key: actor.actor_key,
@@ -657,6 +767,8 @@ export function selectDesks(state) {
       last_event_ts: actor.last_event_ts,
       event_count: actor.event_count,
       visual,
+      stale,
+      last_known_visual: lastKnown,
     };
   });
 }
@@ -680,7 +792,8 @@ export function selectPlayer(state) {
 export function selectHeader(state) {
   const desks = selectDesks(state);
   const byState = emptyMap();
-  for (const name of ACTOR_VISUAL_STATES) byState[name] = 0;
+  // Every displayable state, `unknown` included - see `ACTOR_LEGEND_STATES`.
+  for (const name of ACTOR_LEGEND_STATES) byState[name] = 0;
   for (const desk of desks) byState[desk.visual.state] += 1;
   return {
     mode: state.namespace === 'live' ? 'LIVE' : 'DEMO',
@@ -783,6 +896,110 @@ export function selectBanner(header) {
   const code = bannerCode(header);
   const visual = ownProp(BANNER_VISUALS, code) ?? BANNER_VISUALS.CONNECTED;
   return { code, tone: visual.tone, symbol: visual.symbol, message: bannerMessage(code, header) };
+}
+
+/**
+ * Wording for what the office is asking of the person looking at it.
+ *
+ * A closed vocabulary on purpose. "要確認" is deliberately weaker than "人間の
+ * 確認が必要": an approval wait is a request the session actually made, while an
+ * error or an uninterpretable status only means nobody can currently say the
+ * work is fine. Claiming the latter is a formal request for action would be the
+ * screen inventing an obligation the stream never reported.
+ */
+export const HUMAN_ACTION = Object.freeze({
+  required: '人間の確認が必要',
+  advised: '要確認',
+  none: '現在、明示的な対応要求なし',
+});
+
+/** Stands in for anything the event contract simply does not carry. */
+export const NOT_REPORTED = '未報告';
+
+/**
+ * Why "担当タスク" is always `未報告` today.
+ *
+ * The sanitized event model carries no business task title, id or reference
+ * (`docs/event-contract.md`). The external hook wire does have a `task.id`, but
+ * it belongs to Claude's own bookkeeping - `TaskCreated` / `TaskCompleted` are
+ * mapped to an internal event type the reducer explicitly does not interpret as
+ * company work - so presenting it as the task a colleague is assigned to would
+ * be wrong, not merely imprecise. `summary` is the label for one event, so it is
+ * shown as 最新の概要 and never promoted to a task name.
+ */
+export const NO_TASK_REFERENCE = NOT_REPORTED;
+
+/** Said plainly, so nobody reads an empty row as "there was no evidence". */
+export const NO_EVIDENCE_IN_CONTRACT = '現在のevent契約には成果物への参照がありません';
+
+/** How many of an actor's own log rows the detail view shows. */
+export const DETAIL_LOG_ENTRIES = 5;
+
+function humanActionFor(visual) {
+  if (visual.state === 'awaiting_approval') return HUMAN_ACTION.required;
+  if (visual.state === 'error' || visual.state === 'unknown') return HUMAN_ACTION.advised;
+  return HUMAN_ACTION.none;
+}
+
+/**
+ * Everything known about the one selected desk, or null when none is.
+ *
+ * Pure, like every other selector here: it reads the client state and returns
+ * data. It opens no request, and it derives no fact the stream did not report -
+ * where the contract carries nothing, the field says so rather than guessing.
+ */
+export function selectDetail(state) {
+  const key = state.selected_actor_key;
+  if (typeof key !== 'string' || key.length === 0) return null;
+  const desk = selectDesks(state).find((item) => item.actor_key === key);
+  if (desk === undefined) return null;
+
+  const session = ownProp(state.sessions, desk.session_id) ?? null;
+  const actor = ownProp(state.actors, key) ?? null;
+  const own = state.log.filter((entry) => entry.actor_key === key);
+
+  return {
+    actor_key: desk.actor_key,
+    display_name: desk.display_name,
+    seat: desk.seat,
+    is_main_orchestrator: desk.is_main_orchestrator,
+    // Only when the collector resolved one. This screen never guesses a title.
+    role: desk.resolved ? desk.role : null,
+    runtime_agent_type: actor === null ? null : (actor.runtime_agent_type ?? null),
+
+    visual: desk.visual,
+    stale: desk.stale,
+    last_known_visual: desk.last_known_visual,
+    status_label: desk.status_label,
+
+    /** Explicit business task. See `NO_TASK_REFERENCE` - the contract has none. */
+    task: null,
+    /** The producer's label for the latest event. Not a task name. */
+    latest_summary: actor === null ? null : (actor.last_summary ?? null),
+    /** Only ever an explicitly reported next step; the screen predicts nothing. */
+    next_action: null,
+    human_action: humanActionFor(desk.visual),
+
+    last_event_type: actor === null ? null : (actor.last_event_type ?? null),
+    last_tool: desk.last_tool,
+    last_event_ts: desk.last_event_ts,
+    event_count: desk.event_count,
+
+    session_id: desk.session_id,
+    session_ended_at: session === null ? null : session.ended_at,
+
+    /**
+     * The most recent thing this desk did that was not itself a failure. Read
+     * from the log the client already holds, so it is bounded and may be absent
+     * - which is reported as such rather than filled in.
+     */
+    last_non_error: own.find((entry) => entry.state !== 'error') ?? null,
+    /** Recovery, retry and handoff are not in the contract. Never claimed here. */
+    recovery: null,
+    /** No artifact, test, review or commit reference exists on the wire today. */
+    evidence: null,
+    recent: own.slice(0, DETAIL_LOG_ENTRIES),
+  };
 }
 
 /**

@@ -9,6 +9,59 @@ AI Companyの稼働状況をレトロゲーム風UIで可視化するアプリ�
 
 ---
 
+## クイックスタート（5分）
+
+LIVE入力もcredentialも外部networkも要りません。この4行だけで動きます。
+
+```bash
+node -v                     # 1. v22.18.0 以上であることを確認
+npm run demo                # 2. 起動（依存のinstallは不要です）
+open http://127.0.0.1:4317/#demo   # 3. ブラウザで開く
+                            # 4. 止めるときは起動したterminalで Ctrl-C
+```
+
+**開いてから何が見えるか**
+
+ブラウザで開くと、そこから約1.2秒後にミッションが動き始めます（開くまで始まりません）。
+リロードは不要で、1.5秒ごとに1手ずつ進みます。
+
+1. `dev-1` が **計画中 ◆** になる
+2. **作業中 ▶** に変わり、`last tool` が `read` → `edit` と動く
+3. `qa-1` がテスト、`review-1` がレビューに入る
+4. `dev-1` が **承認待ち ‼** で止まる（**時間では解けません**。次のeventが承認を報告して初めて動きます）
+5. 承認後 **作業中 ▶** に戻り、最後に **完了 ■** になる
+6. 横で `sync-1` が **エラー ✖**、`ext-1` が **状態不明 ?** になる
+   （`ext-1` はこの画面に語彙が無いstatusを報告しています。勝手に成功や待機へ倒しません）
+
+**社員を選ぶ**: 社員カードの名前ボタンをクリック（Tab + Enter でも可）。
+下の「選択中のAI社員」に、担当・状態・最新の概要・最終更新・成果物の有無・
+直近の動きが出ます。もう一度押すと選択解除です。
+
+**接続が切れたときを見る**: 起動したterminalで `Ctrl-C` を押すと、bannerが
+`✖ DISCONNECTED` になり、**全席が「状態不明 ?」+「凍結 · 停止時点: ▶ 作業中」** に変わります。
+誰も一覧から消えず、古い状態が最新のように見え続けることもありません。
+
+**うまくいかないとき**
+
+| 症状 | 対処 |
+|---|---|
+| `EADDRINUSE` / ポート衝突 | `QUEST_PORT=4318 npm run demo` を使い、`http://127.0.0.1:4318/#demo` を開く |
+| 画面が動かない | ミッションは**最初にDEMOへ接続した人**が来た時に1回だけ始まります。一度再生し終えた後は、terminalで `Ctrl-C` → `npm run demo` で最初から見られます |
+| 進みが速い / 遅い | `QUEST_DEMO_PLAY_INTERVAL_MS=3000 npm run demo`（既定1500ms） |
+| 動かない静止画で状態を見比べたい | `npm run demo:static`。7状態が1画面に並んだ固定frameで、timerも乱数も使いません |
+
+**実際の画面**
+
+| | |
+|---|---|
+| ![ミッション進行中](docs/screenshots/01-mission-in-progress.png) | **① ミッション進行中** — `dev-1` が計画中 `◆`。リロードせずに状態が進みます |
+| ![社員の詳細](docs/screenshots/02-actor-detail.png) | **② 社員の詳細** — 担当タスクは `未報告`、最新の概要は別の行。成果物の不在も明記します |
+| ![切断時](docs/screenshots/03-disconnected-unknown.png) | **③ 接続が切れたとき** — 全席が `状態不明 ?` になり、`停止時点: ■ 完了 / 終了` を併記。誰も消えません |
+
+`npm run live` で実sessionを繋ぐ手順は [ローカル起動](#ローカル起動) にあります。
+
+---
+
 ## 何をするものか
 
 ローカルのClaude Code sessionが書き出す **sanitized JSONL** を安全に読み取り、
@@ -69,28 +122,48 @@ tailを止めてからserverを閉じます（`src/live.ts` のshutdown handler�
 
 LIVE入力もcredentialも外部networkも使わず、画面の全機能を確認できます。
 
-```bash
-npm run demo                            # 1. DEMO storeにfixtureを投入して起動
-open http://127.0.0.1:4317/#demo        # 2. ブラウザで開く
-# 3. 止めるときは起動したterminalで Ctrl-C（SIGINT / SIGTERMどちらでも停止します）
-```
+DEMOは2つあります。**動く方**が既定です。
 
-`npm run demo` は `QUEST_DEMO=1` を渡し、`QUEST_INPUT_PATH` が未設定なら `/dev/null` を
-使います（既存の値があればそれを優先）。したがってlocal session・credential・network接続は
-不要です。DEMO storeへ投入されるのは `src/demo/fixtures.ts` の**固定13 event**だけで、
-timerも乱数も外部I/Oも使いません。何度起動しても同じ画面になります。
+| コマンド | 何が起きるか | 用途 |
+|---|---|---|
+| `npm run demo` | 1本のミッションを1 eventずつ配信する（`QUEST_DEMO_PLAY=1`） | 触って動きを見る |
+| `npm run demo:static` | 固定frameを起動時に一度だけ畳み込む（`QUEST_DEMO=1`） | 7状態を並べて見比べる・決定論が要るとき |
 
-**このDEMOで確認できること**
+どちらも `QUEST_INPUT_PATH` が未設定なら `/dev/null` を使うので（既存の値があればそれを優先）、
+local session・credential・network接続は不要です。
+
+### `npm run demo` — 動くミッション（既定）
+
+`src/demo/timeline.ts` の固定列を1 eventずつ投入します。開始するのは
+**最初のDEMO subscriberが接続した時**で、プロセス起動時ではありません。
+再接続しても2つ目のtabを開いても再開しません（一度きり）。
+「開いた頃には再生が終わっていた」を避けるための設計です。
+
+`ts` は投入時刻でstampします（動いている画面が「最終更新: 1月1日」と出すのは
+それ自体が小さな嘘になるため）。`event_id` は固定なので重複排除とreplayは通常どおり効きます。
 
 | 見えるもの | 内容 |
 |---|---|
-| 5つのactor状態 | 待機中 `IDLE` / 作業中 `WORKING` / 承認待ち `APPROVAL` / 完了 `ENDED` / エラー `ERROR` が同時に1画面へ並びます |
+| 縦切り1本 | ミッション開始 → 計画中 → 実装 → テスト → レビュー → 承認待ち → 再開 → 完了 |
+| 承認は時間で解けない | 承認待ちを解くのは**次のeventが報告するstatus**であって、timerの経過ではありません |
+| エラー | 別のactorが `error` で停止します |
+| 状態不明 | 別のactorがこの画面に語彙の無いstatusを報告します。`active` flagから作業中/待機中へ**推測しません** |
+| リロード不要 | SSEで届くので、ページを再読み込みせずに遷移が見えます |
+
+### `npm run demo:static` — 固定frame
+
+`src/demo/fixtures.ts` の**固定15 event**だけを投入します。timerも乱数も外部I/Oも使いません。
+何度起動しても同じ画面になるので、凡例と照らし合わせる状態リファレンスとして使えます。
+
+| 見えるもの | 内容 |
+|---|---|
+| 7つのactor状態 | 待機中 `IDLE` / 計画中 `PLANNING` / 作業中 `WORKING` / 承認待ち `APPROVAL` / 完了 `ENDED` / エラー `ERROR` / 状態不明 `UNKNOWN` が同時に1画面へ並びます |
 | 2つのsession | 進行中のsessionと、`session_end` 済みの完了sessionの両方 |
 | 接続状態 | `LOADING` → `CONNECTED` の遷移。「再接続」ボタンで `LOADING` からやり直せます |
 | LIVE/DEMO分離 | LIVEボタンへ切り替えると席・log・bannerが全て空になります（DEMOのstateは混ざりません） |
 | Canvasとの整合 | canvasは装飾層で、DOMの社員一覧・凡例・logが正本です |
 
-DEMOは**読み取り専用**です。画面から任意commandを実行する導線も、DEMO stateを書き換える
+どちらのDEMOも**読み取り専用**です。画面から任意commandを実行する導線も、DEMO stateを書き換える
 導線もありません。DEMO eventがLIVE store / LIVE stream / LIVE stateへ入ることは
 構造的に不可能です（`seedDemoStore` はLIVE storeを渡されるとthrowします）。
 
@@ -105,7 +178,10 @@ DEMOは**読み取り専用**です。画面から任意commandを実行する�
 | `QUEST_MAX_LINE_BYTES` | `65536` | これを超える行は破棄・計数 |
 | `QUEST_REPLAY_CAPACITY` | `500` | SSE replay bufferの保持件数 |
 | `QUEST_DEDUPE_CAPACITY` | `100000` | `event_id` 重複排除indexの上限 |
-| `QUEST_DEMO` | 未設定 | `1` でDEMO storeにfixtureを投入 |
+| `QUEST_DEMO` | 未設定 | `1` でDEMO storeに固定fixtureを投入（`npm run demo:static`） |
+| `QUEST_DEMO_PLAY` | 未設定 | `1` でミッションを再生（`npm run demo`）。最初のDEMO接続時に1回だけ開始 |
+| `QUEST_DEMO_PLAY_INTERVAL_MS` | `1500` | ミッションの1手あたりの間隔（100〜60000） |
+| `QUEST_DEMO_PLAY_FIRST_DELAY_MS` | `1200` | 接続してから最初の1手までの間隔（0〜60000） |
 | `QUEST_PLAYER_NAME` | `Player` | human playerの表示名 |
 
 bind hostは **設定できません**。常に `127.0.0.1` です。
@@ -178,15 +254,42 @@ replay経路だけは `snapshot` を送らないため、client切断中にhalt�
 
 | 状態 | 記号 | 判定 |
 |------|------|------|
-| 待機中 `IDLE` | `⋯` | `idle` / `waiting` / `queued` など、または未起動 |
-| 作業中 `WORKING` | `▶` | `active` / `running` / `thinking` など、または status不明で `active` |
+| 待機中 `IDLE` | `⋯` | `idle` / `waiting` / `queued` など、または status無しで未起動 |
+| 計画中 `PLANNING` | `◆` | `plan` / `planning` token を含む status **だけ** |
+| 作業中 `WORKING` | `▶` | `active` / `running` / `thinking` / `reasoning` / `designing` など、または status無しで `active` |
 | 承認待ち `APPROVAL` | `‼` | `approval` / `permission` / `confirm` などを含む status |
 | 完了・終了 `ENDED` | `■` | `completed` / `stopped` / `ended`、`session_end` 後 |
 | エラー・停止 `ERROR` | `✖` | `error` / `failed` / `timeout` / `denied` など |
+| 状態不明 `UNKNOWN` | `?` | statusが**在るのに**どの語彙にも当たらない、または接続が確認できていない |
 
 status labelはsanitized eventの自由記述なので、小文字化・token分割してから
-上表の優先順（error → 承認待ち → 作業中 → 終了 → 待機）で判定します。
-未知のlabelは推測せず、reducerが持つ `active` にfallbackします。
+上表の優先順（error → 承認待ち → 計画中 → 作業中 → 終了 → 待機）で判定します。
+
+**推測と観測を分けています。**
+
+- statusが**在るのに未知**なら `UNKNOWN`。producerが何かを言っており、
+  それを `active` flagから作業中/待機中へ丸めるのは画面による捏造になります。
+- statusが**無い**場合だけ、reducerが `event_type` から導く構造的な `active` に従います
+  （`agent_start` があった / `agent_stop` があった、という観測であって推測ではありません）。
+- `thinking` / `reasoning` / `designing` は **`PLANNING` にしません**。作業中に行う思考で
+  あって、宣言された計画フェーズではないためです。`PLANNING` は `plan` / `planning` だけが
+  到達します（`plan_mode` / `plan-mode` はtoken分割で `plan` に落ちるので同じ扱いです）。
+
+> **LIVEで `PLANNING` が出る条件**: `src/domain/hookAdapter.ts` の `HOOK_EVENT_LIFECYCLE` が
+> 生成しうるstatusは `started` / `ok` / `active` / `stopped` / `error` / `permission` /
+> `denied` / `waiting` の8種で、**planningに当たるものがありません**。
+> producerが明示的なplanning statusを出すようになるまで、LIVEで `PLANNING` は点灯しません。
+> そのための偽のLIVE eventは用意していません。
+
+### 接続が切れたときの席
+
+`halted`（fail-closed）か、接続phaseが `error` / `reconnecting` のとき、席は**凍結**されます。
+
+- その席の状態は `状態不明 ?` になります（streamが何も確認していないため）
+- **最後に観測した状態は消えません。** カードに `凍結 · 停止時点: ▶ 作業中` と併記します
+- 社員一覧から誰も消えません。在席数も変わりません
+- **時間の閾値はありません。** 静かなだけのsessionが古くなることはなく、
+  凍結するのは「あったstreamを失った」場合だけです（`offline` は初期値なので含みません）
 
 接続側は `未接続` / `接続中` / `接続済み` / `再接続中` / `切断・エラー` と、
 ingestがhaltしている場合の `取り込み停止 (fail-closed)` を表示します。haltは接続中でも
@@ -403,14 +506,9 @@ npm install --no-save --no-package-lock typescript@^5.6.0 @types/node@^22.7.0
 npm run typecheck
 ```
 
-CIは `ci/quest-core-ci.yml.example` に用意してあります。GitHub Appは
-`.github/workflows/` を書けないため、有効化はownerが行ってください:
-
-```bash
-cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
-```
-
-既存の `.github/workflows/claude.yml` には触れません。
+CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのpushとpull requestで
+`npm ci` → `npm test` → typecheck を実行します（`ci/quest-core-ci.yml.example` は
+それを有効化したときの元テンプレートで、今は参考用に残してあります）。
 
 ## 既知の制限
 
@@ -430,10 +528,24 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   「DOMから外れたnodeはfocusを失う」を再現します。
   実ブラウザでのTab順、実screen readerでの読み上げ、contrast比の実測、
   実際の200% zoom描画は自動化していません。手動確認が必要です。
-- **社員の選択は選択そのものだけです。** 選択してもrequestは1本も増えず、指示送信・行動指定・
-  詳細paneの展開はありません（Phase 3の範囲）。選択中のactorが在席しなくなると（`snapshot` で
-  officeが差し替わると）選択は自動的に解除され、古い座席が新しいlayoutへ持ち越されることは
-  ありません。選択状態はcanvasには反映しません（canvasは装飾層のままです）。
+- **社員を選ぶと詳細paneが開きますが、そこから何かを指示することはできません。**
+  選択してもrequestは1本も増えず、指示送信・行動指定はありません（Phase 3の範囲）。
+  選択中のactorが在席しなくなると（`snapshot` でofficeが差し替わると）選択は自動的に解除され、
+  古い座席が新しいlayoutへ持ち越されることはありません。選択状態はcanvasには反映しません
+  （canvasは装飾層のままです）。
+- **詳細paneに「担当タスク」は出せません。** 業務タスクのtitle / id / 参照はevent契約に
+  存在しないため、常に `未報告` と表示します。外部hook wireには `task.id` がありますが、
+  `TaskCreated` / `TaskCompleted` はClaude内部の記録で、reducerがcompany workとして
+  解釈しない内部event typeへ写像されます。これを担当タスクとして出すのは不正確ではなく
+  **誤り**なので採っていません。`summary` は「最新の概要」として出し、タスク名とは呼びません。
+- **成果物・証拠への参照はありません。** wireの19 keyにもartifact / evidence / commit /
+  pull request に相当するfieldが無いため、詳細paneは
+  「現在のevent契約には成果物への参照がありません」と明示します。捏造はしません。
+- **retry / handoff / checkpoint による復旧可否も報告できません。** 契約に無いため
+  詳細paneでは `未報告` です。復旧操作のボタンもありません。
+- **「次に何が起きるか」は予測しません。** eventに明示があるときだけ表示し、無ければ
+  `未報告` です。DEMOのミッションでは各beatの `summary` が次の段階を読める文になっていますが、
+  それは台本に書かれた事実であって、UIが導出した予測ではありません。
 - **本repoはruntime actor（Claude Code session）単位のofficeです。** 組織snapshot、部署、
   社長室フロア、未所属・共用施設といったフロア構成、固定の社員rosterは実装していません。
   `selectDesks` が席を決めるのはcollectorが解決したactorだけで、役職も配属も推測しません。
@@ -459,8 +571,11 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   席を離れたactorの要素は削除するので、存在しない社員のnodeがfocusを持つことも、
   別人のnodeがfocusを引き継ぐこともありません（`test/ui-dom.test.ts`）。
 - 画面の文言は日本語のみです（`<html lang="ja">`）。i18nはMVPの対象外です。
-- DEMOは自動進行しません。fixtureは1回投入されて固定で、時間経過で状態が変わることも、
-  UIからDEMO stateを変更することもできません。
+- **`npm run demo:static` は自動進行しません。** fixtureは1回投入されて固定で、時間経過で
+  状態が変わることも、UIからDEMO stateを変更することもできません。
+  `npm run demo` のミッションだけがtimerで進み、それも一度きりで、終わると停止します
+  （loopしません。もう一度見るには再起動してください）。UIからDEMO stateを変更する導線は
+  どちらのmodeにもありません。
 - Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界・backing store上限（0/1/40/95/96/97/
   4096席 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
   までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。
@@ -513,3 +628,8 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   予算policyの境界・ROI用語は
   [`docs/cost-governance-roi-design.md`](docs/cost-governance-roi-design.md) に
   記録しています（設計記録のみ・実装なし）。
+- **正社員 / 臨時スタッフ、社内設備、会議室、ARKパッケージ、契約プランはこのrepositoryに
+  存在しません。** 社員の種別も、表示上の居場所も、パッケージも、利用回数の制限も
+  実装していません。将来要件としての整理と、現行コードのどこへ載せられるか（拡張点）は
+  [`docs/company-model-design.md`](docs/company-model-design.md) に記録しています
+  （設計記録のみ・実装なし）。

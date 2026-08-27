@@ -21,12 +21,15 @@
 import { drawWorld } from './quest-canvas.js';
 import { buildWorld, measureCanvasViewport } from './quest-world.js';
 import {
-  ACTOR_VISUAL_STATES,
+  ACTOR_LEGEND_STATES,
+  NOT_REPORTED,
+  NO_EVIDENCE_IN_CONTRACT,
   applyFrame,
   createClientState,
   describeFreshness,
   selectBanner,
   selectDesks,
+  selectDetail,
   selectHeader,
   selectPlayer,
   setConnectionPhase,
@@ -60,6 +63,13 @@ const dom = {
   legendTemplate: document.getElementById('legend-template'),
   canvas: document.getElementById('office-canvas'),
   canvasFrame: document.getElementById('office-canvas-frame'),
+  detail: document.getElementById('detail'),
+  detailEmpty: document.getElementById('detail-empty'),
+  detailRecent: document.getElementById('detail-recent'),
+  detailRecentEmpty: document.getElementById('detail-recent-empty'),
+  detailRecentTemplate: document.getElementById('detail-recent-template'),
+  detailMain: document.getElementById('detail-main'),
+  detailFrozen: document.getElementById('detail-frozen'),
 };
 
 let source = null;
@@ -139,9 +149,93 @@ function text(node, selector, value) {
   if (target !== null) target.textContent = value;
 }
 
+/** Writes one detail row by id. Text only - nothing off the stream becomes markup. */
+function detailText(id, value) {
+  const node = document.getElementById(id);
+  if (node !== null) node.textContent = value;
+}
+
+/** One line describing a log row, in the same shape the activity log uses. */
+function describeLogEntry(entry) {
+  const parts = [entry.status, entry.tool_name, entry.summary].filter(
+    (part) => typeof part === 'string' && part.length > 0,
+  );
+  return parts.length === 0 ? '—' : parts.join(' · ');
+}
+
+/**
+ * The selected colleague.
+ *
+ * Every row the event contract cannot fill says so in words. A blank row would
+ * read as "there was nothing", which is a different claim from "this stream does
+ * not carry that".
+ */
+function renderDetail(detail) {
+  const hasSelection = detail !== null;
+  dom.detail.hidden = !hasSelection;
+  dom.detailEmpty.hidden = hasSelection;
+  if (!hasSelection) {
+    dom.detailRecent.replaceChildren();
+    return;
+  }
+
+  detailText('detail-name', detail.display_name);
+  dom.detailMain.hidden = !detail.is_main_orchestrator;
+  detailText('detail-symbol', detail.visual.symbol);
+  detailText('detail-state', `${detail.visual.label} (${detail.visual.code})`);
+
+  // While the stream is not confirming this desk, the state above reads 状態不明
+  // and this line carries what was last actually observed.
+  dom.detailFrozen.hidden = !detail.stale;
+  dom.detailFrozen.textContent = detail.stale
+    ? `凍結 · 停止時点: ${detail.last_known_visual.symbol} ${detail.last_known_visual.label}`
+    : '';
+
+  // A business task and an event summary are different things, and the contract
+  // carries only the second. They are never printed into the same row.
+  detailText('detail-task', detail.task ?? NOT_REPORTED);
+  detailText('detail-summary', detail.latest_summary ?? NOT_REPORTED);
+  detailText('detail-next', detail.next_action ?? NOT_REPORTED);
+  detailText('detail-human', detail.human_action);
+  detailText('detail-evidence', detail.evidence ?? NO_EVIDENCE_IN_CONTRACT);
+  detailText(
+    'detail-last-ok',
+    detail.last_non_error === null
+      ? NOT_REPORTED
+      : `${detail.last_non_error.ts} · ${describeLogEntry(detail.last_non_error)}`,
+  );
+  detailText('detail-recovery', detail.recovery ?? NOT_REPORTED);
+
+  detailText('detail-role', detail.role ?? '未解決');
+  detailText('detail-runtime', detail.runtime_agent_type ?? NOT_REPORTED);
+  detailText('detail-raw', detail.status_label ?? '—');
+  detailText('detail-tool', detail.last_tool ?? '—');
+  detailText('detail-event-type', detail.last_event_type ?? '—');
+  detailText('detail-ts', detail.last_event_ts ?? '—');
+  detailText(
+    'detail-session',
+    detail.session_ended_at === null
+      ? `${detail.session_id}（進行中）`
+      : `${detail.session_id}（終了: ${detail.session_ended_at}）`,
+  );
+  detailText('detail-count', String(detail.event_count));
+  detailText('detail-key', detail.actor_key);
+
+  dom.detailRecent.replaceChildren();
+  for (const entry of detail.recent) {
+    const row = dom.detailRecentTemplate.content.cloneNode(true);
+    text(row, '.detail__recent-symbol', visualForState(entry.state).symbol);
+    text(row, '.detail__recent-ts', entry.ts);
+    text(row, '.detail__recent-type', entry.event_type);
+    text(row, '.detail__recent-detail', describeLogEntry(entry));
+    dom.detailRecent.append(row);
+  }
+  dom.detailRecentEmpty.hidden = detail.recent.length > 0;
+}
+
 function renderLegend() {
   dom.legend.replaceChildren();
-  for (const name of ACTOR_VISUAL_STATES) {
+  for (const name of ACTOR_LEGEND_STATES) {
     const visual = visualForState(name);
     const row = dom.legendTemplate.content.cloneNode(true);
     const item = row.querySelector('.legend__row');
@@ -183,13 +277,19 @@ let renderedNodes = new Map();
 function buildDeskNode() {
   const fragment = dom.deskTemplate.content.cloneNode(true);
   const item = fragment.querySelector('.desk');
-  return { item, select: item.querySelector('.desk__select'), badge: item.querySelector('.desk__badge') };
+  return {
+    item,
+    select: item.querySelector('.desk__select'),
+    badge: item.querySelector('.desk__badge'),
+    frozen: item.querySelector('.desk__frozen'),
+  };
 }
 
 function fillDeskNode(node, desk, index) {
-  const { item, select, badge } = node;
+  const { item, select, badge, frozen } = node;
   item.dataset.state = desk.visual.state;
   item.dataset.selected = String(desk.selected);
+  item.dataset.stale = String(desk.stale);
   select.dataset.deskIndex = String(index);
   // The state is exposed as `aria-pressed`, so it is never carried by the
   // border colour alone.
@@ -199,6 +299,15 @@ function fillDeskNode(node, desk, index) {
   badge.hidden = !desk.is_main_orchestrator;
   text(item, '.desk__symbol', desk.visual.symbol);
   text(item, '.desk__state-label', `${desk.visual.label} (${desk.visual.code})`);
+  // While stale, the state above reads 状態不明 and this line carries the last
+  // observation. Hidden entirely otherwise, so a healthy office says nothing
+  // about a freeze that is not happening.
+  frozen.hidden = !desk.stale;
+  text(
+    item,
+    '.desk__frozen-text',
+    `停止時点: ${desk.last_known_visual.symbol} ${desk.last_known_visual.label}`,
+  );
   // `role` is already null unless the collector resolved one.
   text(item, '.desk__role', desk.role ?? '未解決');
   text(item, '.desk__raw-status', desk.status_label ?? '—');
@@ -402,6 +511,7 @@ function render() {
   renderBanner(header);
   renderPlayer(player);
   renderDesks(desks);
+  renderDetail(selectDetail(state));
   renderLog(state.log);
   dom.emptyState.hidden = !header.empty;
   renderCanvas(header, desks, player);

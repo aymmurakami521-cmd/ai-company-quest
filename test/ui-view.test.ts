@@ -9,20 +9,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { NamespaceStore } from '../src/collector/store.ts';
+import { HOOK_EVENT_LIFECYCLE } from '../src/domain/hookAdapter.ts';
+import type { HaltReason } from '../src/collector/store.ts';
 import { seedDemoStore } from '../src/demo/fixtures.ts';
+import { DEMO_TIMELINE } from '../src/demo/timeline.ts';
 import type { QuestState } from '../src/domain/reducer.ts';
 import type { WireEvent } from '../src/domain/wire.ts';
 import { WIRE_EVENT_KEYS } from '../src/domain/wire.ts';
 import { makeEvent } from './helpers.ts';
 
-import type { ActorVisualState, ClientState } from '../src/ui/public/quest-view.js';
+import type {
+  ActorDisplayState,
+  ActorVisualState,
+  ClientState,
+  HaltReasonToken,
+} from '../src/ui/public/quest-view.js';
 import {
+  ACTOR_LEGEND_STATES,
   ACTOR_VISUAL_STATES,
   MAX_LOG_ENTRIES,
   PLAYER_NAME_MAX,
   UNATTRIBUTED_AGENT_LABEL,
   applyEvent,
   applyFrame,
+  isStale,
   applySnapshot,
   classifyActor,
   classifyConnection,
@@ -72,7 +82,7 @@ function foldAll(namespace: string, wires: readonly WireEvent[]): ClientState {
 
 // --------------------------------------------------------------- mapping ---
 
-type MappingCase = { name: string; status: string | null; active: boolean; expect: ActorVisualState };
+type MappingCase = { name: string; status: string | null; active: boolean; expect: ActorDisplayState };
 
 const MAPPING_CASES: MappingCase[] = [
   { name: 'no status, never started', status: null, active: false, expect: 'idle' },
@@ -99,10 +109,26 @@ const MAPPING_CASES: MappingCase[] = [
   { name: 'denied', status: 'denied', active: false, expect: 'error' },
   { name: 'error outranks completion', status: 'completed_with_error', active: false, expect: 'error' },
   { name: 'approval outranks tool work', status: 'tool_use_approval', active: true, expect: 'awaiting_approval' },
-  { name: 'unknown label, active', status: 'frobnicating', active: true, expect: 'working' },
-  { name: 'unknown label, inactive', status: 'frobnicating', active: false, expect: 'idle' },
+  // A status the producer sent but this screen has no vocabulary for. The
+  // `active` flag is NOT consulted: guessing "working" or "idle" here would be
+  // the screen claiming a state the session never reported.
+  { name: 'unknown label, active', status: 'frobnicating', active: true, expect: 'unknown' },
+  { name: 'unknown label, inactive', status: 'frobnicating', active: false, expect: 'unknown' },
   { name: 'working label on a stopped actor', status: 'active', active: false, expect: 'ended' },
+  // No status at all still falls back to the reducer's structural `active`
+  // flag, which is derived from `event_type` - an observation, not a guess.
   { name: 'empty label', status: '', active: false, expect: 'idle' },
+  { name: 'no label, active', status: null, active: true, expect: 'working' },
+  { name: 'no label, inactive', status: null, active: false, expect: 'idle' },
+  // Planning is reached only from a label that declares a planning phase.
+  { name: 'plan', status: 'plan', active: true, expect: 'planning' },
+  { name: 'planning', status: 'planning', active: true, expect: 'planning' },
+  { name: 'plan_mode', status: 'plan_mode', active: true, expect: 'planning' },
+  { name: 'plan-mode', status: 'plan-mode', active: true, expect: 'planning' },
+  // ...and never from a word that merely sounds like it. These stay WORKING.
+  { name: 'thinking is work, not planning', status: 'thinking', active: true, expect: 'working' },
+  { name: 'reasoning is work, not planning', status: 'reasoning', active: true, expect: 'working' },
+  { name: 'designing is work, not planning', status: 'designing', active: true, expect: 'working' },
 ];
 
 test('every actor status maps to exactly one visual state', () => {
@@ -115,7 +141,7 @@ test('every actor status maps to exactly one visual state', () => {
 test('each visual state carries a symbol and a readable label, not colour alone', () => {
   const symbols = new Set<string>();
   const labels = new Set<string>();
-  for (const state of ACTOR_VISUAL_STATES) {
+  for (const state of ACTOR_LEGEND_STATES) {
     const visual = visualForState(state);
     assert.equal(visual.state, state);
     assert.ok(visual.symbol.length > 0, `${state} has a symbol`);
@@ -124,8 +150,8 @@ test('each visual state carries a symbol and a readable label, not colour alone'
     symbols.add(visual.symbol);
     labels.add(visual.label);
   }
-  assert.equal(symbols.size, ACTOR_VISUAL_STATES.length, 'symbols are distinguishable');
-  assert.equal(labels.size, ACTOR_VISUAL_STATES.length, 'labels are distinguishable');
+  assert.equal(symbols.size, ACTOR_LEGEND_STATES.length, 'symbols are distinguishable');
+  assert.equal(labels.size, ACTOR_LEGEND_STATES.length, 'labels are distinguishable');
 });
 
 test('an unknown status classifies as nothing rather than guessing', () => {
@@ -545,6 +571,33 @@ test('the halt frame respects namespace isolation and never echoes an unknown re
   assert.equal(normalizeHaltReason(null), null);
 });
 
+/**
+ * Two-way assignability pin between the collector's halt vocabulary and the
+ * screen's. Either side gaining or losing a token is a typecheck failure here,
+ * which is how `producer_capacity` should have been caught the first time.
+ */
+const _haltTokenCoversStore: HaltReasonToken = null as unknown as HaltReason;
+const _storeCoversHaltToken: HaltReason = null as unknown as HaltReasonToken;
+void _haltTokenCoversStore;
+void _storeCoversHaltToken;
+
+test('every halt reason the collector can raise has a screen label', () => {
+  // Pinned to `HaltReason` on purpose: the annotation makes a token the store can
+  // raise but the screen cannot name a typecheck failure, not a silent blank
+  // banner. `producer_capacity` was exactly that drift once.
+  const reasons: readonly HaltReason[] = ['unsupported_schema', 'state_limit', 'producer_capacity'];
+  for (const reason of reasons) {
+    assert.equal(normalizeHaltReason(reason), reason, `${reason} must normalize to itself`);
+    const label = haltLabel(reason);
+    assert.equal(typeof label, 'string', `${reason} must have a label`);
+    assert.ok((label as string).length > 0, `${reason} label must not be empty`);
+    // `reason:detail` from /health must reduce to the same label, never echo the detail.
+    assert.equal(haltLabel(`${reason}:some:detail`), label);
+  }
+  assert.equal(normalizeHaltReason('not_a_halt_reason'), null);
+  assert.equal(haltLabel('not_a_halt_reason'), null);
+});
+
 test('a disconnect is visible and does not erase what was already shown', () => {
   const store = new NamespaceStore({ namespace: 'live' });
   const wires = record(store);
@@ -577,8 +630,9 @@ test('the DEMO fixtures show every visual state at once', () => {
   const state = applySnapshot(createClientState('demo'), snapshotOf(store));
   const header = selectHeader(state);
 
-  for (const name of ACTOR_VISUAL_STATES) {
+  for (const name of ACTOR_LEGEND_STATES) {
     assert.ok(header.by_state[name] > 0, `DEMO shows at least one ${name} desk`);
+    assert.ok(Number.isInteger(header.by_state[name]), `${name} counts to an integer, never NaN`);
   }
   assert.equal(header.mode, 'DEMO');
   assert.equal(header.empty, false);
@@ -885,6 +939,11 @@ test('the projections expose only whitelisted wire fields', () => {
     // carries no content - a boolean derived from a key the screen already has.
     'selected',
     'visual',
+    // Screen-local too: whether a live stream is still confirming this desk, and
+    // what it last said if it is not. Both are derived from the connection the
+    // client already tracks - neither adds a field from the wire.
+    'stale',
+    'last_known_visual',
   ]);
   for (const desk of selectDesks(state)) {
     for (const key of Object.keys(desk)) assert.ok(deskFields.has(key), `unexpected desk field ${key}`);
@@ -896,6 +955,9 @@ test('the projections expose only whitelisted wire fields', () => {
     'ts',
     'event_type',
     'actor',
+    // The identity behind that display name, so the detail view can filter this
+    // log to one desk. Already on the wire whitelist; carries no new content.
+    'actor_key',
     'session_id',
     'status',
     'tool_name',
@@ -931,4 +993,121 @@ test('a prototype-shaped session or agent id stays an ordinary key', () => {
   // key and not a way to reach `Object.prototype`.
   assert.equal(Object.getPrototypeOf(state.actors), null);
   assert.equal(Object.getPrototypeOf(state.sessions), null);
+});
+
+// ------------------------------------------------------------- staleness ---
+
+test('a disconnected office reports every desk as unknown, without erasing it', () => {
+  const store = new NamespaceStore({ namespace: 'demo' });
+  seedDemoStore(store);
+  const live = applySnapshot(createClientState('demo'), snapshotOf(store));
+
+  const before = selectDesks(live);
+  assert.ok(before.length > 0, 'there is an office to lose');
+  assert.ok(before.every((desk) => desk.stale === false), 'nothing is stale while connected');
+  const observed = new Map(before.map((desk) => [desk.actor_key, desk.visual.state]));
+  assert.ok(new Set(observed.values()).size > 1, 'and the desks were in different states');
+
+  for (const phase of ['error', 'reconnecting'] as const) {
+    const dropped = setConnectionPhase(live, phase, null);
+    const desks = selectDesks(dropped);
+
+    assert.equal(desks.length, before.length, `${phase}: nobody is removed from the list`);
+    for (const desk of desks) {
+      assert.equal(desk.stale, true, `${phase}: ${desk.actor_key} is marked stale`);
+      assert.equal(desk.visual.state, 'unknown', `${phase}: it no longer claims a current state`);
+      assert.equal(desk.visual.code, 'UNKNOWN');
+      // The observation itself survives, which is what "停止時点" shows.
+      assert.equal(
+        desk.last_known_visual.state,
+        observed.get(desk.actor_key),
+        `${phase}: what was last observed is kept`,
+      );
+    }
+
+    const header = selectHeader(dropped);
+    assert.equal(header.desk_count, before.length, `${phase}: the seat count is unchanged`);
+    assert.equal(header.by_state['unknown'], before.length, `${phase}: all of them count as unknown`);
+    assert.equal(header.empty, false, `${phase}: the office is not reported as empty`);
+  }
+});
+
+test('a halted stream freezes the desks even while the socket is still open', () => {
+  const store = new NamespaceStore({ namespace: 'demo' });
+  seedDemoStore(store);
+  let state = applySnapshot(createClientState('demo'), snapshotOf(store));
+  state = setConnectionPhase(state, 'open', null);
+  assert.ok(selectDesks(state).every((desk) => desk.stale === false), 'open and ingesting');
+
+  // fail-closed: the socket is fine, but nothing new will ever arrive on it.
+  const halted = applyFrame(state, {
+    kind: 'fail_closed',
+    payload: { namespace: 'demo', halted: true, reason: 'state_limit' },
+  });
+  const desks = selectDesks(halted);
+  assert.ok(desks.length > 0);
+  assert.ok(desks.every((desk) => desk.stale === true), 'a halt is a freeze too');
+  assert.ok(desks.every((desk) => desk.visual.state === 'unknown'));
+  assert.equal(selectBanner(selectHeader(halted)).code, 'FAIL_CLOSED', 'and the banner still says why');
+});
+
+test('an office that never connected is not reported as frozen', () => {
+  // `offline` is where a client state is born and where a namespace switch puts
+  // it back. Both rebuild the office from empty, so it means "no stream yet" -
+  // marking a desk stale for it would be a freeze that never happened.
+  const store = new NamespaceStore({ namespace: 'demo' });
+  seedDemoStore(store);
+  const fresh = applySnapshot(createClientState('demo'), snapshotOf(store));
+  assert.equal(fresh.connection.phase, 'offline');
+  assert.ok(selectDesks(fresh).every((desk) => desk.stale === false));
+  assert.equal(isStale({ ...fresh.connection, phase: 'connecting' }), false);
+  assert.equal(isStale({ ...fresh.connection, phase: 'open' }), false, 'an open stream is live');
+  assert.equal(isStale(null), true, 'no connection at all is not something to vouch for');
+});
+
+test('every status LIVE can actually produce is one this screen can read', () => {
+  // The classification refuses to guess, which means a status the vocabulary
+  // does not know now renders as 状態不明. That is right for a label nobody
+  // planned for - and badly wrong for one the adapter emits on every successful
+  // tool call. `ok` was exactly that, and it reached a browser before a test.
+  //
+  // Pinned to the lifecycle table itself, so a new row there cannot quietly ship
+  // a status the office cannot describe.
+  const statuses = new Set(
+    [...HOOK_EVENT_LIFECYCLE.values()].map((lifecycle) => lifecycle.status).filter(
+      (status): status is string => typeof status === 'string' && status.length > 0,
+    ),
+  );
+  assert.ok(statuses.size >= 6, 'the lifecycle table really was read');
+
+  for (const status of statuses) {
+    const classified = classifyStatus(status);
+    assert.notEqual(classified, null, `LIVE status "${status}" has no visual state`);
+    // Both flag values, because the fallback must not be what rescues it.
+    for (const active of [true, false]) {
+      assert.notEqual(
+        classifyActor({ status, active }).state,
+        'unknown',
+        `LIVE status "${status}" must not read as 状態不明 (active: ${active})`,
+      );
+    }
+  }
+});
+
+test('the statuses the scripted mission reports are readable too, except the one that is not', () => {
+  // The mission deliberately contains one uninterpretable status, to show the
+  // honest case. Every other beat must classify.
+  const deliberatelyUnknown = 'sync_pending';
+  for (const beat of DEMO_TIMELINE) {
+    if (beat.status === null) continue;
+    if (beat.status === deliberatelyUnknown) {
+      assert.equal(classifyStatus(beat.status), null, 'the unknown case stays unknown');
+      continue;
+    }
+    assert.notEqual(
+      classifyStatus(beat.status),
+      null,
+      `demo status "${beat.status}" should be readable`,
+    );
+  }
 });

@@ -20,9 +20,9 @@ import { loadConfig } from '../src/config.ts';
 import { QuestServer } from '../src/server/server.ts';
 import { httpGet, openSse } from './helpers.ts';
 
-import type { ActorVisualState } from '../src/ui/public/quest-view.js';
+import type { ActorDisplayState } from '../src/ui/public/quest-view.js';
 import {
-  ACTOR_VISUAL_STATES,
+  ACTOR_LEGEND_STATES,
   applyEvent,
   createClientState,
   selectBanner,
@@ -67,22 +67,44 @@ test('the DEMO scenario needs no credential, no LIVE input and no network', () =
   const manifest = JSON.parse(readFileSync(new URL('package.json', REPO_ROOT), 'utf8')) as {
     scripts: Record<string, string>;
   };
-  const script = manifest.scripts['demo'] ?? '';
+  // Two demos, and both have to be safe: `demo` plays the scripted mission,
+  // `demo:static` folds in the fixed frame the legend is read against.
+  const play = manifest.scripts['demo'] ?? '';
+  const still = manifest.scripts['demo:static'] ?? '';
 
-  assert.ok(script.includes('QUEST_DEMO=1'), 'npm run demo opts into the fixtures');
-  assert.ok(
-    script.includes('QUEST_INPUT_PATH:-/dev/null'),
-    'npm run demo falls back to /dev/null, so no LIVE file is required',
-  );
-  // Nothing that could reach a secret, a personal path or the network.
-  assert.equal(/https?:\/\/|curl|wget|token|key|secret|password/i.test(script), false, 'demo script is offline');
-  assert.equal(/\/(Users|home|root)\/|~\//.test(script), false, 'demo script embeds no personal path');
+  assert.ok(play.includes('QUEST_DEMO_PLAY=1'), 'npm run demo opts into the scripted mission');
+  assert.ok(still.includes('QUEST_DEMO=1'), 'npm run demo:static opts into the fixtures');
+  assert.equal(play.includes('QUEST_DEMO=1'), false, 'the two demos are not both on at once');
 
-  // The env `npm run demo` produces really does seed, and does not need a path
-  // beyond the one the script defaults in.
-  const config = loadConfig({ QUEST_DEMO: '1', QUEST_INPUT_PATH: '/dev/null' });
-  assert.equal(config.seedDemo, true);
-  assert.equal(config.inputPath, '/dev/null');
+  for (const [name, script] of [['demo', play], ['demo:static', still]] as const) {
+    assert.ok(
+      script.includes('QUEST_INPUT_PATH:-/dev/null'),
+      `npm run ${name} falls back to /dev/null, so no LIVE file is required`,
+    );
+    // Nothing that could reach a secret, a personal path or the network.
+    assert.equal(
+      /https?:\/\/|curl|wget|token|key|secret|password/i.test(script),
+      false,
+      `npm run ${name} is offline`,
+    );
+    assert.equal(
+      /\/(Users|home|root)\/|~\//.test(script),
+      false,
+      `npm run ${name} embeds no personal path`,
+    );
+  }
+
+  // The env each script produces really does what its name says, and needs no
+  // path beyond the one the script defaults in.
+  const still_ = loadConfig({ QUEST_DEMO: '1', QUEST_INPUT_PATH: '/dev/null' });
+  assert.equal(still_.seedDemo, true);
+  assert.equal(still_.demoPlay, false, 'the still frame starts no timer');
+  assert.equal(still_.inputPath, '/dev/null');
+
+  const play_ = loadConfig({ QUEST_DEMO_PLAY: '1', QUEST_INPUT_PATH: '/dev/null' });
+  assert.equal(play_.demoPlay, true);
+  assert.equal(play_.seedDemo, false, 'the mission does not also fold in the still frame');
+  assert.equal(play_.inputPath, '/dev/null');
 });
 
 test('the fixtures are a fixed, bounded, read-only list', () => {
@@ -118,16 +140,16 @@ test('the fixtures never halt the DEMO store or get rejected', () => {
   assert.equal(store.stats.rejected, 0, 'no fixture event is rejected');
 });
 
-// ------------------------------------------------------- the five states ---
+// ---------------------------------------------------- every visual state ---
 
-test('the DEMO scenario shows all five states at once, deterministically', () => {
+test('the DEMO scenario shows every visual state at once, deterministically', () => {
   const desks = selectDesks(foldDemo());
-  const states = new Set<ActorVisualState>(desks.map((desk) => desk.visual.state));
+  const states = new Set<ActorDisplayState>(desks.map((desk) => desk.visual.state));
 
-  for (const state of ACTOR_VISUAL_STATES) {
+  for (const state of ACTOR_LEGEND_STATES) {
     assert.ok(states.has(state), `the DEMO office contains a desk in the ${state} state`);
   }
-  assert.equal(states.size, ACTOR_VISUAL_STATES.length, 'and nothing outside the closed set');
+  assert.equal(states.size, ACTOR_LEGEND_STATES.length, 'and nothing outside the closed set');
 
   // Seat order is fixed too, so a demo always looks the same.
   assert.deepEqual(
@@ -223,7 +245,16 @@ test('the whole DEMO path works over HTTP, and leaves LIVE empty', async () => {
 
     assert.equal(payload.namespace, 'demo');
     assert.equal(payload.halted, false, 'the demo does not fail closed');
-    assert.equal(Object.keys(payload.state.actors).length, 6, 'every demo actor is in the snapshot');
+    // Derived from the fixtures, not hard-coded: adding a state to the scenario
+    // must not silently start under-asserting what the snapshot carries.
+    const expectedActors = new Set(
+      DEMO_EVENTS.map((event) => `${event.session_id}\u0000${String(event.agent_id)}`),
+    ).size;
+    assert.equal(
+      Object.keys(payload.state.actors).length,
+      expectedActors,
+      'every demo actor is in the snapshot',
+    );
     stream.close();
 
     // The LIVE side of the same process never saw any of it.
