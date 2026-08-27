@@ -64,7 +64,22 @@ const ORG_IDENTIFIER = /^[a-z0-9][a-z0-9-]{0,63}$/;
  */
 const WIRE_LABEL = /^[A-Za-z0-9_.:@#| -]{1,128}$/;
 
+/**
+ * Upstream's `maxLength: 100` on a display name, in the units the upstream
+ * schema means. JSON Schema counts *characters* - Unicode code points - so an
+ * emoji or a rare CJK ideograph outside the BMP costs one, not the two UTF-16
+ * code units JavaScript's `String.prototype.length` charges for. Counting code
+ * units here would refuse names the producer's own `validate_org.py` accepts,
+ * which turns a shared limit into two different limits.
+ */
 const MAX_DISPLAY_NAME_CHARS = 100;
+
+/** Code points, not UTF-16 code units: the iterator pairs surrogates for us. */
+function codePointLength(value: string): number {
+  let count = 0;
+  for (const _ of value) count += 1;
+  return count;
+}
 
 const ROLE_KINDS = ['executive', 'department', 'staff', 'assistant'] as const;
 export type OrgRoleKind = (typeof ROLE_KINDS)[number];
@@ -162,7 +177,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function checkDisplayName(value: unknown, field: string): OrgRejectRule | null {
   if (typeof value !== 'string') return 'type_error';
   if (value.length === 0) return 'invalid_format';
-  if (value.length > MAX_DISPLAY_NAME_CHARS) return 'field_too_long';
+  if (codePointLength(value) > MAX_DISPLAY_NAME_CHARS) return 'field_too_long';
   if (hasControlChars(value)) return 'control_chars';
   if (scanUnsafe(value) !== null) return 'unsafe_content';
   return null;
