@@ -6,7 +6,8 @@ runtime挙動、wire schema、SSE frame、環境変数、依存、workflow の�
 
 関連: [loop-control-plane-design.md](loop-control-plane-design.md)（本体） /
 [org-snapshot-design.md](org-snapshot-design.md) /
-[event-contract.md](event-contract.md) / [live-wire-contract.md](live-wire-contract.md)
+[event-contract.md](event-contract.md) / [live-wire-contract.md](live-wire-contract.md) /
+[run-event-contract.md](run-event-contract.md)（COST-0 attribution contract の正本）
 
 ---
 
@@ -689,6 +690,16 @@ docs タスクでした。ここへ **additive / optional** として次を加�
 **なぜ「範囲を最小限拡張」に留めるのか**: 集計・保存・表示・enforcement を
 LCP-1 に含めると、docs-only ではなくなり、Quest MVP の前に大きな設計が挟まります。
 **contract だけを先に置き、実装は全部後ろへ送ります。**
+
+> **現況（COST-0 確定後）**: 上記 5 点は
+> [run-event-contract.md](run-event-contract.md) §9 に **additive / optional** として
+> 確定済みです。envelope の次元・必須性・`cost_status` の cross-field invariant・
+> `unattributed` / `unknown_role` / `resolution` の扱い・evidence linkage・
+> provider 非依存の event code 命名規則の**正本はそちら**で、本文書の §3 / §4.1 は
+> 根拠と理由づけを述べたものです。両者が食い違った場合は LCP-1 の成果物が正です。
+> §12.2 の未決事項 1（本体文書の実内容を読めていない）は、本 run で本体文書を
+> 読んだうえで突き合わせたため **解消**しています（突き合わせの結果は
+> [run-event-contract.md](run-event-contract.md) §11）。
 
 ### 9.3 cost/ROI の後続 PR 候補（依存順・A/B/C/D 推定）
 

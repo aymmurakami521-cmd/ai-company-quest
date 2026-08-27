@@ -11,7 +11,10 @@ runtime 挙動、環境変数、依存のいずれも追加しません。
 実装とこの文書が食い違った場合は、常に **実装（`src/`）が正** です。
 
 関連: [event-contract.md](event-contract.md) / [live-wire-contract.md](live-wire-contract.md) /
-[org-snapshot-design.md](org-snapshot-design.md)
+[org-snapshot-design.md](org-snapshot-design.md) /
+[run-event-contract.md](run-event-contract.md)（LCP-1 の成果物・語彙の正本） /
+[role-binding-registry.md](role-binding-registry.md) /
+[provider-neutral-scan.manifest.json](provider-neutral-scan.manifest.json)
 
 **この文書の言語**: 日本語散文 + 英語識別子。既存 docs の慣行に合わせています（§11）。
 
@@ -839,6 +842,16 @@ runtime・workflow・依存を変更しないため、LCP-1 は分類 A のま�
   `docs/run-event-contract.md` の 2 件を含みます**（§17.2.1）。
 - **CI での実行は WF-1（分類 C）** です。LCP-1 は判定に必要な宣言を揃えるところまでで、
   検査を走らせる workflow は owner 承認・owner 実施の範囲に留めます（§15 の WF-1 行）。
+
+> **現況（LCP-1 完了後）**: 上表の 3 件は **作成済み**です。確定した state code / event code /
+> evidence kind / failure type と、COST-0 の usage / cost attribution envelope の正本は
+> [run-event-contract.md](run-event-contract.md) です。本文書の §4.1 / §5.2 / §6.1 / §8.4 は
+> **概念と根拠**を述べたままで、**語彙の正本ではありません**。両者が食い違った場合は
+> LCP-1 の成果物が正です。
+> 恒久的な除外面の名指し一覧（§17.1）は、
+> [role-binding-registry.md](role-binding-registry.md) §5.1 と manifest の
+> `permanently_excluded_paths` が最新です。本文書執筆後に追加された
+> `docs/cost-governance-roi-design.md` と manifest 自身がそちらに含まれています。
 
 ---
 
