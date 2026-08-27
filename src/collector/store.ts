@@ -16,6 +16,8 @@
 import type { Namespace, SanitizedEvent } from '../domain/event.ts';
 import type { ActorDirectory } from '../domain/actor.ts';
 import { resolveActorFromEvent } from '../domain/actor.ts';
+import type { OrgState } from '../domain/orgSnapshot.ts';
+import { ORG_ABSENT } from '../domain/orgSnapshot.ts';
 import type { IngestedEvent, PlayerEntity, QuestState, StateLimits } from '../domain/reducer.ts';
 import { DEFAULT_STATE_LIMITS, checkStateLimits, createInitialState, reduce } from '../domain/reducer.ts';
 import { emptyRecord, ownProperty } from '../domain/record.ts';
@@ -105,6 +107,12 @@ export type StoreOptions = {
   maxLineBytes?: number;
   directory?: ActorDirectory;
   player?: PlayerEntity;
+  /**
+   * The org snapshot this namespace serves. Supplied by the caller, per store,
+   * so LIVE and DEMO never share one: omitting it leaves the namespace with no
+   * org at all, which is the default for both.
+   */
+  org?: OrgState;
   /** Per-limit overrides; anything omitted keeps `DEFAULT_STATE_LIMITS`. */
   stateLimits?: Partial<StateLimits>;
 };
@@ -145,7 +153,7 @@ export class NamespaceStore {
     this.seenIds = new BoundedIdSet(options.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY);
     this.directory = options.directory;
     this.stateLimits = { ...DEFAULT_STATE_LIMITS, ...options.stateLimits };
-    this.state = createInitialState(options.namespace, options.player, this.stateLimits);
+    this.state = createInitialState(options.namespace, options.player, this.stateLimits, options.org ?? ORG_ABSENT);
     this.nextIngestSeq = 1;
     this.listeners = new Set();
     this.haltListeners = new Set();

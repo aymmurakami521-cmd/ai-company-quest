@@ -8,7 +8,8 @@
  * Invariants enforced here:
  * - `reduce` never mutates its input state.
  * - The human `player` entity is not an input to, nor an output of, event
- *   handling. Events cannot change it, ever.
+ *   handling. Events cannot change it, ever. The `org` slot is held on exactly
+ *   the same terms: it comes from configuration, not from the stream.
  * - A state belongs to exactly one namespace; folding a foreign-namespace event
  *   throws instead of silently mixing LIVE and DEMO.
  * - Everything the state retains per event is bounded by explicit limits carried
@@ -23,6 +24,8 @@
 
 import type { Namespace, SanitizedEvent } from './event.ts';
 import type { ResolvedActor } from './actor.ts';
+import type { OrgState } from './orgSnapshot.ts';
+import { ORG_ABSENT } from './orgSnapshot.ts';
 import { copyRecord, emptyRecord, ownProperty } from './record.ts';
 
 /** An accepted, de-duplicated event with its collector-assigned sequence. */
@@ -113,6 +116,14 @@ export type StateLimitViolation = {
 export type QuestState = {
   namespace: Namespace;
   player: PlayerEntity;
+  /**
+   * The validated organisation snapshot, or the reason there is none.
+   *
+   * Independent of the event state on purpose (see `domain/orgSnapshot.ts`):
+   * it is supplied once at startup from configuration, `reduce` only carries it
+   * by reference, and no event can create, change or remove it.
+   */
+  org: OrgState;
   limits: StateLimits;
   sessions: Record<string, SessionState>;
   actors: Record<string, ActorState>;
@@ -150,10 +161,12 @@ export function createInitialState(
   namespace: Namespace,
   player: PlayerEntity = DEFAULT_PLAYER,
   limits: StateLimits = DEFAULT_STATE_LIMITS,
+  org: OrgState = ORG_ABSENT,
 ): QuestState {
   return {
     namespace,
     player,
+    org,
     limits: { ...limits },
     sessions: emptyRecord<SessionState>(),
     actors: emptyRecord<ActorState>(),
@@ -335,6 +348,9 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
     namespace: state.namespace,
     // Carried by reference on purpose: events can never touch the player.
     player: state.player,
+    // Same rule for the org snapshot: it is configuration, and no event may
+    // create, update or invalidate it.
+    org: state.org,
     // Likewise: limits are configuration, not something a producer can raise.
     limits: state.limits,
     sessions: nextSessions,

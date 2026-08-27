@@ -107,6 +107,7 @@ DEMOは**読み取り専用**です。画面から任意commandを実行する�
 | `QUEST_DEDUPE_CAPACITY` | `100000` | `event_id` 重複排除indexの上限 |
 | `QUEST_DEMO` | 未設定 | `1` でDEMO storeにfixtureを投入 |
 | `QUEST_PLAYER_NAME` | `Player` | human playerの表示名 |
+| `QUEST_ORG_SNAPSHOT_PATH` | 未設定 | LIVEのorg snapshot JSONのpath。未設定は正常な「org snapshotなし」。読めない／検証に落ちた場合もorg機能だけがoffになり、ingestは止まりません（LIVE専用・DEMOは参照しません） |
 
 bind hostは **設定できません**。常に `127.0.0.1` です。
 

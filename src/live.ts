@@ -8,6 +8,7 @@
 
 import { loadConfig } from './config.ts';
 import type { PlayerEntity } from './domain/reducer.ts';
+import { loadOrgSnapshotFile } from './collector/orgLoader.ts';
 import { NamespaceStore } from './collector/store.ts';
 import { Collector } from './collector/collector.ts';
 import { seedDemoStore } from './demo/fixtures.ts';
@@ -26,6 +27,18 @@ export async function main(): Promise<number> {
 
   const player: PlayerEntity = { kind: 'player', id: 'player', display_name: config.playerName };
 
+  // Read once, at startup, from configuration only. A refusal disables the org
+  // slot for LIVE and nothing else: ingestion below still starts and still runs.
+  const org = loadOrgSnapshotFile(config.orgSnapshotPath);
+  if (org.status === 'rejected' && org.reject !== null) {
+    // Closed vocabulary only: a rule name and a structural field path. Never the
+    // path that was read, and never anything the file contained.
+    process.stderr.write(
+      `quest: org snapshot rejected (${org.reject.rule}:${org.reject.field}). ` +
+        'Org features stay off; LIVE ingestion is unaffected.\n',
+    );
+  }
+
   const live = new NamespaceStore({
     namespace: 'live',
     // The external contract, stated once and never inferred from a payload.
@@ -35,12 +48,15 @@ export async function main(): Promise<number> {
     dedupeCapacity: config.dedupeCapacity,
     maxLineBytes: config.maxLineBytes,
     player,
+    org,
   });
 
   const demo = new NamespaceStore({
     namespace: 'demo',
     // DEMO fixtures are already normalized; they never pass through the external
     // LIVE validator, and the external wire never reaches this store.
+    // No `org` either: DEMO performs no external I/O, so it never sees the LIVE
+    // configured path or the snapshot read from it.
     inputContract: 'internal_normalized',
     failClosedOnUnsupportedSchema: false,
     replayCapacity: config.replayCapacity,
