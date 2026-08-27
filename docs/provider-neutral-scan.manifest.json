@@ -1,0 +1,85 @@
+{
+  "manifest_version": 1,
+  "purpose": "Machine-readable judgement set for the provider-neutrality acceptance criterion. Declaration only: no runtime, workflow, or dependency reads this file. CI execution is out of scope for LCP-1 and belongs to WF-1.",
+  "spec_refs": {
+    "criterion": "docs/loop-control-plane-design.md",
+    "contract": "docs/run-event-contract.md",
+    "token_source": "docs/role-binding-registry.md"
+  },
+  "token_source_ref": "docs/role-binding-registry.md",
+  "token_source_digest_algorithm": "sha256",
+  "token_source_digest": "sha256:287f482f21f1f549b0117c9cdde05851a5d5a968d29ce19ec71a688603148149",
+  "forbidden_tokens": [
+    "anthropic",
+    "chatgpt",
+    "claude",
+    "codex",
+    "gpt",
+    "haiku",
+    "openai",
+    "opus",
+    "sonnet"
+  ],
+  "include_paths": [
+    "docs/event-contract.md",
+    "docs/run-event-contract.md"
+  ],
+  "exceptions": [
+    {
+      "path": "docs/event-contract.md",
+      "token": "claude",
+      "expected_occurrences": 4,
+      "reason": "Four occurrences describe the adapter boundary rather than the neutral model itself: (1) the statement that the external LIVE wire is a different contract, (2) the LIVE store inputContract binding value, (3) the semantic note on runtime_agent_type, and (4) the origin note for internal_task. None of them is a field name or a closed-vocabulary value of the neutral internal event model.",
+      "owner": "OWNER",
+      "expires_with": "LCP-3"
+    }
+  ],
+  "matching": {
+    "normalization": [
+      "nfkc",
+      "lowercase",
+      "collapse_separator_runs_to_single_space"
+    ],
+    "separator_class": "[-_./ ]",
+    "applies_to": "both_subject_text_and_tokens",
+    "mode": "substring",
+    "case_sensitive": false
+  },
+  "evaluation": {
+    "pass_condition": "zero hits remain after subtracting declared exceptions",
+    "fail_closed": true,
+    "missing_include_path": "FAIL",
+    "token_source_digest_mismatch": "FAIL",
+    "exception_occurrences_exceeded": "FAIL",
+    "exception_path_not_in_include_paths": "FAIL",
+    "exception_token_not_in_forbidden_tokens": "FAIL",
+    "exception_expired": "FAIL",
+    "undeclared_hit": "FAIL"
+  },
+  "exception_expiry_semantics": {
+    "one_of_required": [
+      "expires_at",
+      "expires_with"
+    ],
+    "expires_at": "ISO-8601 date; FAIL once the date has passed",
+    "expires_with": "roadmap id; FAIL once that roadmap item is complete"
+  },
+  "permanently_excluded_paths": [
+    "docs/role-binding-registry.md",
+    "docs/provider-neutral-scan.manifest.json",
+    "docs/loop-control-plane-design.md",
+    "docs/cost-governance-roi-design.md",
+    "docs/live-wire-contract.md",
+    "docs/org-snapshot-design.md",
+    "README.md",
+    ".github/workflows/**",
+    "test/**",
+    "src/domain/hookWire.ts",
+    "src/domain/hookAdapter.ts"
+  ],
+  "include_path_rules": {
+    "full_paths_only": true,
+    "directory_globs_allowed": false,
+    "add_when_file_exists": "A PR that creates a new provider-neutral contract, schema, or read-model surface must add its full path here in the same PR."
+  }
+}
