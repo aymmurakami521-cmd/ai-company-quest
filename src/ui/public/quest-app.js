@@ -21,7 +21,7 @@
 import { drawWorld } from './quest-canvas.js';
 import { buildWorld, measureCanvasViewport } from './quest-world.js';
 import {
-  ACTOR_VISUAL_STATES,
+  ACTOR_LEGEND_STATES,
   applyFrame,
   createClientState,
   describeFreshness,
@@ -141,7 +141,7 @@ function text(node, selector, value) {
 
 function renderLegend() {
   dom.legend.replaceChildren();
-  for (const name of ACTOR_VISUAL_STATES) {
+  for (const name of ACTOR_LEGEND_STATES) {
     const visual = visualForState(name);
     const row = dom.legendTemplate.content.cloneNode(true);
     const item = row.querySelector('.legend__row');

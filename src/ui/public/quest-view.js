@@ -34,14 +34,30 @@ export const PLAYER_NAME_MAX = 64;
 /** Ceiling on the client-side activity log. */
 export const MAX_LOG_ENTRIES = 50;
 
-/** Every visual state a desk can be in, in banner priority order. */
+/**
+ * Every visual state a *status label* can be classified into, in priority order.
+ *
+ * `unknown` is deliberately absent: it is not something a status can match, it
+ * is where the screen lands when it refuses to guess. See `classifyActor`.
+ */
 export const ACTOR_VISUAL_STATES = Object.freeze([
   'error',
   'awaiting_approval',
+  'planning',
   'working',
   'ended',
   'idle',
 ]);
+
+/**
+ * Every state the screen can actually display, including `unknown`.
+ *
+ * The legend and `selectHeader`'s per-state counts iterate this list, not
+ * `ACTOR_VISUAL_STATES`: a desk that lands on `unknown` must have a legend row
+ * to explain it and a counter bucket to land in. Counting into an uninitialised
+ * bucket would produce `NaN` in the header instead of a number.
+ */
+export const ACTOR_LEGEND_STATES = Object.freeze([...ACTOR_VISUAL_STATES, 'unknown']);
 
 /**
  * Visual vocabulary. Each state carries a symbol AND a readable label, so the
@@ -55,9 +71,16 @@ const ACTOR_VISUALS = Object.freeze({
     label: '承認待ち',
     symbol: '‼',
   }),
+  planning: Object.freeze({ state: 'planning', code: 'PLANNING', label: '計画中', symbol: '◆' }),
   working: Object.freeze({ state: 'working', code: 'WORKING', label: '作業中', symbol: '▶' }),
   ended: Object.freeze({ state: 'ended', code: 'ENDED', label: '完了 / 終了', symbol: '■' }),
   idle: Object.freeze({ state: 'idle', code: 'IDLE', label: '待機中', symbol: '⋯' }),
+  /**
+   * Not a state the session reported - the state the screen has when it will
+   * not guess. Reached two ways: a status label this vocabulary does not know,
+   * and a desk whose stream is no longer live (see `selectDesks`).
+   */
+  unknown: Object.freeze({ state: 'unknown', code: 'UNKNOWN', label: '状態不明', symbol: '?' }),
 });
 
 /**
@@ -74,9 +97,23 @@ const STATUS_TOKENS = Object.freeze({
     'approval', 'approve', 'approvals', 'permission', 'permissions', 'confirm', 'confirmation',
     'consent', 'authorize', 'authorization', 'ask', 'asking',
   ]),
+  /**
+   * Only labels that say the session is *in a planning phase*. Deliberately
+   * narrow: `thinking`, `reasoning` and `designing` are what an agent does while
+   * working, not a declared planning phase, so they stay in `working` below. The
+   * screen must never infer "planning" from a word that merely sounds like it.
+   *
+   * `statusTokens` splits on non-alphanumerics, so `plan_mode` and `plan-mode`
+   * both reduce to the `plan` token and are covered here.
+   */
+  planning: Object.freeze(['plan', 'planning']),
   working: Object.freeze([
     'active', 'running', 'run', 'working', 'work', 'busy', 'thinking', 'executing', 'execute',
     'streaming', 'started', 'start', 'progress', 'tool',
+    // Listed explicitly so they classify as work rather than falling through to
+    // `unknown` now that an unrecognised label no longer guesses.
+    'reasoning', 'designing', 'design', 'implementing', 'implement', 'building', 'build',
+    'testing', 'test', 'reviewing', 'review', 'verifying', 'verify',
   ]),
   ended: Object.freeze([
     'ended', 'end', 'stopped', 'stop', 'completed', 'complete', 'done', 'finished', 'finish',
@@ -211,16 +248,25 @@ export function visualForState(state) {
  * The one place a desk's appearance is decided.
  *
  * - a recognised `status` wins, because it is what the session actually said;
- * - an unrecognised or absent status falls back to the `active` flag the shared
- *   reducer maintains;
  * - a "working" status on an actor the reducer has already deactivated reads as
- *   ended, since the stop event is the newer fact.
+ *   ended, since the stop event is the newer fact;
+ * - a status that is *present but unrecognised* reads as `unknown`. The producer
+ *   said something this screen cannot interpret, and reporting that honestly is
+ *   the only correct answer - guessing "working" or "idle" from the `active`
+ *   flag would be the screen inventing a state the session never claimed;
+ * - a status that is *absent* still falls back to `active`, because that flag is
+ *   a structural fact the shared reducer derives from `event_type` (an
+ *   `agent_start` happened, or an `agent_stop` did). That is an observation, not
+ *   a guess, which is why it survives while the case above does not.
  */
 export function classifyActor(actor) {
-  const active = actor !== null && actor !== undefined && actor.active === true;
-  const classified = classifyStatus(actor === null || actor === undefined ? null : actor.status);
+  const present = actor !== null && actor !== undefined;
+  const active = present && actor.active === true;
+  const status = present ? actor.status : null;
+  const classified = classifyStatus(status);
   if (classified === 'working' && !active) return ACTOR_VISUALS.ended;
   if (classified !== null) return ACTOR_VISUALS[classified];
+  if (typeof status === 'string' && status.length > 0) return ACTOR_VISUALS.unknown;
   return active ? ACTOR_VISUALS.working : ACTOR_VISUALS.idle;
 }
 
@@ -680,7 +726,8 @@ export function selectPlayer(state) {
 export function selectHeader(state) {
   const desks = selectDesks(state);
   const byState = emptyMap();
-  for (const name of ACTOR_VISUAL_STATES) byState[name] = 0;
+  // Every displayable state, `unknown` included - see `ACTOR_LEGEND_STATES`.
+  for (const name of ACTOR_LEGEND_STATES) byState[name] = 0;
   for (const desk of desks) byState[desk.visual.state] += 1;
   return {
     mode: state.namespace === 'live' ? 'LIVE' : 'DEMO',

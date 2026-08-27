@@ -20,9 +20,9 @@ import { loadConfig } from '../src/config.ts';
 import { QuestServer } from '../src/server/server.ts';
 import { httpGet, openSse } from './helpers.ts';
 
-import type { ActorVisualState } from '../src/ui/public/quest-view.js';
+import type { ActorDisplayState } from '../src/ui/public/quest-view.js';
 import {
-  ACTOR_VISUAL_STATES,
+  ACTOR_LEGEND_STATES,
   applyEvent,
   createClientState,
   selectBanner,
@@ -118,16 +118,16 @@ test('the fixtures never halt the DEMO store or get rejected', () => {
   assert.equal(store.stats.rejected, 0, 'no fixture event is rejected');
 });
 
-// ------------------------------------------------------- the five states ---
+// ---------------------------------------------------- every visual state ---
 
-test('the DEMO scenario shows all five states at once, deterministically', () => {
+test('the DEMO scenario shows every visual state at once, deterministically', () => {
   const desks = selectDesks(foldDemo());
-  const states = new Set<ActorVisualState>(desks.map((desk) => desk.visual.state));
+  const states = new Set<ActorDisplayState>(desks.map((desk) => desk.visual.state));
 
-  for (const state of ACTOR_VISUAL_STATES) {
+  for (const state of ACTOR_LEGEND_STATES) {
     assert.ok(states.has(state), `the DEMO office contains a desk in the ${state} state`);
   }
-  assert.equal(states.size, ACTOR_VISUAL_STATES.length, 'and nothing outside the closed set');
+  assert.equal(states.size, ACTOR_LEGEND_STATES.length, 'and nothing outside the closed set');
 
   // Seat order is fixed too, so a demo always looks the same.
   assert.deepEqual(
@@ -223,7 +223,16 @@ test('the whole DEMO path works over HTTP, and leaves LIVE empty', async () => {
 
     assert.equal(payload.namespace, 'demo');
     assert.equal(payload.halted, false, 'the demo does not fail closed');
-    assert.equal(Object.keys(payload.state.actors).length, 6, 'every demo actor is in the snapshot');
+    // Derived from the fixtures, not hard-coded: adding a state to the scenario
+    // must not silently start under-asserting what the snapshot carries.
+    const expectedActors = new Set(
+      DEMO_EVENTS.map((event) => `${event.session_id}\u0000${String(event.agent_id)}`),
+    ).size;
+    assert.equal(
+      Object.keys(payload.state.actors).length,
+      expectedActors,
+      'every demo actor is in the snapshot',
+    );
     stream.close();
 
     // The LIVE side of the same process never saw any of it.

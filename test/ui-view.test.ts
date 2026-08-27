@@ -16,8 +16,14 @@ import type { WireEvent } from '../src/domain/wire.ts';
 import { WIRE_EVENT_KEYS } from '../src/domain/wire.ts';
 import { makeEvent } from './helpers.ts';
 
-import type { ActorVisualState, ClientState, HaltReasonToken } from '../src/ui/public/quest-view.js';
+import type {
+  ActorDisplayState,
+  ActorVisualState,
+  ClientState,
+  HaltReasonToken,
+} from '../src/ui/public/quest-view.js';
 import {
+  ACTOR_LEGEND_STATES,
   ACTOR_VISUAL_STATES,
   MAX_LOG_ENTRIES,
   PLAYER_NAME_MAX,
@@ -73,7 +79,7 @@ function foldAll(namespace: string, wires: readonly WireEvent[]): ClientState {
 
 // --------------------------------------------------------------- mapping ---
 
-type MappingCase = { name: string; status: string | null; active: boolean; expect: ActorVisualState };
+type MappingCase = { name: string; status: string | null; active: boolean; expect: ActorDisplayState };
 
 const MAPPING_CASES: MappingCase[] = [
   { name: 'no status, never started', status: null, active: false, expect: 'idle' },
@@ -100,10 +106,26 @@ const MAPPING_CASES: MappingCase[] = [
   { name: 'denied', status: 'denied', active: false, expect: 'error' },
   { name: 'error outranks completion', status: 'completed_with_error', active: false, expect: 'error' },
   { name: 'approval outranks tool work', status: 'tool_use_approval', active: true, expect: 'awaiting_approval' },
-  { name: 'unknown label, active', status: 'frobnicating', active: true, expect: 'working' },
-  { name: 'unknown label, inactive', status: 'frobnicating', active: false, expect: 'idle' },
+  // A status the producer sent but this screen has no vocabulary for. The
+  // `active` flag is NOT consulted: guessing "working" or "idle" here would be
+  // the screen claiming a state the session never reported.
+  { name: 'unknown label, active', status: 'frobnicating', active: true, expect: 'unknown' },
+  { name: 'unknown label, inactive', status: 'frobnicating', active: false, expect: 'unknown' },
   { name: 'working label on a stopped actor', status: 'active', active: false, expect: 'ended' },
+  // No status at all still falls back to the reducer's structural `active`
+  // flag, which is derived from `event_type` - an observation, not a guess.
   { name: 'empty label', status: '', active: false, expect: 'idle' },
+  { name: 'no label, active', status: null, active: true, expect: 'working' },
+  { name: 'no label, inactive', status: null, active: false, expect: 'idle' },
+  // Planning is reached only from a label that declares a planning phase.
+  { name: 'plan', status: 'plan', active: true, expect: 'planning' },
+  { name: 'planning', status: 'planning', active: true, expect: 'planning' },
+  { name: 'plan_mode', status: 'plan_mode', active: true, expect: 'planning' },
+  { name: 'plan-mode', status: 'plan-mode', active: true, expect: 'planning' },
+  // ...and never from a word that merely sounds like it. These stay WORKING.
+  { name: 'thinking is work, not planning', status: 'thinking', active: true, expect: 'working' },
+  { name: 'reasoning is work, not planning', status: 'reasoning', active: true, expect: 'working' },
+  { name: 'designing is work, not planning', status: 'designing', active: true, expect: 'working' },
 ];
 
 test('every actor status maps to exactly one visual state', () => {
@@ -116,7 +138,7 @@ test('every actor status maps to exactly one visual state', () => {
 test('each visual state carries a symbol and a readable label, not colour alone', () => {
   const symbols = new Set<string>();
   const labels = new Set<string>();
-  for (const state of ACTOR_VISUAL_STATES) {
+  for (const state of ACTOR_LEGEND_STATES) {
     const visual = visualForState(state);
     assert.equal(visual.state, state);
     assert.ok(visual.symbol.length > 0, `${state} has a symbol`);
@@ -125,8 +147,8 @@ test('each visual state carries a symbol and a readable label, not colour alone'
     symbols.add(visual.symbol);
     labels.add(visual.label);
   }
-  assert.equal(symbols.size, ACTOR_VISUAL_STATES.length, 'symbols are distinguishable');
-  assert.equal(labels.size, ACTOR_VISUAL_STATES.length, 'labels are distinguishable');
+  assert.equal(symbols.size, ACTOR_LEGEND_STATES.length, 'symbols are distinguishable');
+  assert.equal(labels.size, ACTOR_LEGEND_STATES.length, 'labels are distinguishable');
 });
 
 test('an unknown status classifies as nothing rather than guessing', () => {
@@ -605,8 +627,9 @@ test('the DEMO fixtures show every visual state at once', () => {
   const state = applySnapshot(createClientState('demo'), snapshotOf(store));
   const header = selectHeader(state);
 
-  for (const name of ACTOR_VISUAL_STATES) {
+  for (const name of ACTOR_LEGEND_STATES) {
     assert.ok(header.by_state[name] > 0, `DEMO shows at least one ${name} desk`);
+    assert.ok(Number.isInteger(header.by_state[name]), `${name} counts to an integer, never NaN`);
   }
   assert.equal(header.mode, 'DEMO');
   assert.equal(header.empty, false);

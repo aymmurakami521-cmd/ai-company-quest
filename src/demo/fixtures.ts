@@ -6,9 +6,11 @@
  * DEMO store; nothing in this file is reachable from the LIVE ingest path.
  *
  * The sequence is chosen so that folding all of it leaves one desk in each of
- * the five visual states the screen distinguishes - working, approval waiting,
- * idle, error and ended - in a single fixed frame. There are no timers and no
- * wall-clock dependency: the same fixtures always produce the same screen.
+ * the visual states the screen distinguishes - working, planning, approval
+ * waiting, idle, error, ended and unknown - in a single fixed frame. There are
+ * no timers and no wall-clock dependency: the same fixtures always produce the
+ * same screen, which is what makes this the state reference the legend can be
+ * read against.
  */
 
 import type { SanitizedEvent } from '../domain/event.ts';
@@ -127,6 +129,30 @@ export const DEMO_EVENTS: readonly SanitizedEvent[] = [
     summary: 'coordinating the demo team',
   },
   // A second session that finishes, so the screen also shows a completed desk.
+  // Planning: an explicitly declared planning phase. Only a status that says so
+  // reaches this state - the screen never infers planning from a word that
+  // merely sounds like thinking.
+  {
+    ...BASE,
+    event_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    ts: '2026-01-01T00:00:13.000Z',
+    event_type: 'agent_start',
+    agent_id: 'worker-5',
+    status: 'planning',
+    summary: 'planning the change before touching anything',
+  },
+  // Unknown: a well-formed status this screen has no vocabulary for. It must
+  // read as "状態不明", never as a guess derived from the `active` flag - the
+  // producer said something, and inventing a meaning for it would be a lie.
+  {
+    ...BASE,
+    event_id: 'ffffffff-ffff-4fff-9fff-ffffffffffff',
+    ts: '2026-01-01T00:00:14.000Z',
+    event_type: 'agent_start',
+    agent_id: 'worker-6',
+    status: 'sync_pending',
+    summary: 'reported a status this screen has no vocabulary for',
+  },
   {
     ...BASE,
     event_id: 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb',

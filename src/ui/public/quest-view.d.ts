@@ -5,7 +5,17 @@
  * so its contract is declared here and exercised by `test/ui-view.test.ts`.
  */
 
-export type ActorVisualState = 'error' | 'awaiting_approval' | 'working' | 'ended' | 'idle';
+/** States a status label can be classified into. `unknown` is not one of them. */
+export type ActorVisualState =
+  | 'error'
+  | 'awaiting_approval'
+  | 'planning'
+  | 'working'
+  | 'ended'
+  | 'idle';
+
+/** Every state the screen can display, including the one it lands on to avoid guessing. */
+export type ActorDisplayState = ActorVisualState | 'unknown';
 
 export type ConnectionPhase = 'offline' | 'connecting' | 'open' | 'reconnecting' | 'error';
 
@@ -18,7 +28,8 @@ export type Visual<TState extends string> = {
   readonly symbol: string;
 };
 
-export type ActorVisual = Visual<ActorVisualState>;
+/** Widened to the displayable set: `classifyActor` can land on `unknown`. */
+export type ActorVisual = Visual<ActorDisplayState>;
 export type ConnectionVisual = Visual<ConnectionPhase | 'fail_closed'>;
 
 /** The subset of a wire event this screen reads. */
@@ -188,7 +199,7 @@ export type Header = {
   last_ingest_seq: number;
   last_event_ts: string | null;
   last_frame_at_ms: number | null;
-  by_state: Record<ActorVisualState, number>;
+  by_state: Record<ActorDisplayState, number>;
 };
 
 /**
@@ -229,6 +240,7 @@ export declare const UNATTRIBUTED_AGENT_LABEL: string;
 export declare const PLAYER_NAME_MAX: number;
 export declare const MAX_LOG_ENTRIES: number;
 export declare const ACTOR_VISUAL_STATES: readonly ActorVisualState[];
+export declare const ACTOR_LEGEND_STATES: readonly ActorDisplayState[];
 export declare const BANNER_CODES: readonly BannerCode[];
 
 export declare function statusTokens(status: string | null): string[];

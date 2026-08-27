@@ -20,9 +20,9 @@ import { seedDemoStore } from '../src/demo/fixtures.ts';
 import type { QuestState } from '../src/domain/reducer.ts';
 import { makeEvent } from './helpers.ts';
 
-import type { ActorVisualState, ClientState, Desk, Header } from '../src/ui/public/quest-view.js';
+import type { ActorDisplayState, ClientState, Desk, Header } from '../src/ui/public/quest-view.js';
 import {
-  ACTOR_VISUAL_STATES,
+  ACTOR_LEGEND_STATES,
   applyFrame,
   applySnapshot,
   createClientState,
@@ -84,7 +84,7 @@ function liveState(events: readonly Record<string, unknown>[]): ClientState {
 }
 
 /** A synthetic desk, so one visual state at a time can be exercised. */
-function desk(seat: number, state: ActorVisualState, overrides: Partial<Desk> = {}): Desk {
+function desk(seat: number, state: ActorDisplayState, overrides: Partial<Desk> = {}): Desk {
   return {
     seat,
     actor_key: `sess-1::agent-${seat}`,
@@ -221,12 +221,12 @@ test('one actor, several actors: the grid is bounded and every desk fits the roo
   }
 });
 
-test('the DEMO office carries all five visual states through to the world', () => {
+test('the DEMO office carries every visual state through to the world', () => {
   const state = demoState();
   const world = buildWorld({ desks: selectDesks(state), header: selectHeader(state), viewport: VIEWPORT });
 
   const seen = new Set(world.actors.map((actor) => actor.state));
-  for (const name of ACTOR_VISUAL_STATES) assert.ok(seen.has(name), `the world keeps the ${name} state`);
+  for (const name of ACTOR_LEGEND_STATES) assert.ok(seen.has(name), `the world keeps the ${name} state`);
 
   // Every actor carries a symbol and a state code, not colour alone.
   for (const actor of world.actors) {

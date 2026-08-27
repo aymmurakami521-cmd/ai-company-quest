@@ -22,10 +22,12 @@
   --accent: #f7d51d;
 
   --state-working: #56d97e;
+  --state-planning: #c79bff;
   --state-awaiting_approval: #ffb347;
   --state-error: #ff6b6b;
   --state-ended: #99a2b8;
   --state-idle: #6ec5ff;
+  --state-unknown: #8b8fa3;
 
   /* The human player. Not one of the state colours, and never used for a desk. */
   --player-accent: #7fc8ff;
@@ -428,6 +430,9 @@ h3 {
 .desk[data-state='working'] {
   --state-color: var(--state-working);
 }
+.desk[data-state='planning'] {
+  --state-color: var(--state-planning);
+}
 .desk[data-state='awaiting_approval'] {
   --state-color: var(--state-awaiting_approval);
 }
@@ -439,6 +444,9 @@ h3 {
 }
 .desk[data-state='idle'] {
   --state-color: var(--state-idle);
+}
+.desk[data-state='unknown'] {
+  --state-color: var(--state-unknown);
 }
 
 .desk__card {
@@ -643,6 +651,9 @@ h3 {
 .legend__row[data-state='working'] {
   --state-color: var(--state-working);
 }
+.legend__row[data-state='planning'] {
+  --state-color: var(--state-planning);
+}
 .legend__row[data-state='awaiting_approval'] {
   --state-color: var(--state-awaiting_approval);
 }
@@ -654,6 +665,9 @@ h3 {
 }
 .legend__row[data-state='idle'] {
   --state-color: var(--state-idle);
+}
+.legend__row[data-state='unknown'] {
+  --state-color: var(--state-unknown);
 }
 
 .legend__code,

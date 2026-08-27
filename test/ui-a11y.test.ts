@@ -22,8 +22,9 @@ import assert from 'node:assert/strict';
 
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
 
-import type { ActorVisualState, Desk, Header } from '../src/ui/public/quest-view.js';
+import type { ActorDisplayState, ActorVisualState, Desk, Header } from '../src/ui/public/quest-view.js';
 import {
+  ACTOR_LEGEND_STATES,
   ACTOR_VISUAL_STATES,
   BANNER_CODES,
   applyFrame,
@@ -455,5 +456,25 @@ test('the accessibility layer needs no new asset, dependency or request', () => 
     const text = assetText(pathname);
     assert.equal(/https?:\/\//.test(text), false, `${pathname}: external URL`);
     assert.equal(/@import|url\(/.test(text), false, `${pathname}: external asset`);
+  }
+});
+
+test('every displayable state has its own colour rule, in the CSS that ships', () => {
+  // The desk and legend fall back to the idle colour for a state with no rule of
+  // its own. That fallback is silent, so a state added to the vocabulary without
+  // a matching rule would render as a plausible wrong colour rather than fail.
+  for (const state of ACTOR_LEGEND_STATES) {
+    assert.ok(
+      CSS.includes(`--state-${state}:`),
+      `quest.css defines a --state-${state} token`,
+    );
+    assert.ok(
+      CSS.includes(`.desk[data-state='${state}']`),
+      `quest.css binds the desk colour for ${state}`,
+    );
+    assert.ok(
+      CSS.includes(`.legend__row[data-state='${state}']`),
+      `quest.css binds the legend swatch for ${state}`,
+    );
   }
 });
