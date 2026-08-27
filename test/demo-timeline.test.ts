@@ -47,6 +47,30 @@ function snapshotOf(store: NamespaceStore): { namespace: string; state: QuestSta
   return { namespace: store.namespace, state: store.state };
 }
 
+/**
+ * Plays the whole script, giving the approval it stops for.
+ *
+ * `step()` on its own no longer reaches the end: the mission stops at
+ * `awaiting_approval` and stays there. Every case that wants the finished
+ * office goes through here, so the one explicit signal is visible in the test
+ * rather than hidden in a loop condition. `onStep` runs once per ingested beat,
+ * including the beat the approval itself ingests.
+ */
+function runToEnd(player: DemoPlayer, onStep: () => void = () => {}): number {
+  let approvals = 0;
+  for (;;) {
+    if (player.step()) {
+      onStep();
+      continue;
+    }
+    if (!player.awaitingApproval) break;
+    assert.equal(player.approve(), 'resumed', 'the wait is cleared by an approval, not by the loop');
+    approvals += 1;
+    onStep();
+  }
+  return approvals;
+}
+
 /** Folds the store's state into a connected client, the way the screen sees it. */
 function screen(store: NamespaceStore): ClientState {
   const state = applySnapshot(createClientState('demo'), snapshotOf(store));
@@ -68,7 +92,7 @@ test('the timeline refuses any namespace that is not DEMO', () => {
 test('every beat is a plain sanitized event, accepted by the ordinary validator', () => {
   const store = demoStore();
   const player = playerFor(store);
-  while (player.step());
+  runToEnd(player);
 
   assert.equal(store.stats.accepted, DEMO_TIMELINE.length, 'every beat was accepted');
   assert.equal(store.stats.rejected, 0, 'none was rejected');
@@ -104,10 +128,10 @@ test('the mission runs planning -> work -> approval -> completion, in that order
   };
 
   const seen: string[] = [];
-  while (player.step()) {
+  const approvals = runToEnd(player, () => {
     const current = stateOf('dev-1');
     if (current !== null && seen[seen.length - 1] !== current) seen.push(current);
-  }
+  });
 
   // Duplicates collapsed, so this is the shape of the story, not its length.
   assert.deepEqual(
@@ -115,12 +139,13 @@ test('the mission runs planning -> work -> approval -> completion, in that order
     ['planning', 'working', 'awaiting_approval', 'working', 'ended'],
     'the implementer plans, works, stops for a human, resumes and finishes',
   );
+  assert.equal(approvals, 1, 'and exactly one approval was needed to get there');
 });
 
 test('the approval wait does not clear itself', () => {
-  // A run that stops for a person must stay stopped until something says it was
-  // approved. Time passing is not approval, so stepping through the beats that
-  // follow must not move it on its own.
+  // A run that stops for a person must stay stopped until somebody says it was
+  // approved. Stepping is not approval either: once the wait is reported there
+  // is no next beat for any caller, however many times it asks.
   const store = demoStore();
   const player = playerFor(store);
 
@@ -132,16 +157,25 @@ test('the approval wait does not clear itself', () => {
   assert.equal(waiting?.visual.state, 'awaiting_approval');
   assert.equal(waiting?.visual.code, 'APPROVAL');
 
+  assert.equal(player.awaitingApproval, true, 'the player is holding the run');
+  for (let i = 0; i < 20; i += 1) assert.equal(player.step(), false, 'and nothing steps past it');
+  assert.equal(player.progress, approvalIndex + 1, 'the mission is exactly where it stopped');
+
   // The very next beat is the approval itself - an event, not a timeout.
   const next = DEMO_TIMELINE[approvalIndex + 1];
   assert.equal(next?.agent_id, 'dev-1');
   assert.equal(next?.status, 'working', 'what resumes the work is a reported status');
+  assert.equal(
+    store.replayFrom(next?.event_id ?? '').status,
+    'unknown',
+    'and it has not been ingested while the wait is open',
+  );
 });
 
 test('the mission ends with an error case and an uninterpretable case beside it', () => {
   const store = demoStore();
   const player = playerFor(store);
-  while (player.step());
+  runToEnd(player);
 
   const desks = selectDesks(screen(store));
   const byName = new Map(desks.map((desk) => [desk.display_name, desk]));
@@ -229,10 +263,11 @@ test('finishing stops the player instead of looping', () => {
   let finished = 0;
   const player = playerFor(store, { onFinished: () => (finished += 1) });
 
-  while (player.step());
+  runToEnd(player);
   assert.equal(player.finished, true);
   assert.equal(finished, 1, 'the end is announced exactly once');
   assert.equal(player.step(), false, 'and the timeline does not wrap around');
+  assert.equal(player.approve(), 'stopped', 'nor does a late approval restart it');
   assert.equal(store.stats.accepted, DEMO_TIMELINE.length);
   player.stop();
 });
@@ -257,7 +292,7 @@ test('a beat is timestamped when it is ingested, so "last update" means somethin
 test('the mission is a DEMO story and cannot reach a LIVE client', () => {
   const store = demoStore();
   const player = playerFor(store);
-  while (player.step());
+  runToEnd(player);
 
   // A LIVE client handed one of these frames counts it as foreign and applies
   // nothing, which is the same guard the fixtures rely on.

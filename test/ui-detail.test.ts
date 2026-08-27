@@ -48,7 +48,13 @@ function playedOffice(): { store: NamespaceStore; client: () => ClientState } {
     firstDelayMs: 0,
     now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)),
   });
-  while (player.step());
+  // The mission stops at 承認待ち and stays there until it is approved, so the
+  // finished office only exists on the far side of one explicit signal.
+  for (;;) {
+    if (player.step()) continue;
+    if (!player.awaitingApproval) break;
+    assert.equal(player.approve(), 'resumed');
+  }
   unsubscribe();
 
   return {
