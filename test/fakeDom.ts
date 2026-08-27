@@ -301,6 +301,15 @@ export function pageNodes(): [string, FakeElement | FakeTemplate][] {
         'desk__frozen-text',
       ]),
     ],
+    [
+      'detail-recent-template',
+      new FakeTemplate('detail__recent-row', [
+        'detail__recent-symbol',
+        'detail__recent-ts',
+        'detail__recent-type',
+        'detail__recent-detail',
+      ]),
+    ],
     ['log-template', new FakeTemplate('log__row', ['log__symbol', 'log__seq', 'log__ts', 'log__actor', 'log__type', 'log__detail'])],
     ['legend-template', new FakeTemplate('legend__row', ['legend__symbol', 'legend__label', 'legend__code'])],
   ];

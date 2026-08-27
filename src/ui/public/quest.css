@@ -659,6 +659,107 @@ h3 {
   gap: 8px 18px;
 }
 
+/* ------------------------------------------------------------- detail --- */
+
+.detail__headline {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+}
+
+.detail__name {
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.detail__badge {
+  padding: 1px 5px;
+  border: var(--pixel) solid var(--accent);
+  color: var(--accent);
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+}
+
+.detail__status {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: var(--state-color, var(--text));
+}
+
+.detail__frozen {
+  margin: 0 0 8px;
+  font-size: 0.75rem;
+  color: var(--state-unknown);
+}
+
+.detail__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 16px;
+  margin: 0;
+}
+
+.detail__grid > div {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(163, 173, 196, 0.16);
+  font-size: 0.78rem;
+}
+
+.detail__grid dt {
+  flex: 0 0 7.5em;
+  color: var(--text-dim);
+}
+
+.detail__grid dd {
+  margin: 0;
+  color: var(--text);
+  /* Identifiers and summaries can be long; wrap rather than push the page wide. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail__key {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.detail__subheading {
+  margin: 14px 0 6px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.detail__recent {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detail__recent-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+}
+
+.detail__recent-detail {
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail__empty {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
 .legend__row {
   display: flex;
   align-items: center;

@@ -55,6 +55,23 @@ export type ActorState = {
   status: string | null;
   active: boolean;
   last_tool: string | null;
+  /**
+   * The producer's own short label for the most recent event.
+   *
+   * This is a *summary of an event*, not the name of a task. The event contract
+   * has no business task title, id or reference, so nothing here may be
+   * presented as "the task this actor is assigned to" - see
+   * `docs/event-contract.md`. The screen labels it 最新の概要 for that reason.
+   */
+  last_summary: string | null;
+  /** The type of the most recent event applied for this actor. */
+  last_event_type: string | null;
+  /**
+   * Runtime agent type as reported by the producer, retained so the detail view
+   * can show which runtime configuration is behind a desk. Explicitly NOT a
+   * role: `role` above is the org label and comes from the directory.
+   */
+  runtime_agent_type: string | null;
   last_event_ts: string | null;
   last_ingest_seq: number;
   event_count: number;
@@ -224,6 +241,9 @@ function emptyActor(ingested: IngestedEvent): ActorState {
     status: null,
     active: false,
     last_tool: null,
+    last_summary: null,
+    last_event_type: null,
+    runtime_agent_type: null,
     last_event_ts: null,
     last_ingest_seq: 0,
     event_count: 0,
@@ -263,9 +283,15 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
   let status = previousActor.status;
   let active = previousActor.active;
   let lastTool = previousActor.last_tool;
+  // Kept on the same terms as `last_tool`: only a value the event actually
+  // carried replaces what is held, and an out-of-order event replaces nothing.
+  let lastSummary = previousActor.last_summary;
+  let runtimeAgentType = previousActor.runtime_agent_type;
   let ignored = false;
 
   if (!outOfOrder) {
+    if (event.summary !== null) lastSummary = event.summary;
+    if (event.runtime_agent_type !== null) runtimeAgentType = event.runtime_agent_type;
     switch (event.event_type) {
       case 'session_start':
         break;
@@ -307,6 +333,9 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
     status,
     active,
     last_tool: lastTool,
+    last_summary: lastSummary,
+    last_event_type: outOfOrder ? previousActor.last_event_type : event.event_type,
+    runtime_agent_type: runtimeAgentType,
     last_event_ts: outOfOrder ? previousActor.last_event_ts : event.ts,
     last_ingest_seq: ingested.ingest_seq,
     event_count: previousActor.event_count + 1,
@@ -317,6 +346,9 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
   if (!outOfOrder && event.event_type === 'session_end') {
     const deactivated: Record<string, ActorState> = emptyRecord<ActorState>();
     for (const [key, actor] of Object.entries(nextActors)) {
+      // Only `active` and `status` change. The session ending is not an event
+      // about these actors, so it must not rewrite what they last reported -
+      // their summary, event type and runtime type stay as they were observed.
       deactivated[key] =
         actor.session_id === event.session_id && actor.active ? { ...actor, active: false, status: 'ended' } : actor;
     }

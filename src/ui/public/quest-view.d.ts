@@ -60,6 +60,11 @@ export type ViewActor = {
   status: string | null;
   active: boolean;
   last_tool: string | null;
+  /** The producer's label for the latest event. A summary, never a task name. */
+  last_summary: string | null;
+  last_event_type: string | null;
+  /** Runtime configuration behind the desk. Not an org role. */
+  runtime_agent_type: string | null;
   last_event_ts: string | null;
   last_ingest_seq: number;
   event_count: number;
@@ -108,11 +113,13 @@ export type ViewLogEntry = {
   ts: string;
   event_type: string;
   actor: string;
+  /** Identity behind `actor`, so a log can be filtered to exactly one desk. */
+  actor_key: string;
   session_id: string;
   status: string | null;
   tool_name: string | null;
   summary: string | null;
-  state: ActorVisualState;
+  state: ActorDisplayState;
 };
 
 export type ClientState = {
@@ -270,6 +277,63 @@ export declare function gapLabel(reason: unknown): string | null;
 export declare function applyFrame(state: ClientState, frame: Frame): ClientState;
 export declare function normalizePlayer(raw: unknown): ViewPlayer | null;
 export declare function selectDesks(state: ClientState): Desk[];
+
+/**
+ * The selected desk in full, or null when nothing is selected.
+ *
+ * Fields that are `null` mean the event contract carries nothing for them - the
+ * screen reports the absence instead of filling it in. See the constants below
+ * for the wording each absence is rendered with.
+ */
+export type ActorDetail = {
+  actor_key: string;
+  display_name: string;
+  seat: number;
+  is_main_orchestrator: boolean;
+  role: string | null;
+  runtime_agent_type: string | null;
+
+  visual: ActorVisual;
+  stale: boolean;
+  last_known_visual: ActorVisual;
+  status_label: string | null;
+
+  /** An explicit BUSINESS task. Always null today; see `NO_TASK_REFERENCE`. */
+  task: string | null;
+  /** The producer's label for the latest event. Never a task name. */
+  latest_summary: string | null;
+  /** Only an explicitly reported next step. Always null today. */
+  next_action: string | null;
+  human_action: string;
+
+  last_event_type: string | null;
+  last_tool: string | null;
+  last_event_ts: string | null;
+  event_count: number;
+
+  session_id: string;
+  session_ended_at: string | null;
+
+  /** Most recent non-error activity for this desk, from the bounded client log. */
+  last_non_error: ViewLogEntry | null;
+  /** Retry / handoff / checkpoint are not in the contract. Always null. */
+  recovery: string | null;
+  /** No artifact, test, review or commit reference exists on the wire today. */
+  evidence: string | null;
+  recent: ViewLogEntry[];
+};
+
+export declare function selectDetail(state: ClientState): ActorDetail | null;
+
+export declare const HUMAN_ACTION: {
+  readonly required: string;
+  readonly advised: string;
+  readonly none: string;
+};
+export declare const NOT_REPORTED: string;
+export declare const NO_TASK_REFERENCE: string;
+export declare const NO_EVIDENCE_IN_CONTRACT: string;
+export declare const DETAIL_LOG_ENTRIES: number;
 export declare function selectPlayer(state: ClientState | null | undefined): PlayerProjection | null;
 export declare function selectHeader(state: ClientState): Header;
 export declare function selectBanner(header: Header): Banner;

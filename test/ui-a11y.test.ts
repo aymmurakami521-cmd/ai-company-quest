@@ -507,3 +507,39 @@ test('a frozen desk keeps what was last observed, in text', () => {
   assert.ok(APP.includes('停止時点'), 'the app names the last observed state');
   assert.ok(APP.includes('frozen.hidden = !desk.stale'), 'and shows it only while stale');
 });
+
+test('the detail panel is named, referenced, and not a second live region', () => {
+  assert.ok(HTML.includes('id="detail-panel"'), 'the panel exists');
+  assert.ok(HTML.includes('id="detail-heading"'), 'and has a heading');
+  assert.ok(
+    HTML.includes('aria-labelledby="detail-heading"'),
+    'the region is named by that heading',
+  );
+  assert.ok(
+    HTML.includes('aria-controls="detail-panel"'),
+    'the desk select button says what it controls',
+  );
+
+  // Selecting a colleague must not interrupt a screen reader mid-sentence, so
+  // the banner stays the only live region on the page.
+  const liveRegions = HTML.match(/aria-live=/g) ?? [];
+  assert.equal(liveRegions.length, 1, 'exactly one live region on the page');
+  const statuses = HTML.match(/role="status"/g) ?? [];
+  assert.equal(statuses.length, 1, 'and exactly one role="status"');
+});
+
+test('the detail panel opens no request and injects no markup', () => {
+  // Selection stays a screen-local fact: it must not become a fetch, and stream
+  // text must not become HTML.
+  assert.equal(/innerHTML|insertAdjacentHTML|outerHTML/.test(APP), false, 'nothing becomes markup');
+  assert.equal(/fetch\(|XMLHttpRequest|\.src\s*=/.test(APP), false, 'the app opens no new request');
+});
+
+test('the detail panel says what the contract cannot supply', () => {
+  // A blank row reads as "there was none of that". These rows say something
+  // different and more accurate: this stream does not carry it.
+  assert.ok(APP.includes('NOT_REPORTED'), 'unreported facts are labelled');
+  assert.ok(APP.includes('NO_EVIDENCE_IN_CONTRACT'), 'and missing evidence is explained');
+  assert.ok(HTML.includes('担当タスク'), 'the task row exists');
+  assert.ok(HTML.includes('最新の概要'), 'and is a different row from the event summary');
+});

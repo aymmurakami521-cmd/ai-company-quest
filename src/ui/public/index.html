@@ -112,6 +112,57 @@
       <ul class="legend" id="legend"></ul>
     </section>
 
+    <!--
+      The selected colleague, in full. A plain static section like the legend and
+      the log: it opens no request, and it is not a live region - the banner
+      stays the only one, so selecting a desk does not interrupt a screen reader
+      mid-sentence. Rows whose fact the event contract does not carry say so in
+      words rather than being left blank.
+    -->
+    <section class="panel" id="detail-panel" aria-labelledby="detail-heading">
+      <h2 id="detail-heading">選択中のAI社員</h2>
+      <p class="detail__empty" id="detail-empty">
+        社員を選ぶと、担当・状態・最終更新・成果物の有無をここに表示します。
+      </p>
+      <div class="detail" id="detail" hidden>
+        <p class="detail__headline">
+          <span class="detail__name" id="detail-name"></span>
+          <span class="detail__badge" id="detail-main" hidden>MAIN</span>
+        </p>
+        <p class="detail__status">
+          <span class="detail__symbol" id="detail-symbol" aria-hidden="true"></span>
+          <span id="detail-state"></span>
+        </p>
+        <p class="detail__frozen" id="detail-frozen" hidden></p>
+        <dl class="detail__grid">
+          <div><dt>担当タスク</dt><dd id="detail-task"></dd></div>
+          <div><dt>最新の概要</dt><dd id="detail-summary"></dd></div>
+          <div><dt>次の予定</dt><dd id="detail-next"></dd></div>
+          <div><dt>人間の対応</dt><dd id="detail-human"></dd></div>
+          <div><dt>成果物・証拠</dt><dd id="detail-evidence"></dd></div>
+          <div><dt>直近の正常な動き</dt><dd id="detail-last-ok"></dd></div>
+          <div><dt>復旧の可否</dt><dd id="detail-recovery"></dd></div>
+          <div><dt>role</dt><dd id="detail-role"></dd></div>
+          <div><dt>実行時type</dt><dd id="detail-runtime"></dd></div>
+          <div><dt>生のstatus</dt><dd id="detail-raw"></dd></div>
+          <div><dt>最後のツール</dt><dd id="detail-tool"></dd></div>
+          <div><dt>最終event種別</dt><dd id="detail-event-type"></dd></div>
+          <div><dt>最終更新</dt><dd id="detail-ts"></dd></div>
+          <div><dt>session</dt><dd id="detail-session"></dd></div>
+          <div><dt>観測event数</dt><dd id="detail-count"></dd></div>
+          <!--
+            The identity the reducer, the seating and the character's appearance
+            all key on. Shown next to the display name because they are different
+            things: a name can change without this changing.
+          -->
+          <div><dt>内部識別子</dt><dd class="detail__key" id="detail-key"></dd></div>
+        </dl>
+        <h3 class="detail__subheading" id="detail-recent-heading">この社員の直近の動き</h3>
+        <ol class="detail__recent" id="detail-recent" aria-labelledby="detail-recent-heading"></ol>
+        <p class="detail__empty" id="detail-recent-empty" hidden>まだこの社員のイベントはありません。</p>
+      </div>
+    </section>
+
     <section class="panel">
       <h2 id="log-heading">アクティビティログ<span class="panel__note">（直近のみ・上限あり）</span></h2>
       <!--
@@ -150,7 +201,7 @@
               a decorative, aria-hidden layer and is never clicked or hit-tested.
             -->
             <h3 class="desk__name">
-              <button class="desk__select" type="button" data-action="select-desk" aria-pressed="false">
+              <button class="desk__select" type="button" data-action="select-desk" aria-pressed="false" aria-controls="detail-panel">
                 <span class="desk__seat"></span>
                 <span class="desk__agent"></span>
               </button>
@@ -179,6 +230,15 @@
             </dl>
           </div>
         </article>
+      </li>
+    </template>
+
+    <template id="detail-recent-template">
+      <li class="detail__recent-row">
+        <span class="detail__recent-symbol" aria-hidden="true"></span>
+        <span class="detail__recent-ts"></span>
+        <span class="detail__recent-type"></span>
+        <span class="detail__recent-detail"></span>
       </li>
     </template>
 

@@ -413,6 +413,9 @@ function emptyActor(wire) {
     status: null,
     active: false,
     last_tool: null,
+    last_summary: null,
+    last_event_type: null,
+    runtime_agent_type: null,
     last_event_ts: null,
     last_ingest_seq: 0,
     event_count: 0,
@@ -430,6 +433,9 @@ function logEntry(wire, visual) {
     ts: wire.ts,
     event_type: wire.event_type,
     actor: wire.agent_id === null ? UNATTRIBUTED_AGENT_LABEL : wire.agent_id,
+    // The identity, kept beside the display name so the detail view can filter
+    // this log to one desk without matching on a name two actors could share.
+    actor_key: wire.actor_key,
     session_id: wire.session_id,
     status: wire.status,
     tool_name: wire.tool_name,
@@ -460,9 +466,17 @@ export function applyEvent(state, wire, atMs = null) {
   let status = previousActor.status;
   let active = previousActor.active;
   let lastTool = previousActor.last_tool;
+  // Mirrors `reducer.ts` exactly, including the out-of-order rule: a value only
+  // moves when the event carried one, and a late event moves nothing.
+  let lastSummary = previousActor.last_summary;
+  let runtimeAgentType = previousActor.runtime_agent_type;
   let ignored = false;
 
   if (!outOfOrder) {
+    if (wire.summary !== null && wire.summary !== undefined) lastSummary = wire.summary;
+    if (wire.runtime_agent_type !== null && wire.runtime_agent_type !== undefined) {
+      runtimeAgentType = wire.runtime_agent_type;
+    }
     switch (wire.event_type) {
       case 'session_start':
         break;
@@ -504,6 +518,9 @@ export function applyEvent(state, wire, atMs = null) {
     status,
     active,
     last_tool: lastTool,
+    last_summary: lastSummary,
+    last_event_type: outOfOrder ? previousActor.last_event_type : wire.event_type,
+    runtime_agent_type: runtimeAgentType,
     last_event_ts: outOfOrder ? previousActor.last_event_ts : wire.ts,
     last_ingest_seq: wire.ingest_seq,
     event_count: previousActor.event_count + 1,
@@ -873,6 +890,110 @@ export function selectBanner(header) {
   const code = bannerCode(header);
   const visual = ownProp(BANNER_VISUALS, code) ?? BANNER_VISUALS.CONNECTED;
   return { code, tone: visual.tone, symbol: visual.symbol, message: bannerMessage(code, header) };
+}
+
+/**
+ * Wording for what the office is asking of the person looking at it.
+ *
+ * A closed vocabulary on purpose. "要確認" is deliberately weaker than "人間の
+ * 確認が必要": an approval wait is a request the session actually made, while an
+ * error or an uninterpretable status only means nobody can currently say the
+ * work is fine. Claiming the latter is a formal request for action would be the
+ * screen inventing an obligation the stream never reported.
+ */
+export const HUMAN_ACTION = Object.freeze({
+  required: '人間の確認が必要',
+  advised: '要確認',
+  none: '現在、明示的な対応要求なし',
+});
+
+/** Stands in for anything the event contract simply does not carry. */
+export const NOT_REPORTED = '未報告';
+
+/**
+ * Why "担当タスク" is always `未報告` today.
+ *
+ * The sanitized event model carries no business task title, id or reference
+ * (`docs/event-contract.md`). The external hook wire does have a `task.id`, but
+ * it belongs to Claude's own bookkeeping - `TaskCreated` / `TaskCompleted` are
+ * mapped to an internal event type the reducer explicitly does not interpret as
+ * company work - so presenting it as the task a colleague is assigned to would
+ * be wrong, not merely imprecise. `summary` is the label for one event, so it is
+ * shown as 最新の概要 and never promoted to a task name.
+ */
+export const NO_TASK_REFERENCE = NOT_REPORTED;
+
+/** Said plainly, so nobody reads an empty row as "there was no evidence". */
+export const NO_EVIDENCE_IN_CONTRACT = '現在のevent契約には成果物への参照がありません';
+
+/** How many of an actor's own log rows the detail view shows. */
+export const DETAIL_LOG_ENTRIES = 5;
+
+function humanActionFor(visual) {
+  if (visual.state === 'awaiting_approval') return HUMAN_ACTION.required;
+  if (visual.state === 'error' || visual.state === 'unknown') return HUMAN_ACTION.advised;
+  return HUMAN_ACTION.none;
+}
+
+/**
+ * Everything known about the one selected desk, or null when none is.
+ *
+ * Pure, like every other selector here: it reads the client state and returns
+ * data. It opens no request, and it derives no fact the stream did not report -
+ * where the contract carries nothing, the field says so rather than guessing.
+ */
+export function selectDetail(state) {
+  const key = state.selected_actor_key;
+  if (typeof key !== 'string' || key.length === 0) return null;
+  const desk = selectDesks(state).find((item) => item.actor_key === key);
+  if (desk === undefined) return null;
+
+  const session = ownProp(state.sessions, desk.session_id) ?? null;
+  const actor = ownProp(state.actors, key) ?? null;
+  const own = state.log.filter((entry) => entry.actor_key === key);
+
+  return {
+    actor_key: desk.actor_key,
+    display_name: desk.display_name,
+    seat: desk.seat,
+    is_main_orchestrator: desk.is_main_orchestrator,
+    // Only when the collector resolved one. This screen never guesses a title.
+    role: desk.resolved ? desk.role : null,
+    runtime_agent_type: actor === null ? null : (actor.runtime_agent_type ?? null),
+
+    visual: desk.visual,
+    stale: desk.stale,
+    last_known_visual: desk.last_known_visual,
+    status_label: desk.status_label,
+
+    /** Explicit business task. See `NO_TASK_REFERENCE` - the contract has none. */
+    task: null,
+    /** The producer's label for the latest event. Not a task name. */
+    latest_summary: actor === null ? null : (actor.last_summary ?? null),
+    /** Only ever an explicitly reported next step; the screen predicts nothing. */
+    next_action: null,
+    human_action: humanActionFor(desk.visual),
+
+    last_event_type: actor === null ? null : (actor.last_event_type ?? null),
+    last_tool: desk.last_tool,
+    last_event_ts: desk.last_event_ts,
+    event_count: desk.event_count,
+
+    session_id: desk.session_id,
+    session_ended_at: session === null ? null : session.ended_at,
+
+    /**
+     * The most recent thing this desk did that was not itself a failure. Read
+     * from the log the client already holds, so it is bounded and may be absent
+     * - which is reported as such rather than filled in.
+     */
+    last_non_error: own.find((entry) => entry.state !== 'error') ?? null,
+    /** Recovery, retry and handoff are not in the contract. Never claimed here. */
+    recovery: null,
+    /** No artifact, test, review or commit reference exists on the wire today. */
+    evidence: null,
+    recent: own.slice(0, DETAIL_LOG_ENTRIES),
+  };
 }
 
 /**

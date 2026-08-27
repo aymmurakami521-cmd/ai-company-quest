@@ -953,6 +953,9 @@ test('the projections expose only whitelisted wire fields', () => {
     'ts',
     'event_type',
     'actor',
+    // The identity behind that display name, so the detail view can filter this
+    // log to one desk. Already on the wire whitelist; carries no new content.
+    'actor_key',
     'session_id',
     'status',
     'tool_name',
