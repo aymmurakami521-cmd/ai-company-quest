@@ -9,13 +9,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { NamespaceStore } from '../src/collector/store.ts';
+import type { HaltReason } from '../src/collector/store.ts';
 import { seedDemoStore } from '../src/demo/fixtures.ts';
 import type { QuestState } from '../src/domain/reducer.ts';
 import type { WireEvent } from '../src/domain/wire.ts';
 import { WIRE_EVENT_KEYS } from '../src/domain/wire.ts';
 import { makeEvent } from './helpers.ts';
 
-import type { ActorVisualState, ClientState } from '../src/ui/public/quest-view.js';
+import type { ActorVisualState, ClientState, HaltReasonToken } from '../src/ui/public/quest-view.js';
 import {
   ACTOR_VISUAL_STATES,
   MAX_LOG_ENTRIES,
@@ -543,6 +544,33 @@ test('the halt frame respects namespace isolation and never echoes an unknown re
   assert.equal(haltLabel('state_limit:actors:4096'), haltLabel('state_limit'));
   assert.equal(normalizeHaltReason('unsupported_schema:schema_version:7'), 'unsupported_schema');
   assert.equal(normalizeHaltReason(null), null);
+});
+
+/**
+ * Two-way assignability pin between the collector's halt vocabulary and the
+ * screen's. Either side gaining or losing a token is a typecheck failure here,
+ * which is how `producer_capacity` should have been caught the first time.
+ */
+const _haltTokenCoversStore: HaltReasonToken = null as unknown as HaltReason;
+const _storeCoversHaltToken: HaltReason = null as unknown as HaltReasonToken;
+void _haltTokenCoversStore;
+void _storeCoversHaltToken;
+
+test('every halt reason the collector can raise has a screen label', () => {
+  // Pinned to `HaltReason` on purpose: the annotation makes a token the store can
+  // raise but the screen cannot name a typecheck failure, not a silent blank
+  // banner. `producer_capacity` was exactly that drift once.
+  const reasons: readonly HaltReason[] = ['unsupported_schema', 'state_limit', 'producer_capacity'];
+  for (const reason of reasons) {
+    assert.equal(normalizeHaltReason(reason), reason, `${reason} must normalize to itself`);
+    const label = haltLabel(reason);
+    assert.equal(typeof label, 'string', `${reason} must have a label`);
+    assert.ok((label as string).length > 0, `${reason} label must not be empty`);
+    // `reason:detail` from /health must reduce to the same label, never echo the detail.
+    assert.equal(haltLabel(`${reason}:some:detail`), label);
+  }
+  assert.equal(normalizeHaltReason('not_a_halt_reason'), null);
+  assert.equal(haltLabel('not_a_halt_reason'), null);
 });
 
 test('a disconnect is visible and does not erase what was already shown', () => {

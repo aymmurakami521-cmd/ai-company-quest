@@ -75,7 +75,7 @@ export type ViewSession = {
 };
 
 /** Closed vocabulary; mirrors `HaltReason` in `src/collector/store.ts`. */
-export type HaltReasonToken = 'unsupported_schema' | 'state_limit';
+export type HaltReasonToken = 'unsupported_schema' | 'state_limit' | 'producer_capacity';
 
 /** Closed vocabulary; mirrors the `stream_gap` reasons `src/server/server.ts` emits. */
 export type GapReasonToken = 'invalid_last_event_id' | 'unknown_event_id' | 'evicted';
