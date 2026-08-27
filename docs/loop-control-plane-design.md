@@ -777,11 +777,11 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 | id | 内容 | 依存 | 分類（見積） |
 |----|------|------|------------|
 | **LCP-0** | 本設計文書の追加（この PR） | なし | **A** |
-| **LCP-1** | Run / Event contract v1 の docs 化。state code / event code / evidence kind / 失敗種別の**閉じた語彙を確定**する。code 変更なし | LCP-0 | **A** |
+| **LCP-1** | Run / Event contract v1 の docs 化。state code / event code / evidence kind / 失敗種別の**閉じた語彙を確定**する。成果物は `docs/run-event-contract.md` / `docs/role-binding-registry.md` / `docs/provider-neutral-scan.manifest.json` の 3 件（§15.2）。code 変更なし | LCP-0 | **A** |
 | **ORG-PR-1** | 既存 §5 PR-1。外部 org 定義の事実確認 + §4.7 の表示面決定を**汎用 status 面として**確定（§14.2） | LCP-1（表示面の決定のみ）／§4.1〜§4.6 は並行可 | **A** |
 | **LCP-2** | §13.5 の 1〜3・8 を deterministic gate にする**設計**（docs） | LCP-1 | **A**（設計のみ） |
 | **DOC-1** | `docs/automation-protocol.md` の新規作成（§1.3）。内容は owner が確定 | owner の内容決定 | **A** |
-| **WF-1** | §1.3 の workflow 側参照の整合、および LCP-2 の gate の**実装** | LCP-2 / DOC-1 | **C**（workflow 変更。owner 承認・owner 実施） |
+| **WF-1** | §1.3 の workflow 側参照の整合、LCP-2 の gate の**実装**、および §17.2 manifest を読む provider 中立 scan の CI 実装 | LCP-1（manifest）／LCP-2 / DOC-1 | **C**（workflow 変更。owner 承認・owner 実施） |
 | **ORG-PR-2** | 既存 §5 PR-2。org snapshot 読み取りと検証 | ORG-PR-1 | **B** |
 | **STORE-1** | **最小の権威 run source**。永続 Run / Event Store と単一 writer の deterministic controller（§4.2）。**run state の供給元はここに一本化される** | LCP-1 / LCP-2 | **C**（永続化基盤の導入。owner 承認必須） |
 | **LCP-3** | Run Read Model を Quest が read-only で受ける。独立 namespace、GET のみ、既存 SSE surface に mutation を足さない。**供給元は STORE-1** | LCP-1 / ORG-PR-2（取り込みの型を共有）／**STORE-1**（供給元） | **B** |
@@ -823,6 +823,23 @@ source と consumer の所有関係が反転するからです。
 **owner 側で並行して進められるもの**: ORG-PR-1 の §4.1〜§4.6（外部 org 定義の実在確認）と、
 DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依存し、agent 側では確認できません。
 
+### 15.2 LCP-1 の完了 evidence（provider 中立検査を executable にするための成果物）
+
+LCP-1 は語彙の確定だけでなく、**基準 4（§17）を機械判定可能にする成果物**を含みます。
+下の 3 件が揃って初めて LCP-1 は完了です。**いずれも `docs/` 配下の宣言のみで、
+runtime・workflow・依存を変更しないため、LCP-1 は分類 A のままです。**
+
+| 成果物（path 固定） | 内容 |
+|---|---|
+| `docs/run-event-contract.md` | Run / Event contract v1。state code / event code / evidence kind / 失敗種別の閉じた語彙 |
+| `docs/role-binding-registry.md` | M0（§10.4）相当の provisional Role Binding 表。**forbidden token の唯一の権威 source**（§17.2.2） |
+| `docs/provider-neutral-scan.manifest.json` | 基準 4 の `include_paths` / `forbidden_tokens` / `exceptions` を持つ manifest（§17.2） |
+
+- **manifest の `include_paths` は、LCP-1 完了時点で `docs/event-contract.md` と
+  `docs/run-event-contract.md` の 2 件を含みます**（§17.2.1）。
+- **CI での実行は WF-1（分類 C）** です。LCP-1 は判定に必要な宣言を揃えるところまでで、
+  検査を走らせる workflow は owner 承認・owner 実施の範囲に留めます（§15 の WF-1 行）。
+
 ---
 
 ## 16. この文書と本フェーズの対象外
@@ -838,6 +855,8 @@ DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依�
 - `.github/workflows/**` / hooks / permissions / secrets / 認証の変更
 - 新規の内部 API 名・field 名・関数名・DOM 構造の確定（各実装 PR の範囲）
 - 確定した event code / state code の一覧（**LCP-1 の範囲**。本文書の §4.1 / §5.2 は概念例）
+- §15.2 の 3 成果物そのものの作成（**LCP-1 の範囲**。本文書が決めるのは path と拘束条件だけ）
+- §17.2 manifest を読む provider 中立 scan の **CI 実装**（**WF-1 の範囲**・分類 C）
 - 外部 repository への接触・変更
 - 無関係な refactor
 - Phase 3（操作 API、指示送信、歩行・自由移動、音声入力）
@@ -854,7 +873,7 @@ DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依�
 | 1 | `PLANNER` の provider を差し替えても **Loop Contract と Run State Machine が変わらない** | Role Binding の 1 行だけが変わる diff になること |
 | 2 | `REVIEWER` の provider を差し替えても **Event Schema が変わらない** | core event code 一覧に diff が出ないこと |
 | 3 | ChatGPT Work を撤去しても **永続 run state が失われない** | Run/Event Store が provider を跨いだ履歴を保持していること |
-| 4 | provider 固有の変更が **adapter / 設定境界に局所化**される | **provider 中立面（§17.1 の対象集合）に限定**して provider 名を検索し、hit が **0** であること。repository 全文検索ではありません |
+| 4 | provider 固有の変更が **adapter / 設定境界に局所化**される | **`docs/provider-neutral-scan.manifest.json`（§17.2）の `include_paths` に限定**して同 manifest の `forbidden_tokens` を §17.3 の規則で照合し、**宣言済み exception を除いた hit が 0** であること。repository 全文検索ではありません。**LCP-1 の完了時点で pass / fail を機械判定できます**（§15.2） |
 | 5 | Quest が **provider 固有の event 名を必要とせず** role / run state を描画できる | Quest の read model に provider 名の field が存在しないこと |
 | 6 | Management Console が **Goal / Run / State / Role / Risk / Approval / Evidence を中心に据える**（provider / model 名ではなく） | 画面の主要 field に provider / model が現れないこと |
 | 7 | webhook / workflow の**重複配信を controller が冪等に扱える** | 同一 trigger の 2 回配信が 1 本の run に落ち、遷移が二重適用されないこと（§8.1） |
@@ -864,20 +883,109 @@ DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依�
 
 ### 17.1 基準 4 の検索対象と除外（executable にするための scope）
 
-このリポジトリは **意図的に provider 名を含みます**（README、`.github/workflows/claude.yml`、
+このリポジトリは **意図的に provider 名を含みます**（`README.md`、`.github/workflows/claude.yml`、
 Claude Code Hook 取り込み経路、test、そしてこの設計文書自身）。したがって
 **repository 全文検索では、provider 分離が正しく実装されていても基準 4 は必ず失敗します。**
-基準 4 は次の集合に限定して評価します。
 
-| | 対象 |
+一方で **`docs/**` を一括除外することもしません。** 除外の単位が広すぎると、
+provider 中立であるべき契約文書へ provider 名が漏れても検査が素通りします。
+**除外は「その file が意図的に provider 名を含む」と説明できる単位でのみ行い、
+個々の path を名指し**します。判定に使う集合は散文ではなく §17.2 の manifest が持ちます。
+
+| | 内容 |
 |---|---|
-| **検索対象**（hit が 0 であるべき面） | provider 中立な core contract（Loop Contract / Agent Contract）／event schema・state schema／reducer・read model の interface と型／Management Console と Quest の projection contract |
-| **除外**（provider 名が現れてよい面） | `docs/**`（本文書を含む）／`.github/workflows/**`／`test/**` と fixture／Provider Adapter の実装・設定・Role Binding（§10.1：provider 名が現れてよい唯一の場所）／既存の provider 固有 integration surface（現行の Claude Code Hook 取り込み経路と `README.md` の該当記述） |
+| **検索対象**（`include_paths`） | provider 中立な契約文書・schema・型・read model interface。**現時点で名指しできるのは `docs/event-contract.md` と、LCP-1 が作る `docs/run-event-contract.md`**（§17.2） |
+| **除外**（名指し。`include_paths` に入れない） | `docs/loop-control-plane-design.md`（本文書。設計・説明のため provider 名を含む）／`docs/live-wire-contract.md`（外部 wire = adapter 面の mapping 表）／`docs/org-snapshot-design.md`／`docs/role-binding-registry.md`（§10.1：provider 名が現れてよい唯一の場所）／`README.md`／`.github/workflows/**`／`test/**` と fixture／Provider Adapter の実装・設定（`src/domain/hookWire.ts`・`src/domain/hookAdapter.ts` を含む） |
 
-- 検索対象の path 集合は、実装が進んだ時点で **LCP-1 が確定する語彙とともに固定**します。
-  対象集合が決まって初めて、この基準は CI で機械的に実行できます。
 - **除外は「見逃してよい」ではありません。** 除外面に provider 名が増えること自体は正常で、
   基準 4 が見ているのは「中立面へ漏れたか」だけです。
+- **adapter / config / Role Binding は恒久的に `include_paths` へ入れません。**
+  provider 名を持つことがそれらの責務だからです（§10.1 / §10.2）。
+
+### 17.2 `docs/provider-neutral-scan.manifest.json`（LCP-1 が作る検査 manifest）
+
+基準 4 の判定に必要な集合を、散文ではなく **1 個の check-in された machine-readable
+manifest** に持たせます。**この PR では作成しません**（LCP-1 の成果物・§15.2）。
+
+- **path**: `docs/provider-neutral-scan.manifest.json`（固定）
+- **schema の責務**: **LCP-1 が normative schema を確定**します。本節はその拘束条件です。
+- **分類**: `docs/` 配下の宣言データのみで、runtime が読む経路を持ちません。
+  したがって **LCP-1 は分類 A（docs 契約のみ）のまま**です。
+  **この manifest を実際に走らせる CI の実装は WF-1（分類 C）**であり、LCP-1 に含めません。
+
+```
+ProviderNeutralScanManifest (manifest_version: 1)
+  manifest_version    : 1
+  token_source_ref    : "docs/role-binding-registry.md"   ← 唯一の権威 source（下記）
+  token_source_digest : materialize 時の token_source_ref の内容 digest
+  forbidden_tokens[]  : token_source_ref から展開して**実体化済み**の token 文字列
+  include_paths[]     : 検査対象の**実在する** path（glob ではなく完全 path）
+  exceptions[]        : { path, token, expected_occurrences, reason, owner,
+                          expires_at | expires_with }
+```
+
+#### 17.2.1 `include_paths` の規則
+
+1. **完全 path のみ**を並べます。ディレクトリ glob は使いません。
+2. **LCP-1 時点の初期値は次の 2 件**です。どちらも provider 中立であるべき契約文書です。
+   - `docs/event-contract.md`（既存の内部 normalized event model）
+   - `docs/run-event-contract.md` — **LCP-1 が確定する Run / Event contract v1 の成果物。
+     この path 名を本節で固定**し、「LCP-1 が作る何か」という記述に留めません。
+3. **将来の中立 source / schema / read model file は、実在してから追加**します。
+   追加は、その file を新規作成する PR が **同じ PR 内で `include_paths` へ 1 行加える**
+   ことを完了条件とします（§15.2 と同じ扱いを各 PR へ適用）。
+4. **`include_paths` に列挙された path が存在しない場合は FAIL** です（skip ではありません）。
+   rename / 削除による静かな検査縮小を防ぎます。この規則により、
+   **まだ存在しない将来 path が現在の判定を曖昧にすることはありません**
+   （存在しないものは列挙されていないため）。
+
+#### 17.2.2 `forbidden_tokens` の権威 source
+
+- **権威 source は `docs/role-binding-registry.md` ただ 1 つ**です。これは §10.4 の M0
+  （現在の provider 構成を Role Binding 表として文書化するだけ）に相当する成果物で、
+  **LCP-1 が provisional binding artifact として作ります**。
+- 同 registry は行ごとに **`provider_id` / vendor・brand alias / model family・brand alias**
+  を宣言します。**`forbidden_tokens[]` はその和集合を manifest 側へ実体化した値**です。
+- **実体化するのは再現性のため**です。scan は manifest の値だけを読み、
+  意味的カテゴリの解釈も、provider の live API 参照も行いません。
+- `token_source_digest` が `token_source_ref` の実内容と一致しない場合は **FAIL** です。
+  registry を更新したのに manifest を再実体化していない状態を検出します。
+
+### 17.3 照合規則（false negative を避けるための最小仕様）
+
+1. **正規化**: 検査対象文字列と token の双方に、同じ正規化を適用します。
+   **NFKC → 小文字化 → `[-_./ ]` の連続を半角空白 1 個へ畳む**。
+2. **照合**: 正規化後の文字列に対する **部分一致**。
+   これにより `Claude Code` / `claude-code` / `claude_hook_v2` は
+   いずれも `claude code` / `claude hook v2` へ落ち、token `claude` が一致します。
+   **区切り違いの alias を token 側で列挙する必要はありません。**
+3. **期待結果**: **宣言済み exception を差し引いた hit が 0 なら PASS**、1 件でも残れば FAIL。
+4. **fail closed**。正規化により稀に false positive が出ますが、
+   それは exception として **明示的に記録**して通します。黙って通す経路は作りません。
+
+#### 17.3.1 例外の表し方
+
+**広いディレクトリ除外の代わりに、1 件ずつ記録**します。
+
+| field | 内容 |
+|---|---|
+| `path` | 対象 file の完全 path（`include_paths` の要素であること） |
+| `token` | 対象 token（`forbidden_tokens[]` の要素であること） |
+| `expected_occurrences` | 正規化後の期待 hit 数。**実測がこれを超えたら FAIL**（既存例外に紛れて新しい漏れが増えるのを防ぐ） |
+| `reason` | なぜその file にその token が現れてよいかの説明 |
+| `owner` | OWNER（例外の追加・延長は承認事項・§7.6） |
+| `expires_at` / `expires_with` | **どちらか一方が必須**。`expires_at` は ISO-8601 日付、`expires_with` は §15 の roadmap id。**期日超過、または当該 roadmap 項目の完了で FAIL** |
+
+**LCP-1 が seed する例外は 1 件**です。`docs/event-contract.md` は現時点で
+token `claude` を 4 箇所含みます（外部 wire が別契約であることの説明、
+LIVE store の `inputContract` 値 `claude_hook_v2`、`runtime_agent_type` の語義説明、
+`internal_task` の由来説明）。いずれも **中立 model の field 名・閉じた語彙ではなく、
+adapter 境界を指す説明と binding 値**なので、例外として通し、
+**`expires_with` を LCP-3**（Quest の Run Read Model が STORE-1 由来の中立 event を
+受ける時点）に置きます。そこで記述を中立化できたか再判定します。
+
+この 1 件を宣言した状態で、**基準 4 は LCP-1 完了時点で PASS になります**。
+つまりこの基準は「provider 分離が正しければ通る」検査として成立します。
 
 ---
 
@@ -898,6 +1006,7 @@ Claude Code Hook 取り込み経路、test、そしてこの設計文書自身�
 | # | 項目 | 決める場所 |
 |---|------|-----------|
 | 4 | 確定した state code / event code / evidence kind の一覧 | **LCP-1** |
+| 4b | `docs/provider-neutral-scan.manifest.json` の normative schema（field 名の確定）。**path・拘束条件・照合規則は §17.2 / §17.3 で決定済み**で、未決なのは schema 記述の形だけ | **LCP-1** |
 | 5 | Run/Event Store の実体（file / 埋め込み / 外部）。**依存追加・DB 導入は本フェーズの禁止事項**なので、選択肢の評価も STORE-1 まで先送り | STORE-1 |
 | 6 | Quest が run event を受ける経路の具体（既存 namespace 分離の作法は決定済み・§5.3。**供給元が STORE-1 であることは §15.0 で決定済み**、受け口の形が未決） | LCP-3 |
 | 7 | 汎用 status 表示面の具体（banner 拡張か第 2 面か、code 名、DOM 構造） | ORG-PR-1（方式）／ORG-PR-3（実装） |
