@@ -19,6 +19,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
 
@@ -402,6 +403,8 @@ test('an office larger than the canvas still lists every actor in the DOM', () =
     event_count: 1,
     selected: false,
     visual: visualForState('idle'),
+    stale: false,
+    last_known_visual: visualForState('idle'),
   }));
 
   const world = buildWorld({
@@ -477,4 +480,30 @@ test('every displayable state has its own colour rule, in the CSS that ships', (
       `quest.css binds the legend swatch for ${state}`,
     );
   }
+});
+
+test('every desk slot the app fills exists in the shipped template and in the fake DOM', () => {
+  // Three copies of the same list have to agree: the <template> the browser
+  // clones, the selectors `quest-app.js` fills, and the slots `test/fakeDom.ts`
+  // provides. A slot missing from the page makes `querySelector` return null and
+  // the desk list stop rendering; one missing from the fake DOM makes the
+  // focus-retention suite blind. Both have happened, so both are pinned here.
+  const fake = readFileSync(new URL('./fakeDom.ts', import.meta.url), 'utf8');
+  const filled = new Set(
+    [...APP.matchAll(/'(\.desk__[a-z-]+)'/g)].map((match) => (match[1] as string).slice(1)),
+  );
+  assert.ok(filled.size >= 8, 'the selectors were actually found in the app');
+  for (const slot of filled) {
+    assert.ok(HTML.includes(`class="${slot}"`), `index.html has a .${slot} element`);
+    assert.ok(fake.includes(`'${slot}'`), `test/fakeDom.ts provides a .${slot} slot`);
+  }
+});
+
+test('a frozen desk keeps what was last observed, in text', () => {
+  // The freeze must be readable without the palette: the state itself says
+  // 状態不明 and this line names what it was, so nothing is silently dropped.
+  assert.ok(HTML.includes('class="desk__frozen"'), 'the template carries the frozen line');
+  assert.ok(HTML.includes('凍結'), 'and labels it in text, not by colour');
+  assert.ok(APP.includes('停止時点'), 'the app names the last observed state');
+  assert.ok(APP.includes('frozen.hidden = !desk.stale'), 'and shows it only while stale');
 });

@@ -183,13 +183,19 @@ let renderedNodes = new Map();
 function buildDeskNode() {
   const fragment = dom.deskTemplate.content.cloneNode(true);
   const item = fragment.querySelector('.desk');
-  return { item, select: item.querySelector('.desk__select'), badge: item.querySelector('.desk__badge') };
+  return {
+    item,
+    select: item.querySelector('.desk__select'),
+    badge: item.querySelector('.desk__badge'),
+    frozen: item.querySelector('.desk__frozen'),
+  };
 }
 
 function fillDeskNode(node, desk, index) {
-  const { item, select, badge } = node;
+  const { item, select, badge, frozen } = node;
   item.dataset.state = desk.visual.state;
   item.dataset.selected = String(desk.selected);
+  item.dataset.stale = String(desk.stale);
   select.dataset.deskIndex = String(index);
   // The state is exposed as `aria-pressed`, so it is never carried by the
   // border colour alone.
@@ -199,6 +205,15 @@ function fillDeskNode(node, desk, index) {
   badge.hidden = !desk.is_main_orchestrator;
   text(item, '.desk__symbol', desk.visual.symbol);
   text(item, '.desk__state-label', `${desk.visual.label} (${desk.visual.code})`);
+  // While stale, the state above reads 状態不明 and this line carries the last
+  // observation. Hidden entirely otherwise, so a healthy office says nothing
+  // about a freeze that is not happening.
+  frozen.hidden = !desk.stale;
+  text(
+    item,
+    '.desk__frozen-text',
+    `停止時点: ${desk.last_known_visual.symbol} ${desk.last_known_visual.label}`,
+  );
   // `role` is already null unless the collector resolved one.
   text(item, '.desk__role', desk.role ?? '未解決');
   text(item, '.desk__raw-status', desk.status_label ?? '—');

@@ -160,6 +160,16 @@
               <span class="desk__symbol" aria-hidden="true"></span>
               <span class="desk__state-label"></span>
             </p>
+            <!--
+              Shown only while the stream has stopped confirming this desk. The
+              state above becomes 状態不明; this line keeps what was last observed,
+              so a disconnection freezes the office rather than erasing it. It is
+              plain text, not a colour, so it survives without the palette.
+            -->
+            <p class="desk__frozen" hidden>
+              <span class="desk__frozen-badge">凍結</span>
+              <span class="desk__frozen-text"></span>
+            </p>
             <dl class="desk__meta">
               <div><dt>role</dt><dd class="desk__role"></dd></div>
               <div><dt>status</dt><dd class="desk__raw-status"></dd></div>

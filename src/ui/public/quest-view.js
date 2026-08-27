@@ -299,6 +299,38 @@ export function gapLabel(reason) {
   return token === null ? null : GAP_LABELS[token];
 }
 
+/**
+ * Connection phases that mean "this office was being fed by a stream, and is
+ * not any more".
+ *
+ * `offline` is deliberately NOT one of them. It is the phase a client state is
+ * born in and the one it returns to when the namespace is switched, and both of
+ * those rebuild the office from empty - so `offline` means "no stream yet",
+ * never "the stream we had is gone". `connecting` is excluded for the same
+ * reason: it is the first moment of a fresh stream, before the snapshot that
+ * fills the office has even arrived.
+ *
+ * `error` and `reconnecting` are the two phases the app reports when a live
+ * stream drops, which is exactly the case this guards.
+ */
+const STALE_PHASES = Object.freeze(['reconnecting', 'error']);
+
+/**
+ * Whether what the screen holds is still being confirmed by a live stream.
+ *
+ * A halt (fail-closed) counts, and so does a socket that is gone or retrying:
+ * in every one of those cases the newest fact on screen is as old as the
+ * disconnection, and continuing to paint it as a current state would be the
+ * screen asserting something it cannot know. Deliberately derived from the
+ * connection the app already tracks - there is no age threshold and no clock
+ * here, so nothing goes stale merely because a session was quiet.
+ */
+export function isStale(connection) {
+  if (connection === null || connection === undefined) return true;
+  if (connection.halted === true) return true;
+  return STALE_PHASES.includes(connection.phase);
+}
+
 /** Connection banner. A halted (fail-closed) namespace outranks every phase. */
 export function classifyConnection(connection) {
   if (connection !== null && connection !== undefined && connection.halted === true) {
@@ -656,6 +688,9 @@ function compareStrings(left, right) {
  * last. The same state always produces the same office layout.
  */
 export function selectDesks(state) {
+  // One decision for the whole office: either the stream is confirming these
+  // states or it is not. Derived once so every desk agrees with the banner.
+  const stale = isStale(state.connection);
   const sessions = Object.keys(state.sessions).sort((a, b) => {
     const left = state.sessions[a];
     const right = state.sessions[b];
@@ -684,7 +719,13 @@ export function selectDesks(state) {
   });
 
   return actors.map((actor, index) => {
-    const visual = classifyActor(actor);
+    // What the stream last said this desk was doing...
+    const lastKnown = classifyActor(actor);
+    // ...and what the screen is entitled to claim right now. While the stream is
+    // not confirming anything, that is `UNKNOWN` - but `last_known_visual` keeps
+    // the observation itself, so the card can show "停止時点: ◯◯" rather than
+    // quietly dropping what was already learned.
+    const visual = stale ? ACTOR_VISUALS.unknown : lastKnown;
     return {
       seat: index + 1,
       actor_key: actor.actor_key,
@@ -703,6 +744,8 @@ export function selectDesks(state) {
       last_event_ts: actor.last_event_ts,
       event_count: actor.event_count,
       visual,
+      stale,
+      last_known_visual: lastKnown,
     };
   });
 }

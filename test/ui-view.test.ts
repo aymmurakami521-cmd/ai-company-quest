@@ -30,6 +30,7 @@ import {
   UNATTRIBUTED_AGENT_LABEL,
   applyEvent,
   applyFrame,
+  isStale,
   applySnapshot,
   classifyActor,
   classifyConnection,
@@ -936,6 +937,11 @@ test('the projections expose only whitelisted wire fields', () => {
     // carries no content - a boolean derived from a key the screen already has.
     'selected',
     'visual',
+    // Screen-local too: whether a live stream is still confirming this desk, and
+    // what it last said if it is not. Both are derived from the connection the
+    // client already tracks - neither adds a field from the wire.
+    'stale',
+    'last_known_visual',
   ]);
   for (const desk of selectDesks(state)) {
     for (const key of Object.keys(desk)) assert.ok(deskFields.has(key), `unexpected desk field ${key}`);
@@ -982,4 +988,74 @@ test('a prototype-shaped session or agent id stays an ordinary key', () => {
   // key and not a way to reach `Object.prototype`.
   assert.equal(Object.getPrototypeOf(state.actors), null);
   assert.equal(Object.getPrototypeOf(state.sessions), null);
+});
+
+// ------------------------------------------------------------- staleness ---
+
+test('a disconnected office reports every desk as unknown, without erasing it', () => {
+  const store = new NamespaceStore({ namespace: 'demo' });
+  seedDemoStore(store);
+  const live = applySnapshot(createClientState('demo'), snapshotOf(store));
+
+  const before = selectDesks(live);
+  assert.ok(before.length > 0, 'there is an office to lose');
+  assert.ok(before.every((desk) => desk.stale === false), 'nothing is stale while connected');
+  const observed = new Map(before.map((desk) => [desk.actor_key, desk.visual.state]));
+  assert.ok(new Set(observed.values()).size > 1, 'and the desks were in different states');
+
+  for (const phase of ['error', 'reconnecting'] as const) {
+    const dropped = setConnectionPhase(live, phase, null);
+    const desks = selectDesks(dropped);
+
+    assert.equal(desks.length, before.length, `${phase}: nobody is removed from the list`);
+    for (const desk of desks) {
+      assert.equal(desk.stale, true, `${phase}: ${desk.actor_key} is marked stale`);
+      assert.equal(desk.visual.state, 'unknown', `${phase}: it no longer claims a current state`);
+      assert.equal(desk.visual.code, 'UNKNOWN');
+      // The observation itself survives, which is what "停止時点" shows.
+      assert.equal(
+        desk.last_known_visual.state,
+        observed.get(desk.actor_key),
+        `${phase}: what was last observed is kept`,
+      );
+    }
+
+    const header = selectHeader(dropped);
+    assert.equal(header.desk_count, before.length, `${phase}: the seat count is unchanged`);
+    assert.equal(header.by_state['unknown'], before.length, `${phase}: all of them count as unknown`);
+    assert.equal(header.empty, false, `${phase}: the office is not reported as empty`);
+  }
+});
+
+test('a halted stream freezes the desks even while the socket is still open', () => {
+  const store = new NamespaceStore({ namespace: 'demo' });
+  seedDemoStore(store);
+  let state = applySnapshot(createClientState('demo'), snapshotOf(store));
+  state = setConnectionPhase(state, 'open', null);
+  assert.ok(selectDesks(state).every((desk) => desk.stale === false), 'open and ingesting');
+
+  // fail-closed: the socket is fine, but nothing new will ever arrive on it.
+  const halted = applyFrame(state, {
+    kind: 'fail_closed',
+    payload: { namespace: 'demo', halted: true, reason: 'state_limit' },
+  });
+  const desks = selectDesks(halted);
+  assert.ok(desks.length > 0);
+  assert.ok(desks.every((desk) => desk.stale === true), 'a halt is a freeze too');
+  assert.ok(desks.every((desk) => desk.visual.state === 'unknown'));
+  assert.equal(selectBanner(selectHeader(halted)).code, 'FAIL_CLOSED', 'and the banner still says why');
+});
+
+test('an office that never connected is not reported as frozen', () => {
+  // `offline` is where a client state is born and where a namespace switch puts
+  // it back. Both rebuild the office from empty, so it means "no stream yet" -
+  // marking a desk stale for it would be a freeze that never happened.
+  const store = new NamespaceStore({ namespace: 'demo' });
+  seedDemoStore(store);
+  const fresh = applySnapshot(createClientState('demo'), snapshotOf(store));
+  assert.equal(fresh.connection.phase, 'offline');
+  assert.ok(selectDesks(fresh).every((desk) => desk.stale === false));
+  assert.equal(isStale({ ...fresh.connection, phase: 'connecting' }), false);
+  assert.equal(isStale({ ...fresh.connection, phase: 'open' }), false, 'an open stream is live');
+  assert.equal(isStale(null), true, 'no connection at all is not something to vouch for');
 });

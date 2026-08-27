@@ -297,6 +297,8 @@ export function pageNodes(): [string, FakeElement | FakeTemplate][] {
         'desk__tool',
         'desk__session',
         'desk__ts',
+        'desk__frozen',
+        'desk__frozen-text',
       ]),
     ],
     ['log-template', new FakeTemplate('log__row', ['log__symbol', 'log__seq', 'log__ts', 'log__actor', 'log__type', 'log__detail'])],

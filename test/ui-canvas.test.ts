@@ -100,6 +100,10 @@ function desk(seat: number, state: ActorDisplayState, overrides: Partial<Desk> =
     event_count: 1,
     selected: false,
     visual: visualForState(state),
+    // A helper desk is a live one: the stream is confirming it, so its effective
+    // visual and its last observed visual are the same thing.
+    stale: false,
+    last_known_visual: visualForState(state),
     ...overrides,
   };
 }

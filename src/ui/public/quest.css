@@ -449,6 +449,30 @@ h3 {
   --state-color: var(--state-unknown);
 }
 
+/*
+ * A frozen desk is dimmed as a *secondary* cue only. The primary ones are the
+ * state itself reading 状態不明 and the 凍結 badge below it, both plain text.
+ */
+.desk[data-stale='true'] .desk__sprite {
+  opacity: 0.55;
+}
+
+.desk__frozen {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 4px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.desk__frozen-badge {
+  padding: 1px 5px;
+  border: var(--pixel) solid var(--state-unknown);
+  color: var(--state-unknown);
+  letter-spacing: 0.08em;
+}
+
 .desk__card {
   height: 100%;
   background: rgba(13, 16, 24, 0.88);

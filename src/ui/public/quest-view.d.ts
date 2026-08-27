@@ -182,7 +182,15 @@ export type Desk = {
   event_count: number;
   /** True for the one desk `selected_actor_key` points at. */
   selected: boolean;
+  /** What the screen may claim now: `UNKNOWN` whenever `stale` is true. */
   visual: ActorVisual;
+  /** True while no live stream is confirming this desk's state. */
+  stale: boolean;
+  /**
+   * What the stream last said, kept even while `stale`. The card shows it as
+   * "停止時点", so a disconnection freezes the office instead of erasing it.
+   */
+  last_known_visual: ActorVisual;
 };
 
 export type Header = {
@@ -247,6 +255,7 @@ export declare function statusTokens(status: string | null): string[];
 export declare function classifyStatus(status: string | null): ActorVisualState | null;
 export declare function visualForState(state: string): ActorVisual;
 export declare function classifyActor(actor: Partial<ViewActor> | null | undefined): ActorVisual;
+export declare function isStale(connection: ViewConnection | null | undefined): boolean;
 export declare function classifyConnection(connection: Partial<ViewConnection> | null | undefined): ConnectionVisual;
 export declare function createClientState(namespace: string): ClientState;
 export declare function setConnectionPhase(state: ClientState, phase: string, atMs?: number | null): ClientState;
