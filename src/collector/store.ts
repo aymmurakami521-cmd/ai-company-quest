@@ -18,6 +18,7 @@ import type { ActorDirectory } from '../domain/actor.ts';
 import { resolveActorFromEvent } from '../domain/actor.ts';
 import type { IngestedEvent, PlayerEntity, QuestState, StateLimits } from '../domain/reducer.ts';
 import { DEFAULT_STATE_LIMITS, checkStateLimits, createInitialState, reduce } from '../domain/reducer.ts';
+import type { OrgState } from '../domain/org.ts';
 import { emptyRecord, ownProperty } from '../domain/record.ts';
 import type { RejectReason, ValidationResult } from '../domain/validate.ts';
 import { DEFAULT_MAX_LINE_BYTES, validateEventObject, validateLine } from '../domain/validate.ts';
@@ -105,6 +106,11 @@ export type StoreOptions = {
   maxLineBytes?: number;
   directory?: ActorDirectory;
   player?: PlayerEntity;
+  /**
+   * Organisation input for this namespace, validated by the caller. Held beside
+   * the stream and never modified by ingestion (`domain/org.ts`).
+   */
+  org?: OrgState;
   /** Per-limit overrides; anything omitted keeps `DEFAULT_STATE_LIMITS`. */
   stateLimits?: Partial<StateLimits>;
 };
@@ -145,7 +151,7 @@ export class NamespaceStore {
     this.seenIds = new BoundedIdSet(options.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY);
     this.directory = options.directory;
     this.stateLimits = { ...DEFAULT_STATE_LIMITS, ...options.stateLimits };
-    this.state = createInitialState(options.namespace, options.player, this.stateLimits);
+    this.state = createInitialState(options.namespace, options.player, this.stateLimits, options.org);
     this.nextIngestSeq = 1;
     this.listeners = new Set();
     this.haltListeners = new Set();

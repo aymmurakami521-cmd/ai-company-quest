@@ -12,6 +12,15 @@ import { DEFAULT_PORT } from './server/server.ts';
 
 export type QuestConfig = {
   inputPath: string | null;
+  /**
+   * Path to the verified organisation snapshot (`company/org.snapshot.json`,
+   * produced by the `ai-company` repository). Supplied by the operator through
+   * `QUEST_ORG_SNAPSHOT_PATH`, on exactly the same terms as `inputPath`: no
+   * cross-repository path is committed here, and no path is ever derived from
+   * event content. `null` means "no organisation input", which is a supported
+   * mode, not an error (`docs/org-snapshot-design.md` §4.5).
+   */
+  orgSnapshotPath: string | null;
   port: number;
   replayCapacity: number;
   dedupeCapacity: number;
@@ -38,6 +47,9 @@ export function loadConfig(env: EnvLike): QuestConfig {
   const rawInput = env['QUEST_INPUT_PATH'];
   const inputPath = rawInput === undefined || rawInput.trim() === '' ? null : rawInput.trim();
 
+  const rawOrg = env['QUEST_ORG_SNAPSHOT_PATH'];
+  const orgSnapshotPath = rawOrg === undefined || rawOrg.trim() === '' ? null : rawOrg.trim();
+
   const rawStartFrom = env['QUEST_START_FROM'] ?? 'beginning';
   if (rawStartFrom !== 'beginning' && rawStartFrom !== 'end') {
     throw new Error("QUEST_START_FROM must be 'beginning' or 'end'");
@@ -48,6 +60,7 @@ export function loadConfig(env: EnvLike): QuestConfig {
 
   return {
     inputPath,
+    orgSnapshotPath,
     port: readInt(env, 'QUEST_PORT', DEFAULT_PORT, 1024, 65535),
     replayCapacity: readInt(env, 'QUEST_REPLAY_CAPACITY', DEFAULT_REPLAY_CAPACITY, 1, 100_000),
     dedupeCapacity: readInt(env, 'QUEST_DEDUPE_CAPACITY', DEFAULT_DEDUPE_CAPACITY, 1, 5_000_000),
