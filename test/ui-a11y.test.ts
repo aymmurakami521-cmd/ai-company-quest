@@ -543,3 +543,22 @@ test('the detail panel says what the contract cannot supply', () => {
   assert.ok(HTML.includes('担当タスク'), 'the task row exists');
   assert.ok(HTML.includes('最新の概要'), 'and is a different row from the event summary');
 });
+
+test('the page requests nothing the asset table does not serve', () => {
+  // A 404 in the console is noise a reader has to rule out before trusting the
+  // rest of it. The only browser-initiated extra request is the favicon, and it
+  // is answered inline rather than by widening the served surface.
+  assert.ok(HTML.includes('rel="icon"'), 'the favicon request is answered');
+  assert.ok(HTML.includes('href="data:,"'), 'and answered with nothing, not a fetch');
+
+  // Every href/src in the document is either a data: URI or a path the fixed
+  // asset table serves.
+  const refs = [...HTML.matchAll(/(?:href|src)="([^"]+)"/g)].map((match) => match[1] as string);
+  for (const ref of refs) {
+    if (ref.startsWith('data:') || ref.startsWith('#')) continue;
+    assert.ok(
+      UI_ASSET_PATHS.includes(ref),
+      `${ref} is served by the asset table (nothing else may be requested)`,
+    );
+  }
+});

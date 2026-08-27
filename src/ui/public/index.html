@@ -6,6 +6,14 @@
     <meta name="referrer" content="no-referrer" />
     <title>AI Company Quest — レトロオフィス</title>
     <!-- No inline script and no inline style: the served CSP forbids both. -->
+    <!--
+      Suppresses the browser's automatic /favicon.ico request, which the fixed
+      asset table has no entry for and answers with a 404 - console noise a
+      reader has to rule out before trusting the rest of it. An empty data: URI
+      is the whole fix: no new route, no new file, no new byte to review, and
+      nothing that looks like an external destination to the asset scanner.
+    -->
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/ui/quest.css" />
     <script type="module" src="/ui/quest-app.js"></script>
   </head>
