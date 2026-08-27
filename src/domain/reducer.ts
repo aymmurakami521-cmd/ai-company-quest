@@ -24,6 +24,7 @@
 import type { Namespace, SanitizedEvent } from './event.ts';
 import type { ResolvedActor } from './actor.ts';
 import { copyRecord, emptyRecord, ownProperty } from './record.ts';
+import { ORG_ABSENT, type OrgState } from './org.ts';
 
 /** An accepted, de-duplicated event with its collector-assigned sequence. */
 export type IngestedEvent = {
@@ -113,6 +114,16 @@ export type StateLimitViolation = {
 export type QuestState = {
   namespace: Namespace;
   player: PlayerEntity;
+  /**
+   * Organisation input, held beside the stream rather than inside it.
+   *
+   * `reduce` never reads or writes this field: the floor plan is operator input,
+   * not stream content, so no Claude event can install, replace or invalidate an
+   * organisation (the same invariant `player` already has). It is set once when
+   * the state is created and carried through every reduction unchanged
+   * (`docs/org-snapshot-design.md` §2.1).
+   */
+  org: OrgState;
   limits: StateLimits;
   sessions: Record<string, SessionState>;
   actors: Record<string, ActorState>;
@@ -150,10 +161,12 @@ export function createInitialState(
   namespace: Namespace,
   player: PlayerEntity = DEFAULT_PLAYER,
   limits: StateLimits = DEFAULT_STATE_LIMITS,
+  org: OrgState = ORG_ABSENT,
 ): QuestState {
   return {
     namespace,
     player,
+    org,
     limits: { ...limits },
     sessions: emptyRecord<SessionState>(),
     actors: emptyRecord<ActorState>(),
@@ -335,6 +348,9 @@ export function reduce(state: QuestState, ingested: IngestedEvent): QuestState {
     namespace: state.namespace,
     // Carried by reference on purpose: events can never touch the player.
     player: state.player,
+    // Likewise: the organisation is operator input, not stream content. No event
+    // installs, replaces or invalidates it - it is carried through untouched.
+    org: state.org,
     // Likewise: limits are configuration, not something a producer can raise.
     limits: state.limits,
     sessions: nextSessions,

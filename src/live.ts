@@ -11,6 +11,8 @@ import type { PlayerEntity } from './domain/reducer.ts';
 import { NamespaceStore } from './collector/store.ts';
 import { Collector } from './collector/collector.ts';
 import { seedDemoStore } from './demo/fixtures.ts';
+import { loadOrgState } from './collector/orgLoader.ts';
+import { orgStatusDetail } from './domain/org.ts';
 import { QuestServer } from './server/server.ts';
 
 export async function main(): Promise<number> {
@@ -26,6 +28,10 @@ export async function main(): Promise<number> {
 
   const player: PlayerEntity = { kind: 'player', id: 'player', display_name: config.playerName };
 
+  // Read once at startup. A missing or invalid organisation disables the org
+  // feature only; ingestion starts either way (`docs/org-snapshot-design.md` §4.5).
+  const org = await loadOrgState({ path: config.orgSnapshotPath });
+
   const live = new NamespaceStore({
     namespace: 'live',
     // The external contract, stated once and never inferred from a payload.
@@ -35,6 +41,7 @@ export async function main(): Promise<number> {
     dedupeCapacity: config.dedupeCapacity,
     maxLineBytes: config.maxLineBytes,
     player,
+    org,
   });
 
   const demo = new NamespaceStore({
@@ -48,6 +55,8 @@ export async function main(): Promise<number> {
     maxLineBytes: config.maxLineBytes,
     player,
   });
+
+  process.stdout.write(`quest: org snapshot ${orgStatusDetail(org)}\n`);
 
   if (config.seedDemo) {
     const seeded = seedDemoStore(demo);
