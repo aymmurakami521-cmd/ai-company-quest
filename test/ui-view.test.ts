@@ -9,8 +9,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { NamespaceStore } from '../src/collector/store.ts';
+import { HOOK_EVENT_LIFECYCLE } from '../src/domain/hookAdapter.ts';
 import type { HaltReason } from '../src/collector/store.ts';
 import { seedDemoStore } from '../src/demo/fixtures.ts';
+import { DEMO_TIMELINE } from '../src/demo/timeline.ts';
 import type { QuestState } from '../src/domain/reducer.ts';
 import type { WireEvent } from '../src/domain/wire.ts';
 import { WIRE_EVENT_KEYS } from '../src/domain/wire.ts';
@@ -1061,4 +1063,51 @@ test('an office that never connected is not reported as frozen', () => {
   assert.equal(isStale({ ...fresh.connection, phase: 'connecting' }), false);
   assert.equal(isStale({ ...fresh.connection, phase: 'open' }), false, 'an open stream is live');
   assert.equal(isStale(null), true, 'no connection at all is not something to vouch for');
+});
+
+test('every status LIVE can actually produce is one this screen can read', () => {
+  // The classification refuses to guess, which means a status the vocabulary
+  // does not know now renders as 状態不明. That is right for a label nobody
+  // planned for - and badly wrong for one the adapter emits on every successful
+  // tool call. `ok` was exactly that, and it reached a browser before a test.
+  //
+  // Pinned to the lifecycle table itself, so a new row there cannot quietly ship
+  // a status the office cannot describe.
+  const statuses = new Set(
+    [...HOOK_EVENT_LIFECYCLE.values()].map((lifecycle) => lifecycle.status).filter(
+      (status): status is string => typeof status === 'string' && status.length > 0,
+    ),
+  );
+  assert.ok(statuses.size >= 6, 'the lifecycle table really was read');
+
+  for (const status of statuses) {
+    const classified = classifyStatus(status);
+    assert.notEqual(classified, null, `LIVE status "${status}" has no visual state`);
+    // Both flag values, because the fallback must not be what rescues it.
+    for (const active of [true, false]) {
+      assert.notEqual(
+        classifyActor({ status, active }).state,
+        'unknown',
+        `LIVE status "${status}" must not read as 状態不明 (active: ${active})`,
+      );
+    }
+  }
+});
+
+test('the statuses the scripted mission reports are readable too, except the one that is not', () => {
+  // The mission deliberately contains one uninterpretable status, to show the
+  // honest case. Every other beat must classify.
+  const deliberatelyUnknown = 'sync_pending';
+  for (const beat of DEMO_TIMELINE) {
+    if (beat.status === null) continue;
+    if (beat.status === deliberatelyUnknown) {
+      assert.equal(classifyStatus(beat.status), null, 'the unknown case stays unknown');
+      continue;
+    }
+    assert.notEqual(
+      classifyStatus(beat.status),
+      null,
+      `demo status "${beat.status}" should be readable`,
+    );
+  }
 });

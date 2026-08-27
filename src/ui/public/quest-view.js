@@ -110,6 +110,12 @@ const STATUS_TOKENS = Object.freeze({
   working: Object.freeze([
     'active', 'running', 'run', 'working', 'work', 'busy', 'thinking', 'executing', 'execute',
     'streaming', 'started', 'start', 'progress', 'tool',
+    // `ok` is the outcome of one step, not the end of the actor: the LIVE
+    // adapter emits it for every successful `PostToolUse`, and a colleague whose
+    // last tool call succeeded is still at work. Without it here, every
+    // successful step in LIVE would read as 状態不明 - which is exactly what it
+    // did the first time this screen was opened against the scripted mission.
+    'ok',
     // Listed explicitly so they classify as work rather than falling through to
     // `unknown` now that an unrecognised label no longer guesses.
     'reasoning', 'designing', 'design', 'implementing', 'implement', 'building', 'build',
