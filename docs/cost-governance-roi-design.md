@@ -508,10 +508,52 @@ business value は人間が方法論を選んで**推定する値**だからで�
   どちらの小計にも確定的に入りません（§7.1.1）。
 - **金額小計は `value_kind = monetary` の record のみ**から作り、
   `non_monetary`（時間 / 件数 / 率）は**単位ごとに別掲**します。混ぜて合算しません。
+- **金額小計は通貨をまたいで直接加算しません。** `realization_status` だけを
+  小計の key にすると、`realized` の JPY と USD が同じ小計へ入ります。
+  小計の key は **`realization_status` と通貨の組**です（§7.3.1）。
 - `confidence` を落として合計だけを見せる表示を作りません。
   また `confidence` を**実現の代用として提示しません**（確度99%の推定は推定です）。
 - 人間向け報告（日本語）でも「推定」「前提」を明示します
   （本体文書の言語policy: 人間向け要約は日本語、機械間は schema）。
+
+#### 7.3.1 金額小計は通貨をまたいで加算しない
+
+`value_kind = monetary` の record は `unit` に **ISO 4217 の通貨コード**を持ちます（§7.1.2）。
+したがって `realization_status` を唯一の小計 key にすると、
+**同じ `realized` でも通貨の違う record が1つの合計へ入り**、
+「JPY と USD を足した金額」という**次元の合わない値**が business value 総額として流通します。
+これは §8.2 が比率について禁じている通貨混在と同じ誤りであり、
+§4.2 の「黙って換算しない」にも反します。
+
+**金額小計の算出方法は、次の2つのうち明示的に選んだ1つだけです。** 既定は mode A。
+
+| mode | 内容 | 換算 |
+|------|------|------|
+| **A. 通貨別 partition** | 小計を **`(realization_status, unit)` の組ごと**に出す。JPY と USD は**別行**として並べ、1つの総額へ畳まない | しない |
+| **B. reporting 通貨へ正規化** | 全 record を**単一の reporting 通貨**へ換算した上で **`(realization_status, reporting_currency)`** で合算する | する（下記 evidence 必須） |
+
+mode B を採る場合、換算した record ごとに次を**必ず保持**します（欠けたら mode B は成立しません）:
+
+| 項目 | 内容 |
+|------|------|
+| `fx_source` | rate の出所（提供元） |
+| `fx_rate` / `fx_rate_version` | 適用した換算率と、その版 |
+| `fx_effective_at` | 換算率の適用時点（ISO-8601） |
+| 換算方向 | `from_currency` → `to_currency`（いずれも ISO 4217） |
+| 原本 | **元の `unit`（原通貨）と金額**。上書きせず保持する（§4.2） |
+
+規則:
+
+- **どちらの mode でも `realization_status` は独立軸のまま**です（§7.1.1）。
+  金額小計は**少なくとも `realization_status` × 通貨**（mode B では reporting 通貨）で
+  一意に導出できなければなりません。
+- **`non_monetary` は金額小計に入りません。** `value_metric_type` と単位ごとに別掲します（§7.1.2）。
+- **FX evidence を伴わずに異なる通貨を合算した小計は契約違反**です。
+  deterministic code は黙って換算せず、**その小計の算出を失敗させて理由を記録**します
+  （理由は field 名 + rule 名のみ・§3.4。§3.6 / §7.1.2 と同じ扱い）。
+  個々の value record は破棄しません（§3.5 と同じ理由）。
+- 報告側でこの状態を提示する場合は `blocked_currency_mismatch` を用います（§8.4）。
+- 採用した mode と reporting 通貨は**報告に必ず併記**します（§8.5）。
 
 ---
 
@@ -549,6 +591,7 @@ benefit-cost ratio / net ROI を**計算してよいのは、次を全て満た�
 |------|------|
 | 金額であること | 分子は `value_kind = monetary` の record のみ。**時間・件数・率からは計算しません**（§7.1.2） |
 | 通貨が一致 | 分子・分母が**同一の reporting 通貨**（ISO 4217）に揃っていること |
+| 分子の小計が単一通貨 | 分子とする金額小計自体が、**通貨別 partition か FX evidence 付きの reporting 通貨換算のどちらかで算出**されていること（§7.3.1） |
 | 期間が一致 | `measurement_window`（value）と budget period / 集計期間（cost）が同一 |
 | 範囲が一致 | `attribution_scope`（tenant / project / task / workflow / department / role 等）が同一 |
 | 方法論が整合 | `attribution_method` / `methodology_version` が比較可能であること |
@@ -560,6 +603,9 @@ benefit-cost ratio / net ROI を**計算してよいのは、次を全て満た�
   FX rate / rate source / effective time を伴う**明示的な換算 evidence** を作り、
   reporting 通貨へ揃えた金額で計算します（§4.2）。
 - **黙って換算しません。** 換算した旨と rate 出所を報告に併記します。
+- **FX evidence 無しに複数通貨を合算した小計を分子に採れません。**
+  その小計は §7.3.1 の時点で契約違反であり、比率は算出せず
+  `blocked_currency_mismatch` を返します（§8.4）。
 
 ### 8.3 実現 ROI と 推定 ROI を混ぜない
 
@@ -581,7 +627,7 @@ benefit-cost ratio / net ROI を**計算してよいのは、次を全て満た�
 | `blocked_unpriced_cost` | `ai_cost` に `unpriced`（金額未確定）が含まれる。**0 ではなく不明** |
 | `blocked_unresolved_cost` | `resolution = unresolved` の消費が範囲に含まれ、cost が確定していない（§3.5） |
 | `blocked_non_monetary_operand` | 分子に `value_kind = non_monetary` が含まれる |
-| `blocked_currency_mismatch` | 通貨が揃っておらず、FX evidence も無い |
+| `blocked_currency_mismatch` | 通貨が揃っておらず、FX evidence も無い。**分子の金額小計が FX evidence 無しに複数通貨を合算している場合を含む**（§7.3.1） |
 | `blocked_scope_mismatch` | `attribution_scope` または `measurement_window` が一致しない |
 | `blocked_methodology_mismatch` | `methodology_version` / `attribution_method` が比較可能でない |
 
@@ -601,6 +647,8 @@ status と理由をそのまま人間へ提示します。
 
 - 報告時は **用語名を必ず併記**します（「benefit-cost ratio 13.3倍」）。
 - **通貨・期間・範囲・`methodology_version` を必ず併記**します（§8.2 の前提）。
+- **金額小計の集約 mode（通貨別 partition / reporting 通貨への換算）を併記**し、
+  換算した場合は **FX 出所・rate version・適用時点・換算方向**も併記します（§7.3.1）。
 - **`business_value` に推定が含まれる場合、その旨と推定の内訳を併記**します（§8.3）。
 - **`ai_cost` に `estimated` / `unpriced` / `unresolved` が含まれる場合も同様**です（§6.4 / §3.5）。
 - `methodology_version` が異なる期間の比率を、断りなく時系列比較しません。
@@ -685,12 +733,13 @@ code 変更ゼロ、runtime 影響ゼロ、338 test に影響ゼロ、owner 承�
 | C4 | **dynamic agent の消費が、恒久的な employee identity 無しに集計できる。** roster 未実装でも cost 集計が成立する |
 | C5 | **budget の判断が、policy（version付き）+ evidence から再現できる。** 同じ入力から同じ判断が導けない状態を作らない |
 | C6 | **cost の閾値超過が、保護対象の支出の**前**で承認要求または停止へ到達できる。** 事後通知しかできない設計にしない |
-| C7 | **business value の推定が、方法論 / evidence / 確度を保持したまま流通する。** 推定が観測の顔をして集計に混ざらない。**`realization_status` が `value_metric_type` と `confidence` から独立した必須軸として存在し**（§7.1.1）、`revenue_contribution` のように両方を取り得る型でも実現 / 推定の小計が一意に定まる |
+| C7 | **business value の推定が、方法論 / evidence / 確度を保持したまま流通する。** 推定が観測の顔をして集計に混ざらない。**`realization_status` が `value_metric_type` と `confidence` から独立した必須軸として存在し**（§7.1.1）、`revenue_contribution` のように両方を取り得る型でも実現 / 推定の小計が一意に定まる。この軸は**通貨軸と直交**し、金額小計は `realization_status` × 通貨で定まる（→ C13） |
 | C8 | **Management Console が Task / Workflow / Department / Role / Provider / Model の各軸を比較できる。** かつ **Quest は enforcement を一切所有しない** |
 | C9 | **provider 請求が遅延・欠落しても、fail-safe な既定挙動が policy から決まる。** 「消費0」として黙って続行しない。`unpriced` / `unresolved` を budget 評価から除外しない |
 | C10 | **ROI の報告に benefit-cost ratio / net ROI の別が明記される。** 曖昧な「N倍」表記が残らない |
 | C11 | **ROI の分子・分母が commensurate である。** 両者が金額（`value_kind = monetary`）で、同一の reporting 通貨 / 期間 / `attribution_scope` / 方法論であるときにのみ算出される。通貨差は FX evidence を伴い、黙って換算されない。**realized ROI と estimated ROI が分離**され、無印の合成比率が存在しない（§8.2 / §8.3） |
 | C12 | **既知の 0 と未算出が区別される。** `ai_cost = 0` は `finalized` / `estimated` のまま既知の金額として扱われ、比率は `undefined_zero_denominator` として提示される。**`unpriced` は金額・価格が無い場合にのみ使われ**、0 や ∞ が比率の代わりに表示されない（§3.6 / §8.4） |
+| C13 | **金額の business value 小計が、異なる ISO 4217 通貨を直接加算しない。** 小計は **`realization_status` × 通貨**（正規化した場合は reporting 通貨）で導出でき、`non_monetary` は入らない。reporting 通貨へ揃える場合は **FX 出所 / rate・rate version / 適用時点 / 換算方向 / 原通貨・原金額**が保持される。FX evidence 無しの複数通貨合算は**契約違反**であり、その小計を分子とする比率は算出されず `blocked_currency_mismatch` になる（§7.3.1 / §8.2 / §8.4） |
 
 ---
 
@@ -711,7 +760,7 @@ code 変更ゼロ、runtime 影響ゼロ、338 test に影響ゼロ、owner 承�
 | 完全な cost dashboard | Management Console フェーズ。telemetry の信頼性が先 |
 | 実際の budget 執行 | Policy / Approval / Stop 基盤が先（§9.3 COST-3） |
 | ROI の自動算出 | baseline と方法論の定義が先（§9.3 VALUE-1） |
-| 複数通貨の reporting 換算 | 原本保持（§4.2）さえ守れば後から足せる |
+| 複数通貨の reporting 換算 | 原本保持（§4.2）さえ守れば後から足せる。換算を実装するまでは**通貨別 partition**（§7.3.1 mode A）で集計が成立する |
 | 按分ルール（共有コストの配賦） | 帰属できない分を `unattributed` に留められる限り、急がない |
 | 価格表の version 管理機構 | `pricing_source` に版を記録できれば、機構は後で足せる |
 | provider 請求 API との突合 | COST-1 以降。今は `evidence_ref` の枠だけ |
