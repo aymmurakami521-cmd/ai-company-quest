@@ -628,3 +628,8 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
   予算policyの境界・ROI用語は
   [`docs/cost-governance-roi-design.md`](docs/cost-governance-roi-design.md) に
   記録しています（設計記録のみ・実装なし）。
+- **正社員 / 臨時スタッフ、社内設備、会議室、ARKパッケージ、契約プランはこのrepositoryに
+  存在しません。** 社員の種別も、表示上の居場所も、パッケージも、利用回数の制限も
+  実装していません。将来要件としての整理と、現行コードのどこへ載せられるか（拡張点）は
+  [`docs/company-model-design.md`](docs/company-model-design.md) に記録しています
+  （設計記録のみ・実装なし）。
