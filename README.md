@@ -499,3 +499,11 @@ cp ci/quest-core-ci.yml.example .github/workflows/ci.yml
   `unknown_event_id` として扱われます。
 - tailerはpolling方式です（fs.watchのplatform差を避けるため）。
 - Mac hookの登録、cloud/web session、外部deployは対象外です。
+- **AI利用量・費用・予算・ROIはこのrepositoryに一切存在しません。** wireの19 key
+  （`src/domain/wire.ts:39`）にも内部event model（`docs/event-contract.md`）にも
+  `QuestState`（`src/domain/reducer.ts:113`）にも、usage / cost / token / price に
+  相当するfieldはありません。集計も予算判定も停止判断も実装していません。
+  これらを実装する前に決めるべき帰属軸・provider独立性・見積り/確定の区別・
+  予算policyの境界・ROI用語は
+  [`docs/cost-governance-roi-design.md`](docs/cost-governance-roi-design.md) に
+  記録しています（設計記録のみ・実装なし）。

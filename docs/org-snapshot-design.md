@@ -317,3 +317,16 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 - Phase 3（操作API、指示送信、歩行・自由移動、音声入力）
 - workflow、permissions、hooks、settings、Secrets、依存追加
 - 無関係なrefactor
+- **Cost Governance / ROI**（→ [cost-governance-roi-design.md](cost-governance-roi-design.md)）
+
+---
+
+## 7. 関連文書との依存関係
+
+| 文書 | 本文書との関係 |
+|------|----------------|
+| [loop-control-plane-design.md](loop-control-plane-design.md) | 上位の architecture 設計。本文書の PR-1〜PR-5 は **supersede されず、順序も維持**されます |
+| [cost-governance-roi-design.md](cost-governance-roi-design.md) | Cost Governance / ROI の設計記録。**本文書の §4.1（`company/org.yaml` の実在）と §4.2（照合key）に依存しません** — cost の必須帰属軸は論理 role であり、恒久的な社員 identity を要求しないためです（同文書 §5.2）。したがって org 側の未決が cost 側を止めることはなく、逆に cost 側が本文書の未決を先に決めさせることもありません |
+
+**依存の向きを明示しているのは、片方の未決事項がもう片方の着手を不必要に塞ぐことを防ぐためです。**
+org 定義の外部事実確認（§4.1）と、cost の attribution contract は**並行して進められます**。
