@@ -12,6 +12,7 @@ import { NamespaceStore } from './collector/store.ts';
 import { Collector } from './collector/collector.ts';
 import { seedDemoStore } from './demo/fixtures.ts';
 import { DEMO_TIMELINE, DemoPlayer } from './demo/timeline.ts';
+import { APPROVAL_COMMAND, attachApprovalConsole } from './demo/approval.ts';
 import { loadOrgState } from './collector/orgLoader.ts';
 import { orgStatusDetail } from './domain/org.ts';
 import { QuestServer } from './server/server.ts';
@@ -68,6 +69,9 @@ export async function main(): Promise<number> {
     onFirstSubscriber: config.demoPlay ? () => demoPlayer?.start() : undefined,
   });
 
+  /** Removes the stdin listener again. Null unless the mission is being played. */
+  let detachApprovalConsole: (() => void) | null = null;
+
   if (config.demoPlay) {
     demoPlayer = new DemoPlayer({
       store: demo,
@@ -75,6 +79,25 @@ export async function main(): Promise<number> {
       firstDelayMs: config.demoPlayFirstDelayMs,
       onFinished: () => {
         process.stdout.write(`quest: demo mission finished (${DEMO_TIMELINE.length} events)\n`);
+      },
+      // Playback is already suspended by the time this runs; the line only tells
+      // the person that the mission is now waiting on them.
+      onAwaitingApproval: () => {
+        process.stdout.write(
+          'quest: DEMO mission is waiting for a human approval.\n' +
+            `quest:   type '${APPROVAL_COMMAND}' + Enter here to approve. Time alone will not resume it.\n`,
+        );
+      },
+    });
+
+    // The only input this process accepts. Scoped to the DEMO player by the
+    // closure: there is no LIVE player, and no namespace reaches this call.
+    const player = demoPlayer;
+    detachApprovalConsole = attachApprovalConsole({
+      input: process.stdin,
+      approve: () => player.approve(),
+      write: (line) => {
+        process.stdout.write(line);
       },
     });
   }
@@ -122,7 +145,12 @@ export async function main(): Promise<number> {
       `quest:   health  GET /health\n` +
       `quest:   stream  GET /events/live     (SSE)\n` +
       `quest:   stream  GET /events/demo     (SSE)\n` +
-      'quest: read-only, loopback only. Ctrl-C to stop.\n',
+      'quest: read-only, loopback only. Ctrl-C to stop.\n' +
+      // Said only when there is a mission that can stop for a human. The HTTP
+      // surface is unchanged by it: this is stdin of this process, not a route.
+      (config.demoPlay
+        ? `quest: the DEMO mission stops at 承認待ち. Type '${APPROVAL_COMMAND}' + Enter here to approve it.\n`
+        : ''),
   );
 
   let shuttingDown = false;
@@ -130,8 +158,10 @@ export async function main(): Promise<number> {
     if (shuttingDown) return;
     shuttingDown = true;
     // The demo timer first: it is the only thing left in this process that would
-    // keep producing after the collector stopped.
+    // keep producing after the collector stopped. The approval console goes with
+    // it, so a line typed during shutdown cannot produce one last transition.
     demoPlayer?.stop();
+    detachApprovalConsole?.();
     void collector.stop().then(() => server.close());
   };
   process.on('SIGINT', shutdown);

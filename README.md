@@ -11,13 +11,15 @@ AI Companyの稼働状況をレトロゲーム風UIで可視化するアプリ�
 
 ## クイックスタート（5分）
 
-LIVE入力もcredentialも外部networkも要りません。この4行だけで動きます。
+LIVE入力もcredentialも外部networkも要りません。この5行だけで動きます。
 
 ```bash
 node -v                     # 1. v22.18.0 以上であることを確認
 npm run demo                # 2. 起動（依存のinstallは不要です）
 open http://127.0.0.1:4317/#demo   # 3. ブラウザで開く
-                            # 4. 止めるときは起動したterminalで Ctrl-C
+                            # 4. 「承認待ち ‼」で止まったら、起動したterminalで
+                            #    approve と入力して Enter（これが承認です）
+                            # 5. 止めるときは起動したterminalで Ctrl-C
 ```
 
 **開いてから何が見えるか**
@@ -28,8 +30,10 @@ open http://127.0.0.1:4317/#demo   # 3. ブラウザで開く
 1. `dev-1` が **計画中 ◆** になる
 2. **作業中 ▶** に変わり、`last tool` が `read` → `edit` と動く
 3. `qa-1` がテスト、`review-1` がレビューに入る
-4. `dev-1` が **承認待ち ‼** で止まる（**時間では解けません**。次のeventが承認を報告して初めて動きます）
-5. 承認後 **作業中 ▶** に戻り、最後に **完了 ■** になる
+4. `dev-1` が **承認待ち ‼** で止まり、**そこで待ち続けます**
+   （**時間では解けません**。待っている間はtimerも張られていないので、放置しても勝手に進みません）
+5. 起動したterminalで `approve` + Enter と入力すると、その入力が次のeventを投入します。
+   **作業中 ▶** に戻り、最後に **完了 ■** になります
 6. 横で `sync-1` が **エラー ✖**、`ext-1` が **状態不明 ?** になる
    （`ext-1` はこの画面に語彙が無いstatusを報告しています。勝手に成功や待機へ倒しません）
 
@@ -47,6 +51,7 @@ open http://127.0.0.1:4317/#demo   # 3. ブラウザで開く
 |---|---|
 | `EADDRINUSE` / ポート衝突 | `QUEST_PORT=4318 npm run demo` を使い、`http://127.0.0.1:4318/#demo` を開く |
 | 画面が動かない | ミッションは**最初にDEMOへ接続した人**が来た時に1回だけ始まります。一度再生し終えた後は、terminalで `Ctrl-C` → `npm run demo` で最初から見られます |
+| `dev-1` が **承認待ち ‼** から動かない | 仕様です。承認するまで進みません。起動したterminalに `approve` + Enter と入力してください（terminalにも「waiting for a human approval」と出ます） |
 | 進みが速い / 遅い | `QUEST_DEMO_PLAY_INTERVAL_MS=3000 npm run demo`（既定1500ms） |
 | 動かない静止画で状態を見比べたい | `npm run demo:static`。7状態が1画面に並んだ固定frameで、timerも乱数も使いません |
 
@@ -144,11 +149,43 @@ local session・credential・network接続は不要です。
 
 | 見えるもの | 内容 |
 |---|---|
-| 縦切り1本 | ミッション開始 → 計画中 → 実装 → テスト → レビュー → 承認待ち → 再開 → 完了 |
-| 承認は時間で解けない | 承認待ちを解くのは**次のeventが報告するstatus**であって、timerの経過ではありません |
+| 縦切り1本 | ミッション開始 → 計画中 → 実装 → テスト → レビュー → **承認待ち（人が承認するまで停止）** → 再開 → 完了 |
+| 承認は時間で解けない | 下記「承認の仕組み」を参照。timerの経過では**決して**解けません |
 | エラー | 別のactorが `error` で停止します |
 | 状態不明 | 別のactorがこの画面に語彙の無いstatusを報告します。`active` flagから作業中/待機中へ**推測しません** |
 | リロード不要 | SSEで届くので、ページを再読み込みせずに遷移が見えます |
+
+#### 承認の仕組み（`awaiting_approval` は時間では解けません）
+
+`status: awaiting_approval` のbeatが入った時点で、playerは**gateを閉じます**。
+
+- gateが閉じている間、**timerは張られません**。`intervalMs` がいくら経過しても、
+  `step()` を何回呼んでも、次のbeatは1つも投入されません。
+- gateを開けるのは `DemoPlayer.approve()` **だけ**です。「承認を受けて作業を再開しました」と
+  報告するbeatは、この呼び出しが投入します。つまり画面上のその主張は、**人が承認したという事実に
+  由来します**（時計の進みには由来しません）。
+- 2回目以降の `approve()`、終了後や停止後の `approve()` は **no-op** です。結果を
+  `resumed` / `not_awaiting` / `stopped` として返すだけで、beatは二重に投入されません。
+- `Ctrl-C` で停止すると、gateが開くことも、承認が発生することもありません。
+
+**承認を送る唯一の経路は、`npm run demo` を起動したterminalのstdinです。**
+`approve` とだけ入力して Enter を押します（大文字小文字と前後の空白は許容、それ以外の行は
+すべて「認識できない入力」として無視）。1行あたり64文字を超える入力は**切り詰めずに破棄**します。
+
+なぜUIのボタンでもHTTP endpointでもないのか:
+
+- HTTP serverは **GETのみ**で、collector stateを変更するrouteは1つもありません。
+  承認endpointはその第1号になり、loopbackに到達できる全プロセス・全ページから叩けるようになります。
+- 画面が開くrequestは、**documented read-only SSE GETが2本だけ**です
+  （`test/ui-server.test.ts` と `test/ui-a11y.test.ts` が、画面scriptに `fetch` /
+  `XMLHttpRequest` / `WebSocket` / `sendBeacon` が1つも無いことをassertしています）。
+  承認ボタンは「UIは書き込めない」を「UIはこれ1つだけ書き込める」に変えます。
+- 起動中プロセスのstdinはloopbackより狭い経路です。到達するには、そのterminalを
+  すでに握っている必要があります。
+
+結果として **画面とHTTP APIはこれまで通り完全にread-onlyのままです。** 承認は画面の操作では
+ありません。またこの経路にLIVEは存在しません（LIVE用のplayerは無く、
+`DemoPlayer` はDEMO以外のstoreを渡されるとthrowします）。
 
 ### `npm run demo:static` — 固定frame
 
@@ -163,9 +200,15 @@ local session・credential・network接続は不要です。
 | LIVE/DEMO分離 | LIVEボタンへ切り替えると席・log・bannerが全て空になります（DEMOのstateは混ざりません） |
 | Canvasとの整合 | canvasは装飾層で、DOMの社員一覧・凡例・logが正本です |
 
-どちらのDEMOも**読み取り専用**です。画面から任意commandを実行する導線も、DEMO stateを書き換える
-導線もありません。DEMO eventがLIVE store / LIVE stream / LIVE stateへ入ることは
-構造的に不可能です（`seedDemoStore` はLIVE storeを渡されるとthrowします）。
+どちらのDEMOも、**画面とHTTP APIは読み取り専用**です。画面から任意commandを実行する導線も、
+画面やHTTPからDEMO stateを書き換える導線もありません。DEMO eventがLIVE store /
+LIVE stream / LIVE stateへ入ることは構造的に不可能です
+（`seedDemoStore` はLIVE storeを渡されるとthrowします）。
+
+`npm run demo` にだけ、人の入力を1種類受け付ける経路があります（上記「承認の仕組み」）。
+受け付けるのは**起動したterminalのstdinに入力された `approve` の1語だけ**で、効果は
+「承認待ちのDEMOミッションを1回だけ再開する」ことに限られます。任意commandではなく、
+LIVEへは到達せず、networkからも到達しません。
 
 ## 設定（環境変数）
 
@@ -553,7 +596,10 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
   [`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) に記録しています（設計記録のみ・実装なし）。
 - **Run / Goal / Approval / Evidence という運用単位はこのrepoにありません。** 本repoが描くのは
   event streamから畳み込んだactor状態までで、goal・run state machine・承認・risk分類・
-  retry予算・stall検出・永続run履歴はいずれも実装していません。Questをこれらの
+  retry予算・stall検出・永続run履歴はいずれも実装していません。
+  `npm run demo` の `approve` は例外ではありません。あれが承認するのは実在のrunではなく
+  **DEMOの台本の次の1 beat**で、承認gate・policy・risk分類・監査記録のいずれも持ちません
+  （目的は、DEMOが「時間の経過だけで承認された」と主張しないようにすることだけです）。Questをこれらの
   read model / experience layerとして位置づけ直すための責務境界・契約の形・段取りは
   [`docs/loop-control-plane-design.md`](docs/loop-control-plane-design.md) に記録しています
   （設計記録のみ・実装なし）。この計画でもQuestは **read-only / GETのみ / loopback限定** のままです。
@@ -576,6 +622,10 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
   `npm run demo` のミッションだけがtimerで進み、それも一度きりで、終わると停止します
   （loopしません。もう一度見るには再起動してください）。UIからDEMO stateを変更する導線は
   どちらのmodeにもありません。
+- **`npm run demo` のミッションは、承認待ちで人の入力を1回必要とします。** timerは
+  承認待ちに入った時点で張られなくなり、`approve`（起動terminalのstdin）を受け取るまで
+  1 beatも進みません。この1語以外は受け付けず、HTTP surfaceは増えていません。
+  `npm run demo:static` にはこの経路自体がありません。
 - Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界・backing store上限（0/1/40/95/96/97/
   4096席 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
   までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。

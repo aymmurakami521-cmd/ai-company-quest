@@ -648,6 +648,12 @@ Quest の server 側にも UI 側にも持たせません。
 
   この経路は **Quest の process にも UI にも属しません**。Quest 側に増えるのは、
   「承認待ちが存在する」という read-only な事実の表示だけで、そこから操作へは繋ぎません。
+- 上記は **LIVE（実在の run に対する承認）** の話です。`npm run demo` の scripted DEMO が
+  `awaiting_approval` で停止した時に受け付ける `approve`（起動 terminal の stdin、1 語のみ）は
+  これに含まれません。承認する対象は実在の run ではなく **DEMO の台本の次の 1 beat** で、
+  LIVE store / LIVE stream / Control API のいずれにも到達せず、HTTP surface も UI の
+  read-only 性も変更しません。DEMO が「時間の経過だけで承認されたと主張する」ことを
+  防ぐためだけに存在します（`README.md`「承認の仕組み」）。
 - 静的 asset の exact match 解決、`textContent` 経由のみの DOM 挿入、
   whitelist field のみの出力（`README.md:365-390`）は不変です。
 

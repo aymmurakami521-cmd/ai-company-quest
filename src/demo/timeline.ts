@@ -15,6 +15,9 @@
  * - It reports nothing it has not "done". The mission ends in a completion the
  *   preceding events actually build up to, and the two side stories below end in
  *   an error and in a status this screen openly cannot interpret.
+ * - It does not approve itself. A beat reporting `awaiting_approval` closes the
+ *   gate below, and no amount of elapsed time reopens it: the next beat is
+ *   ingested by `approve()` and by nothing else.
  *
  * Timestamps are stamped at ingestion, not baked in: the point of the animated
  * demo is that "last update" means something, and a frame dated 2026-01-01 while
@@ -156,8 +159,9 @@ export const DEMO_TIMELINE: readonly TimelineBeat[] = [
     status: 'awaiting_approval',
     summary: '人間の承認を待っています。承認されるまで先へ進みません',
   },
-  // ...and only moves again once it has been given. Nothing here advances on a
-  // timer alone: this beat is the approval, not the passage of time.
+  // ...and only moves again once it has been given. The beat above closes the
+  // player's approval gate, so this one is unreachable until `approve()` is
+  // called: it is ingested by the approval, never by the passage of time.
   {
     ...BASE,
     event_id: '10000000-0000-4000-8000-00000000000c',
@@ -227,6 +231,26 @@ export const DEMO_TIMELINE: readonly TimelineBeat[] = [
   },
 ];
 
+/**
+ * The status a beat reports when a run has stopped for a human.
+ *
+ * Read off the beat itself rather than kept as a separate list of indices, so a
+ * script cannot gain an approval stop that the events do not report, or report
+ * one the player then walks straight past.
+ */
+export const APPROVAL_GATE_STATUS = 'awaiting_approval';
+
+/**
+ * What one approval signal did.
+ *
+ * - `resumed`  - the gate was closed, this signal opened it, one beat followed.
+ * - `not_awaiting` - nothing was waiting: a duplicate, a late or an early
+ *   signal. Deliberately not an error, and deliberately not an advance.
+ * - `stopped` - the player is finished or shut down. Nothing is resumed after
+ *   that, by any signal.
+ */
+export type ApprovalOutcome = 'resumed' | 'not_awaiting' | 'stopped';
+
 export type DemoPlayerOptions = {
   store: NamespaceStore;
   /** Gap between beats once playback has started. */
@@ -245,6 +269,14 @@ export type DemoPlayerOptions = {
   now?: () => Date;
   /** Called once the last beat has been ingested. */
   onFinished?: () => void;
+  /**
+   * Called when a beat has just reported that the run is waiting for a human.
+   *
+   * Playback is already suspended by the time this runs. It exists so the
+   * operator can be told the mission is waiting on them - nothing about the
+   * gate depends on anybody listening.
+   */
+  onAwaitingApproval?: () => void;
 };
 
 /**
@@ -253,6 +285,15 @@ export type DemoPlayerOptions = {
  * `step()` is the whole state machine; `start()` only decides when to call it.
  * Tests drive `step()` directly, so the scenario is verified without waiting on
  * a single timer.
+ *
+ * One thing `start()` deliberately cannot decide is the approval. When a beat
+ * reports `awaiting_approval` the player closes a gate: `step()` returns false,
+ * no timer is scheduled, and the run stays exactly where it is for as long as
+ * the process lives. `approve()` is the only thing that opens it, and it opens
+ * it once. That is the whole reason the gate is in the player rather than in the
+ * caller - a wait that a caller has to remember to honour is a wait that a
+ * forgotten timer walks straight through, which is how a demo ends up claiming
+ * an approval nobody gave.
  */
 export class DemoPlayer {
   readonly store: NamespaceStore;
@@ -262,9 +303,12 @@ export class DemoPlayer {
 
   #now: () => Date;
   #onFinished: (() => void) | undefined;
+  #onAwaitingApproval: (() => void) | undefined;
   #index = 0;
   #started = false;
   #stopped = false;
+  #awaitingApproval = false;
+  #approvals = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: DemoPlayerOptions, timeline: readonly TimelineBeat[] = DEMO_TIMELINE) {
@@ -277,6 +321,7 @@ export class DemoPlayer {
     this.firstDelayMs = options.firstDelayMs;
     this.#now = options.now ?? (() => new Date());
     this.#onFinished = options.onFinished;
+    this.#onAwaitingApproval = options.onAwaitingApproval;
   }
 
   /** How many beats have been ingested so far. */
@@ -292,18 +337,63 @@ export class DemoPlayer {
     return this.#started;
   }
 
+  /** True while the run is stopped for a human and nothing may advance it. */
+  get awaitingApproval(): boolean {
+    return this.#awaitingApproval;
+  }
+
+  /** How many approval signals were actually acted on. Never more than gates. */
+  get approvals(): number {
+    return this.#approvals;
+  }
+
   /**
    * Ingests the next beat. Returns false when there is nothing left, so a
    * caller can stop without knowing the length of the script.
+   *
+   * "Nothing left" includes a closed approval gate: while the run is waiting
+   * for a human there is no next beat to ingest, whoever is asking and however
+   * often they ask.
    */
   step(): boolean {
-    if (this.#stopped || this.finished) return false;
+    if (this.#stopped || this.finished || this.#awaitingApproval) return false;
     const beat = this.timeline[this.#index];
     if (beat === undefined) return false;
     this.#index += 1;
     this.store.ingestObject({ ...beat, ts: this.#now().toISOString() });
+    // Closed after the beat is ingested, so the waiting state is on the screen
+    // before anything is suspended.
+    if (beat.status === APPROVAL_GATE_STATUS) {
+      this.#awaitingApproval = true;
+      if (this.#onAwaitingApproval !== undefined) this.#onAwaitingApproval();
+    }
     if (this.finished && this.#onFinished !== undefined) this.#onFinished();
     return true;
+  }
+
+  /**
+   * One explicit approval.
+   *
+   * The signal is what ingests the next beat - the beat that says the work was
+   * approved and resumed - so that claim on the screen is caused by a person
+   * saying so, and by nothing else. Playback then continues on its timer if it
+   * was on one.
+   *
+   * Everything else is a no-op that reports what it did: a second signal, a
+   * signal that arrives after the mission ended or after shutdown, and a signal
+   * sent while nothing is waiting all leave the store untouched. There is no
+   * path here that ingests two beats.
+   */
+  approve(): ApprovalOutcome {
+    if (this.#stopped || this.finished) return 'stopped';
+    if (!this.#awaitingApproval) return 'not_awaiting';
+    this.#awaitingApproval = false;
+    this.#approvals += 1;
+    this.step();
+    // Only resumes a clock that was already running: a player driven by
+    // `step()` alone does not acquire a timer by being approved.
+    if (this.#started) this.#schedule(this.intervalMs);
+    return 'resumed';
   }
 
   /**
@@ -325,10 +415,20 @@ export class DemoPlayer {
     }
   }
 
+  /**
+   * The one place a timer is created.
+   *
+   * Refusing to schedule while the gate is closed is what makes the wait a real
+   * wait: the beat that closes it is the last thing the timer chain does, and
+   * the chain is not restarted until `approve()` restarts it. No timer is left
+   * pending across the wait, so there is nothing for elapsed time to fire.
+   */
   #schedule(delayMs: number): void {
-    if (this.#stopped || this.finished) return;
+    if (this.#stopped || this.finished || this.#awaitingApproval) return;
     const timer = setTimeout(() => {
       this.#timer = null;
+      // `#schedule` is re-entered rather than the interval being re-armed here,
+      // so a beat that just closed the gate stops the chain at this point.
       if (this.step() && !this.finished) this.#schedule(this.intervalMs);
     }, delayMs);
     // Never a reason to keep the process alive on its own.
