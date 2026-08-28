@@ -404,6 +404,8 @@ function renderDesks(office) {
       const node = renderedZones.get(zone.id) ?? buildZoneNode();
       node.name.textContent = zone.name;
       node.item.dataset.kind = zone.kind;
+      // Rooms nobody sits in keep their name and drop the empty seat list.
+      node.item.dataset.seats = String(zone.seats !== false);
       // A department with nobody in it is still a department. An empty 未所属 is
       // not news, so it is the one zone that hides when it holds nothing.
       node.item.hidden = zone.kind === 'unassigned' && zone.desks.length === 0;
@@ -552,7 +554,15 @@ function currentViewport() {
 function paintCanvas() {
   if (canvasContext === null || painted === null) return;
   const viewport = currentViewport();
-  const world = buildWorld({ desks: painted.desks, player: painted.player, header: painted.header, viewport });
+  // `zones` is empty whenever the organisation was not accepted, and then
+  // `buildWorld` lays out the single ungrouped room exactly as it always has.
+  const world = buildWorld({
+    desks: painted.office.desks,
+    zones: painted.office.grouped ? painted.office.zones : [],
+    player: painted.player,
+    header: painted.header,
+    viewport,
+  });
   paintedViewport = viewport;
   // Setting the buffer size also clears it; CSS keeps the displayed box at the
   // element's intrinsic ratio, so no inline style is ever written.
@@ -580,8 +590,8 @@ function repaintIfResized() {
   paintCanvas();
 }
 
-function renderCanvas(header, desks, player) {
-  painted = { header, desks, player };
+function renderCanvas(header, office, player) {
+  painted = { header, office, player };
   paintCanvas();
 }
 
@@ -621,7 +631,7 @@ function render() {
   renderDetail(selectDetail(state));
   renderLog(state.log);
   dom.emptyState.hidden = !header.empty;
-  renderCanvas(header, desks, player);
+  renderCanvas(header, office, player);
 }
 
 for (const button of dom.modeButtons) {

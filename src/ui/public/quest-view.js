@@ -79,16 +79,33 @@ export const VACANT_SEAT_VISUAL = Object.freeze({
 });
 
 /**
- * The Quest-side container for everyone the departments do not place.
+ * Zone identity is namespaced by what the zone *is*, not by the id it came with.
  *
- * The `:` is load-bearing. Organisation identifiers are `^[a-z0-9][a-z0-9-]{0,63}$`
- * and the collector accepts a department literally called `unassigned`, so a
- * bare token here would collide with it - the two zones would share a key, the
- * role bucket would be handed to both, and every seat in that department would
- * be drawn twice. A colon cannot appear in an organisation id, so this name
- * cannot be taken.
+ * The `:` is load-bearing throughout. Organisation identifiers are
+ * `^[a-z0-9][a-z0-9-]{0,63}$`, so a colon cannot appear in one - which is what
+ * keeps these four families disjoint. Departments and facilities draw from one
+ * id space upstream, so an unprefixed `dept-x` facility and a `dept-x`
+ * department would share a zone key; and the collector accepts a department
+ * literally called `unassigned`, which would collide with the container. Either
+ * collision hands one role bucket to two zones and aliases the rendered element,
+ * so the same seats are drawn twice and one zone node is never removed.
  */
+export const DEPARTMENT_ZONE_PREFIX = 'dept:';
+export const FACILITY_ZONE_PREFIX = 'facility:';
+
+/** The Quest-side container for everyone the departments do not place. */
 export const UNASSIGNED_ZONE_ID = 'zone:unassigned';
+
+/**
+ * The 社長室, which no organisation declares.
+ *
+ * 歩 is a Human and holds no Agent definition, so `roles` never carries them
+ * (`docs/org-snapshot-design.md` §4.1). The zone therefore comes from
+ * `state.player` and exists only while a snapshot names one. It holds no desk:
+ * the player is not a colleague, has no seat, and is not selectable.
+ */
+export const EXECUTIVE_ZONE_ID = 'zone:executive';
+export const EXECUTIVE_ZONE_NAME = '社長室';
 export const UNASSIGNED_ZONE_NAME = '未所属';
 
 /**
@@ -100,7 +117,7 @@ export const UNASSIGNED_ZONE_NAME = '未所属';
  * is refused, never truncated - a partial roster misreports *who is missing*
  * (`docs/org-snapshot-design.md` §2.4).
  */
-export const ORG_LIMITS = Object.freeze({ departments: 64, roles: 512 });
+export const ORG_LIMITS = Object.freeze({ departments: 64, roles: 512, facilities: 64 });
 
 /** Longest display name accepted, in code points (upstream `maxLength: 100`). */
 const ORG_NAME_MAX = 100;
@@ -364,6 +381,24 @@ function normalizeDepartment(raw) {
   return { id, name, display_order: order };
 }
 
+/**
+ * `null` for anything that is not a usable shared-facility row.
+ *
+ * These are 共用施設 - rooms the organisation declares. Not to be confused with
+ * the runtime `activity.facility` the hook wire carries and `hookAdapter.ts`
+ * drops: that one is *where an actor currently is* (会議室, カフェ), a fact about
+ * a person at a moment. This one is a place on the floor plan. They are
+ * different concepts and must not share a name or a field.
+ */
+function normalizeFacility(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const id = orgId(raw.id, ORG_IDENTIFIER);
+  const name = orgName(raw.name);
+  const order = orgOrder(raw.display_order);
+  if (id === null || name === null || order === null) return null;
+  return { id, name, display_order: order };
+}
+
 /** `null` for anything that is not a usable roster row. */
 function normalizeRole(raw) {
   if (raw === null || typeof raw !== 'object') return null;
@@ -421,7 +456,13 @@ function normalizeOrgSnapshot(raw) {
   if (raw === null || typeof raw !== 'object') return null;
   const departments = normalizeOrgList(raw.departments, ORG_LIMITS.departments, normalizeDepartment);
   const roles = normalizeOrgList(raw.roles, ORG_LIMITS.roles, normalizeRole);
-  if (departments === null || roles === null) return null;
+  // `facilities` may be absent on an older payload; an empty floor is a fact,
+  // not a refusal. A malformed one is still a refusal.
+  const facilities =
+    raw.facilities === undefined
+      ? []
+      : normalizeOrgList(raw.facilities, ORG_LIMITS.facilities, normalizeFacility);
+  if (departments === null || roles === null || facilities === null) return null;
 
   // The cross-row invariants the collector already admitted this under, applied
   // again. They are not re-checked out of distrust of the collector: this module
@@ -430,6 +471,7 @@ function normalizeOrgSnapshot(raw) {
   // a zone or a desk element; a dangling department reference is a role the
   // organisation does not actually place.
   if (!uniqueBy(departments, (department) => department.id)) return null;
+  if (!uniqueBy(facilities, (facility) => facility.id)) return null;
   if (!uniqueBy(roles, (role) => role.id)) return null;
   if (!uniqueBy(roles, (role) => role.runtime_agent_type)) return null;
   const known = emptyMap();
@@ -437,11 +479,7 @@ function normalizeOrgSnapshot(raw) {
   for (const role of roles) {
     if (role.department_id !== null && ownProp(known, role.department_id) === undefined) return null;
   }
-  // `facilities` is carried by the contract but nothing on this screen renders
-  // it yet: 共用施設 are zones on the floor, which arrive with the deterministic
-  // layout (`docs/org-snapshot-design.md` §5 PR-4). Not projected here rather
-  // than projected and unused.
-  return { departments, roles };
+  return { departments, roles, facilities };
 }
 
 /**
@@ -1172,15 +1210,35 @@ export function selectOffice(state) {
   if (org === null || org.status !== 'accepted') return { grouped: false, zones: [], desks };
 
   const snapshot = org.snapshot;
-  const zoneIndex = emptyMap();
-  const zones = snapshot.departments
-    .slice()
-    .sort(compareOrgOrder)
-    .map((department) => {
-      const zone = { id: department.id, name: department.name, kind: 'department', desks: [] };
-      zoneIndex[department.id] = zone;
-      return zone;
+  const zones = [];
+
+  // 社長室 first, and only when a snapshot has named a player. It is the one
+  // zone the organisation cannot declare, and it holds no desk.
+  const player = state.player ?? null;
+  if (player !== null) {
+    zones.push({
+      id: EXECUTIVE_ZONE_ID,
+      name: EXECUTIVE_ZONE_NAME,
+      kind: 'executive',
+      seats: false,
+      desks: [],
     });
+  }
+
+  // Departments, in the order the organisation declares them.
+  const zoneIndex = emptyMap();
+  for (const department of snapshot.departments.slice().sort(compareOrgOrder)) {
+    const zone = {
+      id: `${DEPARTMENT_ZONE_PREFIX}${department.id}`,
+      name: department.name,
+      kind: 'department',
+      seats: true,
+      desks: [],
+    };
+    zoneIndex[department.id] = zone;
+    zones.push(zone);
+  }
+
   // 未所属 is a container this screen makes, not a department the organisation
   // declares: it holds the roles that belong to no department *and* the actors
   // the roster does not know (`docs/org-snapshot-design.md` §4.1).
@@ -1188,9 +1246,22 @@ export function selectOffice(state) {
     id: UNASSIGNED_ZONE_ID,
     name: UNASSIGNED_ZONE_NAME,
     kind: 'unassigned',
+    seats: true,
     desks: [],
   };
   zones.push(unassigned);
+
+  // 共用施設 last. Rooms, not people: nobody is seated in one, so they carry no
+  // desk and never receive an actor.
+  for (const facility of snapshot.facilities.slice().sort(compareOrgOrder)) {
+    zones.push({
+      id: `${FACILITY_ZONE_PREFIX}${facility.id}`,
+      name: facility.name,
+      kind: 'facility',
+      seats: false,
+      desks: [],
+    });
+  }
 
   // Occupied desks by comparison key, keeping `selectDesks` order inside each
   // bucket so "which actor represents this seat" is decided by the ordering the
@@ -1207,10 +1278,9 @@ export function selectOffice(state) {
 
   const rolesByZone = emptyMap();
   for (const role of snapshot.roles) {
-    const zoneId =
-      role.department_id !== null && ownProp(zoneIndex, role.department_id) !== undefined
-        ? role.department_id
-        : UNASSIGNED_ZONE_ID;
+    const zone =
+      role.department_id === null ? undefined : ownProp(zoneIndex, role.department_id);
+    const zoneId = zone === undefined ? UNASSIGNED_ZONE_ID : zone.id;
     const bucket = ownProp(rolesByZone, zoneId);
     if (bucket === undefined) rolesByZone[zoneId] = [role];
     else bucket.push(role);
@@ -1219,6 +1289,9 @@ export function selectOffice(state) {
   const seated = emptyMap();
   let rosterSeat = 0;
   for (const zone of zones) {
+    // 社長室 and 共用施設 are rooms, not seating. No role can be filed under one,
+    // and skipping them here is what keeps `rosterSeat` counting seats only.
+    if (zone.seats !== true) continue;
     const roles = (ownProp(rolesByZone, zone.id) ?? []).slice().sort(compareOrgOrder);
     for (const role of roles) {
       rosterSeat += 1;

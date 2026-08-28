@@ -614,7 +614,15 @@ test('seats the canvas does not draw are counted out loud, not quietly dropped',
 
   // Seats that fit produce no notice at all.
   const small = buildWorld({ desks: desks.slice(0, 4), header: emptyHeader(), viewport: VIEWPORT });
-  assert.deepEqual(small.overflow, { total: 4, drawn: 4, hidden: 0 });
+  assert.deepEqual(small.overflow, {
+    total: 4,
+    drawn: 4,
+    hidden: 0,
+    // Nothing was left out, so there is no hidden state to report, and an
+    // ungrouped office has no zones to overflow either.
+    hidden_state: null,
+    zones: { total: 0, drawn: 0, hidden: 0 },
+  });
   assert.equal(small.overflow_label.text, '');
   assert.equal(small.caption.includes('描画'), false);
 });

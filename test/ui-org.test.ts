@@ -46,6 +46,7 @@ import {
   ORG_LIMITS,
   ORG_REJECT_RULES,
   SECONDARY_STATUS_CODES,
+  EXECUTIVE_ZONE_ID,
   UNASSIGNED_ZONE_ID,
   applySnapshot,
   createClientState,
@@ -654,12 +655,19 @@ test('the office is deterministic: same organisation, same actors, same result',
   const first = selectOffice(demoClient(DEMO_ORG));
   const second = selectOffice(demoClient(DEMO_ORG));
   assert.deepEqual(second, first);
-  // Zone order is the declared order, and nothing else decides it.
-  const departments = [...SNAPSHOT.departments].sort((a, b) => a.display_order - b.display_order);
-  assert.deepEqual(
-    first.zones.map((zone) => zone.id),
-    [...departments.map((department) => department.id), UNASSIGNED_ZONE_ID],
-  );
+  // Zone order is 社長室 → departments (declared order) → 未所属 → 共用施設, and
+  // nothing else decides it. Ids are namespaced by kind, because departments and
+  // facilities share one identifier space upstream.
+  const byOrder = <T extends { display_order: number }>(rows: readonly T[]) =>
+    [...rows].sort((a, b) => a.display_order - b.display_order);
+  assert.deepEqual(first.zones.map((zone) => zone.id), [
+    // The store names a player, so the 社長室 leads - it comes from
+    // `state.player`, never from the organisation (§4.1).
+    EXECUTIVE_ZONE_ID,
+    ...byOrder(SNAPSHOT.departments).map((department) => `dept:${department.id}`),
+    UNASSIGNED_ZONE_ID,
+    ...byOrder(SNAPSHOT.facilities).map((facility) => `facility:${facility.id}`),
+  ]);
 });
 
 test('the player is never a roster seat, a colleague count, or a selection', () => {
