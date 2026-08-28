@@ -125,8 +125,17 @@ const ORG_WIRE_LABEL = /^[A-Za-z0-9_.:@#| -]{1,128}$/;
  */
 const ORG_FIELD_PATH = /^(\(root\)|[A-Za-z_][A-Za-z0-9_]*(\[\d+\])?(\.[A-Za-z_][A-Za-z0-9_]*(\[\d+\])?)*)$/;
 
-/** Anything a label may never contain, however it was encoded. */
-const ORG_CONTROL_CHARS = /[\u0000-\u001f\u007f\u2028\u2029]/;
+/**
+ * C0 and DEL, which is exactly what `hasControlChars` in
+ * `src/domain/validate.ts` refuses.
+ *
+ * Deliberately not one character stricter. A client that refuses more than the
+ * admission boundary does turns an organisation the collector accepted into
+ * `ORG_REJECTED` on the screen - a degradation the operator is shown and can do
+ * nothing about, because nothing is actually wrong. U+2028 and U+2029 were in
+ * this set and are the reason the rule is spelled out here.
+ */
+const ORG_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
 /**
  * Why the forbidden-content scan is NOT repeated here.
@@ -1075,6 +1084,8 @@ function vacantSeat(role, rosterSeat) {
     role_name: role.name,
     is_main_orchestrator: false,
     selected: false,
+    // Nobody is behind this seat, so there is no session to aggregate.
+    occupants: [],
     // Every one of these is a fact the stream never reported. They stay null so
     // the card renders 「—」 rather than inventing an activity for somebody the
     // roster only promises has a desk (`docs/org-snapshot-design.md` §2.3).
@@ -1169,23 +1180,29 @@ export function selectOffice(state) {
     for (const role of roles) {
       rosterSeat += 1;
       const bucket = role.runtime_agent_type === null ? [] : (ownProp(byType, role.runtime_agent_type) ?? []);
-      // The first actor that is not already sitting somewhere else. Two roles
-      // sharing a comparison key would otherwise seat one actor twice, and an
-      // actor rendered twice is an actor the reader counts twice.
-      let match = null;
+      // Every actor answering to this comparison key, not just the first.
+      //
+      // A roster seat belongs to a person and a session is one run of their
+      // work, so the same colleague appearing in two sessions at once is one
+      // colleague at one desk - not a colleague plus a stranger in 未所属
+      // (`docs/org-snapshot-design.md` §4.2). Splitting them would break "15名
+      // 固定着席" the moment anybody ran twice, and would show one roster
+      // employee in their department and again as somebody the roster does not
+      // know.
+      const occupants = [];
       for (const desk of bucket) {
-        if (ownProp(seated, desk.actor_key) === undefined) {
-          match = desk;
-          break;
-        }
+        if (ownProp(seated, desk.actor_key) === undefined) occupants.push(desk);
       }
-      if (match === null) {
+      if (occupants.length === 0) {
         zone.desks.push(vacantSeat(role, rosterSeat));
         continue;
       }
-      seated[match.actor_key] = true;
+      // Which of them the seat shows is decided by the ordering the office
+      // already uses, so it is deterministic rather than arrival-ordered.
+      const lead = occupants[0];
+      for (const desk of occupants) seated[desk.actor_key] = true;
       zone.desks.push({
-        ...match,
+        ...lead,
         occupied: true,
         // Kept beside `seat`, never instead of it: `seat` is this actor's place
         // in the dynamic ordering and moves as colleagues come and go, while
@@ -1200,6 +1217,9 @@ export function selectOffice(state) {
         // two actors answering to one seat the operator could not tell which of
         // them is sitting in it.
         role_name: role.name,
+        // Every actor the seat stands for, so an aggregated desk can say how
+        // many sessions are behind it and no actor is silently absorbed.
+        occupants: occupants.map((desk) => desk.actor_key),
       });
     }
   }
@@ -1208,7 +1228,14 @@ export function selectOffice(state) {
   // rather than dropped: the stream said they are here.
   for (const desk of desks) {
     if (ownProp(seated, desk.actor_key) !== undefined) continue;
-    unassigned.desks.push({ ...desk, occupied: true, roster_seat: null, role_id: null, role_name: null });
+    unassigned.desks.push({
+      ...desk,
+      occupied: true,
+      roster_seat: null,
+      role_id: null,
+      role_name: null,
+      occupants: [desk.actor_key],
+    });
   }
 
   const flat = [];

@@ -305,6 +305,7 @@ export function pageNodes(): [string, FakeElement | FakeTemplate][] {
         'desk__raw-status',
         'desk__tool',
         'desk__session',
+        'desk__occupants',
         'desk__ts',
         'desk__frozen',
         'desk__vacant',

@@ -340,6 +340,9 @@ function fillDeskNode(node, desk, index) {
   text(item, '.desk__raw-status', desk.status_label ?? '—');
   text(item, '.desk__tool', desk.last_tool ?? '—');
   text(item, '.desk__session', desk.session_id ?? '—');
+  // How many actors this one desk stands for. Shown as a count so an aggregated
+  // seat cannot quietly look like a single session.
+  text(item, '.desk__occupants', desk.occupants === undefined ? '—' : String(desk.occupants.length));
   text(item, '.desk__ts', desk.last_event_ts ?? '—');
 }
 

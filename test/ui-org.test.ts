@@ -96,11 +96,16 @@ function demoClient(org: unknown): ClientState {
   return clientWith(org, DEMO_EVENTS);
 }
 
+/**
+ * Every actor the office accounts for, however it is drawn.
+ *
+ * Not one key per desk: a roster seat aggregates every actor answering to its
+ * comparison key, so the seat stands for all of them and lists them
+ * (`docs/org-snapshot-design.md` §4.2). Reading `actor_key` alone would count
+ * an aggregated seat once and call the rest missing.
+ */
 function actorKeys(office: OfficeProjection): string[] {
-  return office.desks
-    .map((desk) => (desk as OfficeDesk).actor_key)
-    .filter((key): key is string => key !== null && key !== undefined)
-    .sort();
+  return office.desks.flatMap((desk) => (desk as OfficeDesk).occupants ?? []).sort();
 }
 
 /**
@@ -319,7 +324,8 @@ test('an actor the roster does not know goes to 未所属 and is never dropped',
 
   const unassigned = office.zones.find((zone) => zone.id === UNASSIGNED_ZONE_ID);
   assert.ok(unassigned !== undefined, 'the 未所属 container exists');
-  // `main` carries no comparison key at all, so no seat can claim it.
+  // `ext-1` carries a comparison key no roster seat declares, so nothing can
+  // claim it - and it is shown rather than dropped.
   assert.ok(
     unassigned.desks.some((desk) => desk.occupied && desk.roster_seat === null),
     'and it holds the actors no roster seat could match',
@@ -494,16 +500,43 @@ test('a seated roster member keeps the name the stream reported for them', () =>
 
 test('a seat belongs to a person, not to a session: two actors, one seat, nobody lost', () => {
   // `dev-1` and `sync-1` both run as `implementer` in the scripted mission.
+  // One colleague running twice is one colleague at one desk - not a colleague
+  // plus a stranger in 未所属, which would break 固定着席 the moment anybody ran
+  // twice and would show the same roster employee in two places at once.
   const state = demoClient(DEMO_ORG);
   const office = assertNeverSilent(state);
-  const seated = office.zones
+  const seats = office.zones
     .flatMap((zone) => zone.desks)
     .filter((desk) => desk.role_id === 'role-implementer');
-  assert.equal(seated.length, 1, 'the roster seat stays one seat');
-  assert.equal(seated[0]?.occupied, true);
-  // The other one is still on the screen, in 未所属.
+  assert.equal(seats.length, 1, 'the roster seat stays one seat');
+
+  const seat = seats[0];
+  assert.equal(seat?.occupied, true);
+  assert.equal(seat?.occupants.length, 2, 'and it stands for both sessions');
+  assert.ok(seat?.actor_key !== null && seat.occupants.includes(seat.actor_key));
+
+  // Neither of them is also drawn as somebody the roster does not know.
   const unassigned = office.zones.find((zone) => zone.id === UNASSIGNED_ZONE_ID);
-  assert.ok((unassigned?.desks.length ?? 0) > 0, 'the actor it did not seat is still shown');
+  for (const key of seat?.occupants ?? []) {
+    assert.equal(
+      unassigned?.desks.some((desk) => desk.actor_key === key),
+      false,
+      `${key} is not also an unassigned colleague`,
+    );
+  }
+});
+
+test('an aggregated seat is chosen deterministically and never hides a session', () => {
+  const first = selectOffice(demoClient(DEMO_ORG));
+  const second = selectOffice(demoClient(DEMO_ORG));
+  const seatOf = (office: typeof first) =>
+    office.zones.flatMap((zone) => zone.desks).find((desk) => desk.role_id === 'role-implementer');
+  assert.deepEqual(seatOf(second), seatOf(first), 'the same actors produce the same seat');
+
+  // The count is on the desk, so an aggregated seat cannot look like one session.
+  const desks = first.desks as OfficeDesk[];
+  const total = desks.reduce((sum, desk) => sum + desk.occupants.length, 0);
+  assert.equal(total, selectDesks(demoClient(DEMO_ORG)).length, 'every actor is accounted for exactly once');
 });
 
 test('the office is deterministic: same organisation, same actors, same result', () => {
