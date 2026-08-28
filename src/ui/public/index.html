@@ -67,6 +67,22 @@
       <span class="banner__message"></span>
     </p>
 
+    <!--
+      The second status surface. Separate from the banner because the banner
+      shows exactly one code and that code is about the *stream*: folding
+      「組織なし」 into it would let a degraded office hide a broken stream.
+
+      Deliberately neither a live region nor a status role - the banner stays the
+      only one of each on the page. The organisation changes at most once per snapshot,
+      so announcing it would interrupt a screen reader for a fact that is not
+      urgent and is on screen anyway (`docs/org-snapshot-design.md` §4.7).
+    -->
+    <p class="orgstatus" id="org-status">
+      <span class="orgstatus__code"></span>
+      <span class="orgstatus__message"></span>
+      <span class="orgstatus__detail"></span>
+    </p>
+
     <main class="office" id="office">
       <h2 class="visually-hidden">オフィス</h2>
       <div class="office__room">
@@ -229,15 +245,36 @@
               <span class="desk__frozen-badge">凍結</span>
               <span class="desk__frozen-text"></span>
             </p>
+            <!--
+              Shown only on a roster seat no actor answers to. The roster says
+              this desk exists; nothing says anybody is at it, so the card says
+              that in words instead of borrowing a working state.
+            -->
+            <p class="desk__vacant" hidden>この席のAI社員について、eventはまだ1件も届いていません。</p>
             <dl class="desk__meta">
+              <div><dt>roster</dt><dd class="desk__roster"></dd></div>
               <div><dt>role</dt><dd class="desk__role"></dd></div>
               <div><dt>status</dt><dd class="desk__raw-status"></dd></div>
               <div><dt>last tool</dt><dd class="desk__tool"></dd></div>
               <div><dt>session</dt><dd class="desk__session"></dd></div>
+              <div><dt>actors</dt><dd class="desk__occupants"></dd></div>
               <div><dt>last event</dt><dd class="desk__ts"></dd></div>
             </dl>
           </div>
         </article>
+      </li>
+    </template>
+
+    <!--
+      One department, 社長室 aside: the office is grouped only while an
+      organisation snapshot is accepted. A nested list keeps `#desks` the single
+      named list it already is, so the degraded screen is byte-for-byte the flat
+      list the prototype had before the roster existed.
+    -->
+    <template id="zone-template">
+      <li class="zone">
+        <h3 class="zone__name"></h3>
+        <ul class="zone__desks"></ul>
       </li>
     </template>
 

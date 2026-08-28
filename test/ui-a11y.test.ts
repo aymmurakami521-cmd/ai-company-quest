@@ -130,7 +130,14 @@ test('a re-render never takes the focus out of the desk button holding it', () =
   // the *shape* that makes it possible, so a future edit cannot quietly go back
   // to rebuilding the list on every frame.
   assert.equal(/dom\.desks\.replaceChildren\(/.test(APP), false, 'the colleague list is never rebuilt wholesale');
-  assert.ok(APP.includes('renderedNodes.get(desk.actor_key)'), 'each colleague keeps their own element');
+  // Keyed by `deskNodeKey`, not by `actor_key` directly: a roster seat with
+  // nobody at it has no actor, and it has to keep its element too or the
+  // office would flicker a seat away the moment its colleague goes quiet.
+  assert.ok(APP.includes('renderedNodes.get(key)'), 'each colleague keeps their own element');
+  assert.ok(
+    APP.includes('return `actor:${desk.actor_key}`') && APP.includes('return `roster:${desk.role_id}`'),
+    'and that key is the actor, or the roster role whose seat it is',
+  );
   assert.ok(APP.includes('if (current !== node.item)'), 'and it is moved only when it is in the wrong place');
 
   // Focus is *kept*, never taken: the app still moves nobody's focus anywhere.

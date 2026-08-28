@@ -31,7 +31,9 @@ import {
   selectDesks,
   selectDetail,
   selectHeader,
+  selectOffice,
   selectPlayer,
+  selectSecondaryStatus,
   setConnectionPhase,
   setSelectedActor,
   visualForState,
@@ -51,6 +53,7 @@ const dom = {
   statSeq: document.getElementById('stat-seq'),
   statDesks: document.getElementById('stat-desks'),
   banner: document.getElementById('banner'),
+  orgStatus: document.getElementById('org-status'),
   desks: document.getElementById('desks'),
   player: document.getElementById('player'),
   playerName: document.getElementById('player-name'),
@@ -59,6 +62,7 @@ const dom = {
   log: document.getElementById('log'),
   logEmpty: document.getElementById('log-empty'),
   deskTemplate: document.getElementById('desk-template'),
+  zoneTemplate: document.getElementById('zone-template'),
   logTemplate: document.getElementById('log-template'),
   legendTemplate: document.getElementById('legend-template'),
   canvas: document.getElementById('office-canvas'),
@@ -274,6 +278,13 @@ let renderedDesks = [];
  */
 let renderedNodes = new Map();
 
+/**
+ * The <li> in the DOM for each zone, for the same reason `renderedNodes` exists:
+ * re-creating a zone would re-create the desks inside it and take the focus with
+ * them. Zones change only when a snapshot brings a different organisation.
+ */
+let renderedZones = new Map();
+
 function buildDeskNode() {
   const fragment = dom.deskTemplate.content.cloneNode(true);
   const item = fragment.querySelector('.desk');
@@ -282,20 +293,36 @@ function buildDeskNode() {
     select: item.querySelector('.desk__select'),
     badge: item.querySelector('.desk__badge'),
     frozen: item.querySelector('.desk__frozen'),
+    vacant: item.querySelector('.desk__vacant'),
   };
 }
 
 function fillDeskNode(node, desk, index) {
-  const { item, select, badge, frozen } = node;
+  const { item, select, badge, frozen, vacant } = node;
+  // Vacant on a desk that carries `occupied: false`; every desk built by
+  // `selectDesks` alone has no such field and is occupied by construction.
+  const empty = desk.occupied === false;
   item.dataset.state = desk.visual.state;
   item.dataset.selected = String(desk.selected);
   item.dataset.stale = String(desk.stale);
+  item.dataset.occupied = String(!empty);
   select.dataset.deskIndex = String(index);
+  // A seat nobody is at opens nothing, so its button leaves the tab order
+  // rather than offering a selection that would immediately clear itself.
+  select.disabled = empty;
   // The state is exposed as `aria-pressed`, so it is never carried by the
   // border colour alone.
   select.setAttribute('aria-pressed', String(desk.selected));
-  text(item, '.desk__seat', `#${desk.seat}`);
-  text(item, '.desk__agent', desk.display_name);
+  if (vacant !== null) vacant.hidden = !empty;
+  // The roster seat when the roster placed this desk, the dynamic one
+  // otherwise. Never one standing in for the other: a desk with neither is not
+  // produced (`docs/org-snapshot-design.md` §4.4).
+  const seatNumber = desk.roster_seat ?? desk.seat;
+  text(item, '.desk__seat', seatNumber === null || seatNumber === undefined ? '—' : `#${seatNumber}`);
+  // The reported name when there is one; a vacant seat has only its roster
+  // label. The two are never merged into one another.
+  text(item, '.desk__agent', desk.display_name ?? desk.role_name ?? '—');
+  text(item, '.desk__roster', desk.role_name ?? '—');
   badge.hidden = !desk.is_main_orchestrator;
   text(item, '.desk__symbol', desk.visual.symbol);
   text(item, '.desk__state-label', `${desk.visual.label} (${desk.visual.code})`);
@@ -312,16 +339,56 @@ function fillDeskNode(node, desk, index) {
   text(item, '.desk__role', desk.role ?? '未解決');
   text(item, '.desk__raw-status', desk.status_label ?? '—');
   text(item, '.desk__tool', desk.last_tool ?? '—');
-  text(item, '.desk__session', desk.session_id);
+  text(item, '.desk__session', desk.session_id ?? '—');
+  // How many actors this one desk stands for. Labelled 「actors」 and not
+  // 「sessions」 because an actor is keyed by `(session_id, agent_id)`: one
+  // session running two agents of the same runtime type produces two occupants
+  // and one session, so a session count here would overstate it.
+  text(item, '.desk__occupants', desk.occupants === undefined ? '—' : String(desk.occupants.length));
   text(item, '.desk__ts', desk.last_event_ts ?? '—');
 }
 
-function renderDesks(desks) {
+function buildZoneNode() {
+  const fragment = dom.zoneTemplate.content.cloneNode(true);
+  const item = fragment.querySelector('.zone');
+  return { item, name: item.querySelector('.zone__name'), list: item.querySelector('.zone__desks') };
+}
+
+/**
+ * A stable identity per desk element.
+ *
+ * An occupied desk is identified by its actor, a vacant roster seat by the role
+ * whose seat it is. Both are needed: a seat that is empty on one frame and
+ * filled on the next must keep its element, or the roster would flicker its way
+ * through the focus.
+ */
+function deskNodeKey(desk) {
+  if (desk.actor_key !== null && desk.actor_key !== undefined) return `actor:${desk.actor_key}`;
+  return `roster:${desk.role_id}`;
+}
+
+/**
+ * Places one list of desks inside one parent, moving only what has to move.
+ *
+ * For the ordinary frame - same colleagues, same order, new status text - that
+ * is zero DOM moves, so a focused button is never removed and re-inserted.
+ */
+function placeDesks(parent, desks, nodes, offset) {
+  desks.forEach((desk, index) => {
+    const node = nodes.get(deskNodeKey(desk));
+    const current = parent.children[index + offset] ?? null;
+    if (current !== node.item) parent.insertBefore(node.item, current);
+  });
+}
+
+function renderDesks(office) {
+  const desks = office.desks;
   const next = new Map();
   desks.forEach((desk, index) => {
-    const node = renderedNodes.get(desk.actor_key) ?? buildDeskNode();
+    const key = deskNodeKey(desk);
+    const node = renderedNodes.get(key) ?? buildDeskNode();
     fillDeskNode(node, desk, index);
-    next.set(desk.actor_key, node);
+    next.set(key, node);
   });
 
   // Colleagues who left go first, so nothing stale is in the list while the
@@ -331,15 +398,31 @@ function renderDesks(desks) {
     if (!next.has(key)) node.item.remove();
   }
 
-  // Place each remaining element only if it is not already where it belongs.
-  // For the ordinary frame - same colleagues, same order - that is zero DOM
-  // moves, so a focused button is never removed and re-inserted.
-  desks.forEach((desk, index) => {
-    const node = next.get(desk.actor_key);
-    const current = dom.desks.children[index] ?? null;
-    if (current !== node.item) dom.desks.insertBefore(node.item, current);
-  });
+  const nextZones = new Map();
+  if (office.grouped) {
+    office.zones.forEach((zone, index) => {
+      const node = renderedZones.get(zone.id) ?? buildZoneNode();
+      node.name.textContent = zone.name;
+      node.item.dataset.kind = zone.kind;
+      // A department with nobody in it is still a department. An empty 未所属 is
+      // not news, so it is the one zone that hides when it holds nothing.
+      node.item.hidden = zone.kind === 'unassigned' && zone.desks.length === 0;
+      nextZones.set(zone.id, node);
+      const current = dom.desks.children[index] ?? null;
+      if (current !== node.item) dom.desks.insertBefore(node.item, current);
+      placeDesks(node.list, zone.desks, next, 0);
+    });
+  } else {
+    // No organisation: the desks are children of `#desks` itself, exactly as
+    // they were before the roster existed.
+    placeDesks(dom.desks, desks, next, 0);
+  }
 
+  for (const [id, node] of renderedZones) {
+    if (!nextZones.has(id)) node.item.remove();
+  }
+
+  renderedZones = nextZones;
   renderedNodes = next;
   renderedDesks = desks;
 }
@@ -375,6 +458,24 @@ function renderLog(entries) {
     dom.log.append(node);
   }
   dom.logEmpty.hidden = entries.length > 0;
+}
+
+/**
+ * Writes the second status surface.
+ *
+ * Unconditional: this element always carries a code, because a screen that
+ * quietly stops grouping is the one failure the organisation contract rules out
+ * (`docs/org-snapshot-design.md` §2.4). Not a live region, so writing it every
+ * frame costs an announcement to nobody.
+ */
+function renderSecondaryStatus(status) {
+  dom.orgStatus.dataset.code = status.code;
+  dom.orgStatus.dataset.tone = status.tone;
+  dom.orgStatus.dataset.degraded = String(status.degraded);
+  text(dom.orgStatus, '.orgstatus__code', status.code);
+  text(dom.orgStatus, '.orgstatus__message', status.message);
+  // Field path and rule name only. No employee name, department name or path.
+  text(dom.orgStatus, '.orgstatus__detail', status.detail ?? '');
 }
 
 /**
@@ -495,7 +596,12 @@ if (canvasContext !== null) {
 
 function render() {
   const header = selectHeader(state);
+  // Two projections of the same state, on purpose. The canvas and the header
+  // counts stay on the actor-only list: a vacant roster seat is not somebody at
+  // work, so it is not in 在席数, and the floor plan that would place it is the
+  // deterministic layout still to come (§5 PR-4).
   const desks = selectDesks(state);
+  const office = selectOffice(state);
   const player = selectPlayer(state);
 
   dom.statMode.textContent = header.mode;
@@ -509,8 +615,9 @@ function render() {
   }
 
   renderBanner(header);
+  renderSecondaryStatus(selectSecondaryStatus(state));
   renderPlayer(player);
-  renderDesks(desks);
+  renderDesks(office);
   renderDetail(selectDetail(state));
   renderLog(state.log);
   dom.emptyState.hidden = !header.empty;
@@ -548,6 +655,10 @@ dom.desks.addEventListener('click', (event) => {
   if (button === null) return;
   const desk = renderedDesks[Number(button.dataset.deskIndex)];
   if (desk === undefined) return;
+  // A vacant roster seat has no actor to open. `setSelectedActor` would refuse
+  // the null anyway; returning here means the click does not clear a selection
+  // the operator made on somebody else.
+  if (desk.actor_key === null || desk.actor_key === undefined) return;
   setState(setSelectedActor(state, desk.selected ? null : desk.actor_key));
 });
 

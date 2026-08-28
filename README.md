@@ -589,11 +589,18 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
 - **「次に何が起きるか」は予測しません。** eventに明示があるときだけ表示し、無ければ
   `未報告` です。DEMOのミッションでは各beatの `summary` が次の段階を読める文になっていますが、
   それは台本に書かれた事実であって、UIが導出した予測ではありません。
-- **本repoはruntime actor（Claude Code session）単位のofficeです。** 組織snapshot、部署、
-  社長室フロア、未所属・共用施設といったフロア構成、固定の社員rosterは実装していません。
-  `selectDesks` が席を決めるのはcollectorが解決したactorだけで、役職も配属も推測しません。
-  これらを実装する前に決めるべき責務境界・入力契約・停止条件・未決事項は
-  [`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) に記録しています（設計記録のみ・実装なし）。
+- **組織snapshotを採用したときだけ、社員一覧が部署ごとにgroup化されます。**
+  照合keyは `runtime_agent_type` だけで、対応actorのいないroster社員は席だけを描いて
+  状態は出さず（`不在`）、roster外actorは `未所属` に置いて捨てません。
+  組織snapshotが未設定・拒否のときは現行の単一一覧へ縮退し、**縮退した事実を
+  bannerとは別の第2 status面（`ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED`）に必ず表示します。**
+  拒否の内訳は field名 + rule名のみで、社員名・部署名・pathは出しません。
+  LIVEは `QUEST_ORG_SNAPSHOT_PATH`、DEMOは組み込みfixtureを使います（DEMOは外部I/Oなし）。
+- **部署room矩形・固定席座標・社長室・共用施設のfloor layoutはまだありません。**
+  canvasは現行どおりactorのみを描く装飾層で、区画名はDOM側にだけ出ます。
+  在席数（`stat-desks`）もactorのみを数え、`不在` の席は含めません。
+  残りの責務境界・停止条件・未決事項は
+  [`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) に記録しています（§5 PR-4以降）。
 - **Run / Goal / Approval / Evidence という運用単位はこのrepoにありません。** 本repoが描くのは
   event streamから畳み込んだactor状態までで、goal・run state machine・承認・risk分類・
   retry予算・stall検出・永続run履歴はいずれも実装していません。

@@ -60,6 +60,131 @@ export const ACTOR_VISUAL_STATES = Object.freeze([
 export const ACTOR_LEGEND_STATES = Object.freeze([...ACTOR_VISUAL_STATES, 'unknown']);
 
 /**
+ * The seat of a roster member the stream has never mentioned.
+ *
+ * Deliberately NOT a member of `ACTOR_VISUAL_STATES` or `ACTOR_LEGEND_STATES`.
+ * Those are the states an event can put an actor into; this one is the absence
+ * of any event at all. Adding it to the closed visual vocabulary would let a
+ * vacant seat be counted as a working colleague in `selectHeader`, and would
+ * claim the roster tells us something about activity. It does not: the roster is
+ * the record of which seats exist, never of who is working
+ * (`docs/org-snapshot-design.md` §2.3).
+ */
+export const VACANT_SEAT_VISUAL = Object.freeze({
+  state: 'vacant',
+  code: 'VACANT',
+  label: '不在',
+  symbol: '□',
+  tone: 'idle',
+});
+
+/**
+ * The Quest-side container for everyone the departments do not place.
+ *
+ * The `:` is load-bearing. Organisation identifiers are `^[a-z0-9][a-z0-9-]{0,63}$`
+ * and the collector accepts a department literally called `unassigned`, so a
+ * bare token here would collide with it - the two zones would share a key, the
+ * role bucket would be handed to both, and every seat in that department would
+ * be drawn twice. A colon cannot appear in an organisation id, so this name
+ * cannot be taken.
+ */
+export const UNASSIGNED_ZONE_ID = 'zone:unassigned';
+export const UNASSIGNED_ZONE_NAME = '未所属';
+
+/**
+ * Client-side ceiling on the organisation projection.
+ *
+ * The collector already refuses an over-sized organisation, but a bound that
+ * only exists on the server is a bound the screen does not have: this state is
+ * rebuilt from whatever a `snapshot` frame carries. Over the limit the input
+ * is refused, never truncated - a partial roster misreports *who is missing*
+ * (`docs/org-snapshot-design.md` §2.4).
+ */
+export const ORG_LIMITS = Object.freeze({ departments: 64, roles: 512 });
+
+/** Longest display name accepted, in code points (upstream `maxLength: 100`). */
+const ORG_NAME_MAX = 100;
+
+/** Longest rejection field path kept. It carries indexes, never values. */
+const ORG_FIELD_MAX = 128;
+
+/** Identifier grammar of the upstream org definition (`org.schema.json`). */
+const ORG_IDENTIFIER = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** The wire's own label grammar, which `runtime_agent_type` is compared against. */
+const ORG_WIRE_LABEL = /^[A-Za-z0-9_.:@#| -]{1,128}$/;
+
+/**
+ * What a rejection `field` is allowed to look like: a path of member names and
+ * array indexes, or the collector's marker for the whole input.
+ *
+ * Anything else is not a path, and this value is rendered. A credential
+ * assignment carrying a filesystem location is a well-formed string and a
+ * badly-formed path, and the second is what decides whether it reaches the
+ * screen.
+ */
+const ORG_FIELD_PATH = /^(\(root\)|[A-Za-z_][A-Za-z0-9_]*(\[\d+\])?(\.[A-Za-z_][A-Za-z0-9_]*(\[\d+\])?)*)$/;
+
+/**
+ * C0 and DEL, which is exactly what `hasControlChars` in
+ * `src/domain/validate.ts` refuses.
+ *
+ * Deliberately not one character stricter. A client that refuses more than the
+ * admission boundary does turns an organisation the collector accepted into
+ * `ORG_REJECTED` on the screen - a degradation the operator is shown and can do
+ * nothing about, because nothing is actually wrong. U+2028 and U+2029 were in
+ * this set and are the reason the rule is spelled out here.
+ */
+const ORG_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Why the forbidden-content scan is NOT repeated here.
+ *
+ * `src/domain/validate.ts` refuses absolute paths, credentials and shell
+ * fragments in every label, organisation names included, and it is the only
+ * writer of the payload this module reads: the page is served over loopback,
+ * GET-only, with a Host allowlist and no CORS, so nothing else can put a
+ * `snapshot` frame in front of it.
+ *
+ * Mirroring those rules into this file is also not possible. They are patterns
+ * *made of* the very literals a shipped asset may not contain, and
+ * `test/ui-server.test.ts` enforces that: a copy of `UNSAFE_RULES` here fails
+ * the "shipped assets contain no path, secret or external destination" check
+ * by being the thing it looks for.
+ *
+ * So content safety stays with the collector, and what this module re-checks is
+ * what it alone can get wrong: shape, grammar, bounds, and the cross-row
+ * invariants that decide whether two rendered elements collide.
+ */
+function orgUnsafe(value) {
+  return ORG_CONTROL_CHARS.test(value);
+}
+
+/**
+ * Why the collector refused an organisation, as a closed vocabulary.
+ *
+ * Mirrors `OrgRejectRule` in `src/domain/org.ts`. A rule this screen does not
+ * know is reported as `type_error` rather than echoed: the second status
+ * surface never prints an arbitrary string off the wire.
+ */
+export const ORG_REJECT_RULES = Object.freeze([
+  'not_object',
+  'unsupported_schema',
+  'missing_key',
+  'type_error',
+  'invalid_format',
+  'field_too_long',
+  'control_chars',
+  'unsafe_content',
+  'duplicate_id',
+  'unknown_reference',
+  'limit_exceeded',
+]);
+
+/** The organisation state before any snapshot has been seen. */
+const ORG_ABSENT_STATE = Object.freeze({ status: 'absent' });
+
+/**
  * Visual vocabulary. Each state carries a symbol AND a readable label, so the
  * screen never depends on colour or animation alone to say what is happening.
  */
@@ -198,6 +323,157 @@ export function normalizePlayer(raw) {
     // is, so the entity's own default stands in - never an invented person.
     display_name: name.length === 0 ? 'Player' : name.slice(0, PLAYER_NAME_MAX),
   };
+}
+
+/** Code points, not UTF-16 code units: the iterator pairs surrogates for us. */
+function countChars(value) {
+  let count = 0;
+  for (const _ of value) count += 1;
+  return count;
+}
+
+/** Clamps by code points, so a surrogate pair is never cut in half. */
+function clampChars(value, max) {
+  const points = Array.from(value);
+  return points.length <= max ? value : points.slice(0, max).join('');
+}
+
+/** A rendered label: length-bounded and content-checked, never clamped. */
+function orgName(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  if (countChars(value) > ORG_NAME_MAX) return null;
+  return orgUnsafe(value) ? null : value;
+}
+
+/** An identifier, against the grammar the collector admitted it under. */
+function orgId(value, pattern) {
+  return typeof value === 'string' && pattern.test(value) ? value : null;
+}
+
+function orgOrder(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** `null` for anything that is not a usable department row. */
+function normalizeDepartment(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const id = orgId(raw.id, ORG_IDENTIFIER);
+  const name = orgName(raw.name);
+  const order = orgOrder(raw.display_order);
+  if (id === null || name === null || order === null) return null;
+  return { id, name, display_order: order };
+}
+
+/** `null` for anything that is not a usable roster row. */
+function normalizeRole(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const id = orgId(raw.id, ORG_IDENTIFIER);
+  const name = orgName(raw.name);
+  const order = orgOrder(raw.display_order);
+  if (id === null || name === null || order === null) return null;
+  // Both are nullable upstream, and a null one is a fact, not a gap: a role with
+  // no department belongs in 未所属, and a role with no comparison key is a
+  // seat no event can ever fill. A *present* one has to be well formed, though -
+  // an unusable identifier is a refusal, not a null.
+  const department =
+    raw.department_id === null || raw.department_id === undefined
+      ? null
+      : orgId(raw.department_id, ORG_IDENTIFIER);
+  if (department === null && raw.department_id !== null && raw.department_id !== undefined) return null;
+  const runtime =
+    raw.runtime_agent_type === null || raw.runtime_agent_type === undefined
+      ? null
+      : orgId(raw.runtime_agent_type, ORG_WIRE_LABEL);
+  if (runtime === null && raw.runtime_agent_type !== null && raw.runtime_agent_type !== undefined) {
+    return null;
+  }
+  return { id, name, display_order: order, department_id: department, runtime_agent_type: runtime };
+}
+
+/** `false` as soon as a key repeats. A repeated id aliases a rendered element. */
+function uniqueBy(rows, pick) {
+  const seen = emptyMap();
+  for (const row of rows) {
+    const key = pick(row);
+    if (key === null) continue;
+    if (ownProp(seen, key) !== undefined) return false;
+    seen[key] = true;
+  }
+  return true;
+}
+
+/**
+ * All-or-nothing, exactly like the collector's own admission rule: one bad row
+ * refuses the whole list rather than quietly shortening the roster.
+ */
+function normalizeOrgList(raw, limit, normalizeOne) {
+  if (!Array.isArray(raw) || raw.length > limit) return null;
+  const out = [];
+  for (const entry of raw) {
+    const one = normalizeOne(entry);
+    if (one === null) return null;
+    out.push(one);
+  }
+  return out;
+}
+
+function normalizeOrgSnapshot(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const departments = normalizeOrgList(raw.departments, ORG_LIMITS.departments, normalizeDepartment);
+  const roles = normalizeOrgList(raw.roles, ORG_LIMITS.roles, normalizeRole);
+  if (departments === null || roles === null) return null;
+
+  // The cross-row invariants the collector already admitted this under, applied
+  // again. They are not re-checked out of distrust of the collector: this module
+  // rebuilds the organisation from a `snapshot` frame, so anything not enforced
+  // here is not enforced at all on the way to the screen. A repeated id aliases
+  // a zone or a desk element; a dangling department reference is a role the
+  // organisation does not actually place.
+  if (!uniqueBy(departments, (department) => department.id)) return null;
+  if (!uniqueBy(roles, (role) => role.id)) return null;
+  if (!uniqueBy(roles, (role) => role.runtime_agent_type)) return null;
+  const known = emptyMap();
+  for (const department of departments) known[department.id] = true;
+  for (const role of roles) {
+    if (role.department_id !== null && ownProp(known, role.department_id) === undefined) return null;
+  }
+  // `facilities` is carried by the contract but nothing on this screen renders
+  // it yet: 共用施設 are zones on the floor, which arrive with the deterministic
+  // layout (`docs/org-snapshot-design.md` §5 PR-4). Not projected here rather
+  // than projected and unused.
+  return { departments, roles };
+}
+
+/**
+ * The organisation, from a snapshot's `state.org`, as a closed three-value
+ * vocabulary.
+ *
+ * A payload is data to be checked, not to be trusted, so the accepted case is
+ * rebuilt row by row here as well. The important half is what happens when that
+ * fails: the result is `rejected`, never `absent`. Those two mean different
+ * things to the reader - "no organisation was configured" versus "an
+ * organisation was configured and this screen refused it" - and collapsing the
+ * second into the first is exactly the silent degradation
+ * `docs/org-snapshot-design.md` §2.4 forbids.
+ */
+export function normalizeOrg(raw) {
+  if (raw === null || typeof raw !== 'object') return ORG_ABSENT_STATE;
+  if (raw.status === 'rejected') {
+    const known = ORG_REJECT_RULES.indexOf(raw.rule) !== -1;
+    // The field path is rendered, so it is checked as a path rather than kept as
+    // a string. A value that is not one is reported as a refusal of the whole
+    // input, which is true, instead of being printed.
+    const path = typeof raw.field === 'string' ? clampChars(raw.field, ORG_FIELD_MAX) : '';
+    return {
+      status: 'rejected',
+      field: ORG_FIELD_PATH.test(path) ? path : 'snapshot',
+      rule: known ? raw.rule : 'type_error',
+    };
+  }
+  if (raw.status !== 'accepted') return ORG_ABSENT_STATE;
+  const snapshot = normalizeOrgSnapshot(raw.snapshot);
+  if (snapshot === null) return { status: 'rejected', field: 'snapshot', rule: 'type_error' };
+  return { status: 'accepted', snapshot };
 }
 
 /** A new prototype-less map: a `session_id` of `__proto__` is just a key. */
@@ -367,6 +643,12 @@ export function createClientState(namespace) {
      * entity the server already holds.
      */
     player: null,
+    /**
+     * The organisation, from the server's own `state.org`. Operator input, not
+     * stream content: only a `snapshot` can change it, and no event ever does
+     * (`docs/org-snapshot-design.md` §2.1).
+     */
+    org: ORG_ABSENT_STATE,
     last_ingest_seq: 0,
     last_event_ts: null,
     /**
@@ -616,6 +898,11 @@ export function applySnapshot(state, payload, atMs = null) {
     // that can name the player. A snapshot without one leaves the screen with
     // none rather than keeping a person the server no longer reports.
     player: normalizePlayer(served.player),
+    // Same rule as the player: the snapshot is the server's whole state, so it
+    // is the only frame that can name an organisation. A snapshot without one
+    // leaves the screen with none rather than keeping an organisation the
+    // server no longer reports.
+    org: normalizeOrg(served.org),
     last_ingest_seq: typeof payload.last_ingest_seq === 'number' ? payload.last_ingest_seq : 0,
     last_event_ts: latestTs,
     // A snapshot replaces the office wholesale, so an actor that was selected
@@ -774,6 +1061,233 @@ export function selectDesks(state) {
 }
 
 /**
+ * How loudly a state asks to be looked at.
+ *
+ * `ACTOR_VISUAL_STATES` is already written worst-first - error, approval,
+ * planning, working, ended, idle - so its index *is* the rank and there is no
+ * second ordering to keep in step with it. `unknown` is not in that list and
+ * sorts last, which is right: while the stream is not confirming anything every
+ * desk is `unknown` together, so the rank cannot decide anything and the
+ * ordering below falls through to the office's own.
+ */
+function attentionRank(visual) {
+  const index = ACTOR_VISUAL_STATES.indexOf(visual.state);
+  return index === -1 ? ACTOR_VISUAL_STATES.length : index;
+}
+
+/**
+ * Which of the actors behind one roster seat the seat shows.
+ *
+ * `docs/org-snapshot-design.md` §4.2 requires this to be derived from the whole
+ * group, and the reason is the failure it prevents: `selectDesks` orders actors
+ * by oldest session, so simply taking the first lets a finished older run sit on
+ * top of a newer one that is failing. The DEMO does exactly that - `dev-1`
+ * ended while `sync-1` errored - and the seat would have read 完了 with the
+ * error nowhere on the screen.
+ *
+ * So the seat shows the state that most asks to be looked at, and ties fall back
+ * to the office's existing order, which makes the choice total and repeatable.
+ * One seat can only carry one state; the rule is that the one it carries is
+ * never the one that hides a problem.
+ */
+function representative(occupants) {
+  let best = occupants[0];
+  let bestRank = attentionRank(best.visual);
+  for (let i = 1; i < occupants.length; i += 1) {
+    const rank = attentionRank(occupants[i].visual);
+    if (rank < bestRank) {
+      best = occupants[i];
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+/** Declared order first, identifier second, so the order is total. */
+function compareOrgOrder(left, right) {
+  if (left.display_order !== right.display_order) return left.display_order - right.display_order;
+  return compareStrings(left.id, right.id);
+}
+
+/** The seat of a roster member no event has ever mentioned. */
+function vacantSeat(role, rosterSeat) {
+  return {
+    // A seat nobody occupies has no actor to select, so it carries no key. The
+    // click handler asks `setSelectedActor` for this and gets a cleared
+    // selection, and the button itself is disabled - a vacant seat is not a
+    // colleague you can open.
+    actor_key: null,
+    occupied: false,
+    seat: null,
+    roster_seat: rosterSeat,
+    role_id: role.id,
+    // No actor, so no reported name. The card falls back to the roster label,
+    // which is the only name this seat has.
+    display_name: null,
+    role_name: role.name,
+    is_main_orchestrator: false,
+    selected: false,
+    // Nobody is behind this seat, so there is no session to aggregate.
+    occupants: [],
+    // Every one of these is a fact the stream never reported. They stay null so
+    // the card renders 「—」 rather than inventing an activity for somebody the
+    // roster only promises has a desk (`docs/org-snapshot-design.md` §2.3).
+    role: null,
+    resolved: false,
+    status_label: null,
+    last_tool: null,
+    last_event_ts: null,
+    session_id: null,
+    event_count: 0,
+    visual: VACANT_SEAT_VISUAL,
+    stale: false,
+    last_known_visual: VACANT_SEAT_VISUAL,
+  };
+}
+
+/**
+ * The office as zones of desks, or the flat colleague list when there is no
+ * organisation to group by.
+ *
+ * This is the first projection that mixes two sources, and the whole contract is
+ * in how it refuses to blend them (`docs/org-snapshot-design.md` §2.3):
+ *
+ * - a roster member with a matching actor is seated, with the actor's state;
+ * - a roster member with no actor keeps their seat and gets **no** state;
+ * - an actor with no roster member goes to 未所属 and is **never dropped**,
+ *   because the event stream is the record and the roster is not.
+ *
+ * The comparison key is `runtime_agent_type` and only that (§4.2). `agent_id` is
+ * a name inside a session and `session_id` is a run, while a roster seat belongs
+ * to a person across every session they ever appear in - so several actors can
+ * answer to one seat, and the seat stays one seat.
+ *
+ * Grouping is refused wholesale unless the organisation was accepted, which is
+ * what makes the degraded path identical to the pre-organisation screen rather
+ * than a half-built version of this one.
+ */
+export function selectOffice(state) {
+  const desks = selectDesks(state);
+  const org = state === null || state === undefined ? null : (state.org ?? null);
+  if (org === null || org.status !== 'accepted') return { grouped: false, zones: [], desks };
+
+  const snapshot = org.snapshot;
+  const zoneIndex = emptyMap();
+  const zones = snapshot.departments
+    .slice()
+    .sort(compareOrgOrder)
+    .map((department) => {
+      const zone = { id: department.id, name: department.name, kind: 'department', desks: [] };
+      zoneIndex[department.id] = zone;
+      return zone;
+    });
+  // 未所属 is a container this screen makes, not a department the organisation
+  // declares: it holds the roles that belong to no department *and* the actors
+  // the roster does not know (`docs/org-snapshot-design.md` §4.1).
+  const unassigned = {
+    id: UNASSIGNED_ZONE_ID,
+    name: UNASSIGNED_ZONE_NAME,
+    kind: 'unassigned',
+    desks: [],
+  };
+  zones.push(unassigned);
+
+  // Occupied desks by comparison key, keeping `selectDesks` order inside each
+  // bucket so "which actor represents this seat" is decided by the ordering the
+  // office already uses, not by a second rule invented here.
+  const byType = emptyMap();
+  for (const desk of desks) {
+    const actor = ownProp(state.actors, desk.actor_key);
+    const type = actor === undefined ? null : actor.runtime_agent_type;
+    if (typeof type !== 'string' || type.length === 0) continue;
+    const bucket = ownProp(byType, type);
+    if (bucket === undefined) byType[type] = [desk];
+    else bucket.push(desk);
+  }
+
+  const rolesByZone = emptyMap();
+  for (const role of snapshot.roles) {
+    const zoneId =
+      role.department_id !== null && ownProp(zoneIndex, role.department_id) !== undefined
+        ? role.department_id
+        : UNASSIGNED_ZONE_ID;
+    const bucket = ownProp(rolesByZone, zoneId);
+    if (bucket === undefined) rolesByZone[zoneId] = [role];
+    else bucket.push(role);
+  }
+
+  const seated = emptyMap();
+  let rosterSeat = 0;
+  for (const zone of zones) {
+    const roles = (ownProp(rolesByZone, zone.id) ?? []).slice().sort(compareOrgOrder);
+    for (const role of roles) {
+      rosterSeat += 1;
+      const bucket = role.runtime_agent_type === null ? [] : (ownProp(byType, role.runtime_agent_type) ?? []);
+      // Every actor answering to this comparison key, not just the first.
+      //
+      // A roster seat belongs to a person and a session is one run of their
+      // work, so the same colleague appearing in two sessions at once is one
+      // colleague at one desk - not a colleague plus a stranger in 未所属
+      // (`docs/org-snapshot-design.md` §4.2). Splitting them would break "15名
+      // 固定着席" the moment anybody ran twice, and would show one roster
+      // employee in their department and again as somebody the roster does not
+      // know.
+      const occupants = [];
+      for (const desk of bucket) {
+        if (ownProp(seated, desk.actor_key) === undefined) occupants.push(desk);
+      }
+      if (occupants.length === 0) {
+        zone.desks.push(vacantSeat(role, rosterSeat));
+        continue;
+      }
+      // Derived from the whole group, not from whoever happens to be first.
+      const lead = representative(occupants);
+      for (const desk of occupants) seated[desk.actor_key] = true;
+      zone.desks.push({
+        ...lead,
+        occupied: true,
+        // Kept beside `seat`, never instead of it: `seat` is this actor's place
+        // in the dynamic ordering and moves as colleagues come and go, while
+        // this one belongs to the roster and does not. Neither is derived from
+        // the other (`docs/org-snapshot-design.md` §4.4).
+        roster_seat: rosterSeat,
+        role_id: role.id,
+        // Beside the reported name, never instead of it. `display_name` is what
+        // the stream called this actor and is what the canvas sprite and the
+        // detail pane show; overwriting it here would leave one card reading
+        // 開発担当 while the same actor reads `dev-1` two panes away, and with
+        // two actors answering to one seat the operator could not tell which of
+        // them is sitting in it.
+        role_name: role.name,
+        // Every actor the seat stands for, so an aggregated desk can say how
+        // many are behind it and no actor is silently absorbed. Actors, not
+        // sessions: the key is `(session_id, agent_id)`, so one session running
+        // two agents of this runtime type contributes two of them.
+        occupants: occupants.map((desk) => desk.actor_key),
+      });
+    }
+  }
+
+  // Everyone the roster does not know, in the office's own order. Appended
+  // rather than dropped: the stream said they are here.
+  for (const desk of desks) {
+    if (ownProp(seated, desk.actor_key) !== undefined) continue;
+    unassigned.desks.push({
+      ...desk,
+      occupied: true,
+      roster_seat: null,
+      role_id: null,
+      role_name: null,
+      occupants: [desk.actor_key],
+    });
+  }
+
+  const flat = [];
+  for (const zone of zones) for (const desk of zone.desks) flat.push(desk);
+  return { grouped: true, zones, desks: flat };
+}
+
+/**
  * The human player in the office, or null before a snapshot named one.
  *
  * Deliberately *not* a `Desk`: the player has no seat number, no `actor_key`, no
@@ -896,6 +1410,64 @@ export function selectBanner(header) {
   const code = bannerCode(header);
   const visual = ownProp(BANNER_VISUALS, code) ?? BANNER_VISUALS.CONNECTED;
   return { code, tone: visual.tone, symbol: visual.symbol, message: bannerMessage(code, header) };
+}
+
+/**
+ * The second status surface, as a closed vocabulary.
+ *
+ * Separate from the banner on purpose. The banner shows exactly one code and
+ * that code is about the *stream*; folding an organisation code into it would
+ * let 「組織なし」 push `FAIL_CLOSED` or `DISCONNECTED` off the screen and hide a
+ * broken stream behind a merely-degraded office
+ * (`docs/org-snapshot-design.md` §4.7).
+ *
+ * The surface is general - run state, approvals and stalls are meant to land
+ * here too once their vocabulary is fixed - but the vocabulary shipped with it
+ * is the organisation's alone. It is also not a live region: the banner stays
+ * the only one, so a rare organisation change never interrupts a screen reader
+ * mid-sentence.
+ */
+export const SECONDARY_STATUS_CODES = Object.freeze([
+  'ORG_ACCEPTED',
+  'ORG_ABSENT',
+  'ORG_REJECTED',
+]);
+
+const SECONDARY_STATUS_VISUALS = Object.freeze({
+  ORG_ACCEPTED: Object.freeze({
+    tone: 'ok',
+    message: '組織snapshotを採用しています。席は組織定義の順で固定です。',
+  }),
+  ORG_ABSENT: Object.freeze({
+    tone: 'info',
+    message: '組織snapshotが未設定のため、組織なしの表示へ縮退しています。',
+  }),
+  ORG_REJECTED: Object.freeze({
+    tone: 'warn',
+    message: '組織snapshotを検証で拒否したため、組織なしの表示へ縮退しています。',
+  }),
+});
+
+/**
+ * Always returns a code. There is no state in which this surface is blank:
+ * a screen that silently stops grouping is the one failure
+ * `docs/org-snapshot-design.md` §2.4 rules out.
+ */
+export function selectSecondaryStatus(state) {
+  const org = state === null || state === undefined ? null : (state.org ?? null);
+  const status = org === null ? 'absent' : org.status;
+  const code = status === 'accepted' ? 'ORG_ACCEPTED' : status === 'rejected' ? 'ORG_REJECTED' : 'ORG_ABSENT';
+  const visual = ownProp(SECONDARY_STATUS_VISUALS, code) ?? SECONDARY_STATUS_VISUALS.ORG_ABSENT;
+  return {
+    code,
+    tone: visual.tone,
+    message: visual.message,
+    // Field path and rule name only - both closed, both index-bearing at most.
+    // No employee name, department name or path ever reaches the screen
+    // (`docs/org-snapshot-design.md` §2.4).
+    detail: code === 'ORG_REJECTED' ? `${org.field} / ${org.rule}` : null,
+    degraded: code !== 'ORG_ACCEPTED',
+  };
 }
 
 /**
