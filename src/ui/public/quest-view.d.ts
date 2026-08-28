@@ -32,6 +32,58 @@ export type Visual<TState extends string> = {
 export type ActorVisual = Visual<ActorDisplayState>;
 export type ConnectionVisual = Visual<ConnectionPhase | 'fail_closed'>;
 
+/**
+ * The seat of a roster member no event has mentioned.
+ *
+ * A separate type from `ActorVisual` because `vacant` is deliberately outside
+ * the actor vocabulary: it is the absence of events, not a state an event put
+ * somebody into (`docs/org-snapshot-design.md` §2.3).
+ */
+export type VacantVisual = Visual<'vacant'>;
+export type OfficeVisual = ActorVisual | VacantVisual;
+
+/** Why the collector refused an organisation. Mirrors `OrgRejectRule`. */
+export type OrgRejectRule =
+  | 'not_object'
+  | 'unsupported_schema'
+  | 'missing_key'
+  | 'type_error'
+  | 'invalid_format'
+  | 'field_too_long'
+  | 'control_chars'
+  | 'unsafe_content'
+  | 'duplicate_id'
+  | 'unknown_reference'
+  | 'limit_exceeded';
+
+export type ViewOrgDepartment = { id: string; name: string; display_order: number };
+
+export type ViewOrgRole = {
+  id: string;
+  name: string;
+  display_order: number;
+  /** Null for every role that belongs to no department. */
+  department_id: string | null;
+  /** The comparison key against `ViewActor.runtime_agent_type`. May be null. */
+  runtime_agent_type: string | null;
+};
+
+export type ViewOrgSnapshot = {
+  departments: ViewOrgDepartment[];
+  roles: ViewOrgRole[];
+};
+
+/**
+ * The organisation, as the same closed three-value vocabulary the collector
+ * uses. `absent` and `rejected` are distinct on purpose: they mean different
+ * things to the reader and must never collapse into one another.
+ */
+export type ViewOrgState =
+  | { status: 'absent' }
+  | { status: 'accepted'; snapshot: ViewOrgSnapshot }
+  /** `field` is a path such as `roles[3].name`: indexes, never values. */
+  | { status: 'rejected'; field: string; rule: OrgRejectRule };
+
 /** The subset of a wire event this screen reads. */
 export type ViewWireEvent = {
   event_id: string;
@@ -129,6 +181,8 @@ export type ClientState = {
   actors: Record<string, ViewActor>;
   /** Null until a `snapshot` names one. Never invented by the screen. */
   player: ViewPlayer | null;
+  /** Operator input, not stream content: only a `snapshot` changes it. */
+  org: ViewOrgState;
   last_ingest_seq: number;
   last_event_ts: string | null;
   /** `actor_key` of the seat the operator selected, or `null`. Always one that is seated. */
@@ -276,7 +330,71 @@ export declare function normalizeGapReason(value: unknown): GapReasonToken | nul
 export declare function gapLabel(reason: unknown): string | null;
 export declare function applyFrame(state: ClientState, frame: Frame): ClientState;
 export declare function normalizePlayer(raw: unknown): ViewPlayer | null;
+/**
+ * A desk in the organisation-grouped office.
+ *
+ * Widens `Desk` where the roster makes a field optional rather than certain: a
+ * vacant seat has no actor and no dynamic seat number, and an actor the roster
+ * does not know has no roster seat. Neither field is ever derived from the
+ * other (`docs/org-snapshot-design.md` §4.4).
+ */
+export type OfficeDesk = Omit<Desk, 'seat' | 'actor_key' | 'visual' | 'last_known_visual' | 'session_id'> & {
+  /** False for a roster seat no actor answers to. */
+  occupied: boolean;
+  /** Position in the dynamic ordering. Null for a vacant roster seat. */
+  seat: number | null;
+  /** Position in the roster. Null for an actor the roster does not know. */
+  roster_seat: number | null;
+  actor_key: string | null;
+  session_id: string | null;
+  role_id: string | null;
+  visual: OfficeVisual;
+  last_known_visual: OfficeVisual;
+};
+
+export type OfficeZone = {
+  id: string;
+  name: string;
+  kind: 'department' | 'unassigned';
+  desks: OfficeDesk[];
+};
+
+/**
+ * `grouped` is false whenever the organisation was not accepted, and then
+ * `zones` is empty and `desks` is exactly `selectDesks(state)` - the screen the
+ * prototype had before the roster existed.
+ */
+export type OfficeProjection = {
+  grouped: boolean;
+  zones: OfficeZone[];
+  /** Every desk in render order, zone by zone when grouped. */
+  desks: OfficeDesk[] | Desk[];
+};
+
+/** The closed vocabulary of the second status surface. */
+export type SecondaryStatusCode = 'ORG_ACCEPTED' | 'ORG_ABSENT' | 'ORG_REJECTED';
+
+export type SecondaryStatus = {
+  readonly code: SecondaryStatusCode;
+  readonly tone: 'warn' | 'info' | 'ok';
+  readonly message: string;
+  /** `field / rule` for a refusal, null otherwise. Never a value or a name. */
+  readonly detail: string | null;
+  /** True whenever the office fell back to the organisation-less screen. */
+  readonly degraded: boolean;
+};
+
+export declare const VACANT_SEAT_VISUAL: VacantVisual;
+export declare const UNASSIGNED_ZONE_ID: string;
+export declare const UNASSIGNED_ZONE_NAME: string;
+export declare const ORG_LIMITS: { readonly departments: number; readonly roles: number };
+export declare const ORG_REJECT_RULES: readonly OrgRejectRule[];
+export declare const SECONDARY_STATUS_CODES: readonly SecondaryStatusCode[];
+
+export declare function normalizeOrg(raw: unknown): ViewOrgState;
 export declare function selectDesks(state: ClientState): Desk[];
+export declare function selectOffice(state: ClientState): OfficeProjection;
+export declare function selectSecondaryStatus(state: ClientState): SecondaryStatus;
 
 /**
  * The selected desk in full, or null when nothing is selected.

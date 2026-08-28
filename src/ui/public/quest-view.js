@@ -60,6 +60,70 @@ export const ACTOR_VISUAL_STATES = Object.freeze([
 export const ACTOR_LEGEND_STATES = Object.freeze([...ACTOR_VISUAL_STATES, 'unknown']);
 
 /**
+ * The seat of a roster member the stream has never mentioned.
+ *
+ * Deliberately NOT a member of `ACTOR_VISUAL_STATES` or `ACTOR_LEGEND_STATES`.
+ * Those are the states an event can put an actor into; this one is the absence
+ * of any event at all. Adding it to the closed visual vocabulary would let a
+ * vacant seat be counted as a working colleague in `selectHeader`, and would
+ * claim the roster tells us something about activity. It does not: the roster is
+ * the record of which seats exist, never of who is working
+ * (`docs/org-snapshot-design.md` §2.3).
+ */
+export const VACANT_SEAT_VISUAL = Object.freeze({
+  state: 'vacant',
+  code: 'VACANT',
+  label: '不在',
+  symbol: '□',
+  tone: 'idle',
+});
+
+/** The Quest-side container for everyone the departments do not place. */
+export const UNASSIGNED_ZONE_ID = 'unassigned';
+export const UNASSIGNED_ZONE_NAME = '未所属';
+
+/**
+ * Client-side ceiling on the organisation projection.
+ *
+ * The collector already refuses an over-sized organisation, but a bound that
+ * only exists on the server is a bound the screen does not have: this state is
+ * rebuilt from whatever a `snapshot` frame carries. Over the limit the input
+ * is refused, never truncated - a partial roster misreports *who is missing*
+ * (`docs/org-snapshot-design.md` §2.4).
+ */
+export const ORG_LIMITS = Object.freeze({ departments: 64, roles: 512 });
+
+/** Longest display name kept, in code points (upstream `maxLength: 100`). */
+const ORG_NAME_MAX = 100;
+
+/** Longest rejection field path kept. It carries indexes, never values. */
+const ORG_FIELD_MAX = 128;
+
+/**
+ * Why the collector refused an organisation, as a closed vocabulary.
+ *
+ * Mirrors `OrgRejectRule` in `src/domain/org.ts`. A rule this screen does not
+ * know is reported as `type_error` rather than echoed: the second status
+ * surface never prints an arbitrary string off the wire.
+ */
+export const ORG_REJECT_RULES = Object.freeze([
+  'not_object',
+  'unsupported_schema',
+  'missing_key',
+  'type_error',
+  'invalid_format',
+  'field_too_long',
+  'control_chars',
+  'unsafe_content',
+  'duplicate_id',
+  'unknown_reference',
+  'limit_exceeded',
+]);
+
+/** The organisation state before any snapshot has been seen. */
+const ORG_ABSENT_STATE = Object.freeze({ status: 'absent' });
+
+/**
  * Visual vocabulary. Each state carries a symbol AND a readable label, so the
  * screen never depends on colour or animation alone to say what is happening.
  */
@@ -198,6 +262,104 @@ export function normalizePlayer(raw) {
     // is, so the entity's own default stands in - never an invented person.
     display_name: name.length === 0 ? 'Player' : name.slice(0, PLAYER_NAME_MAX),
   };
+}
+
+/** Clamps by code points, so a surrogate pair is never cut in half. */
+function clampChars(value, max) {
+  const points = Array.from(value);
+  return points.length <= max ? value : points.slice(0, max).join('');
+}
+
+function orgText(value, max) {
+  return typeof value === 'string' && value.length > 0 ? clampChars(value, max) : null;
+}
+
+function orgOrder(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** `null` for anything that is not a usable department row. */
+function normalizeDepartment(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const id = orgText(raw.id, ORG_NAME_MAX);
+  const name = orgText(raw.name, ORG_NAME_MAX);
+  const order = orgOrder(raw.display_order);
+  if (id === null || name === null || order === null) return null;
+  return { id, name, display_order: order };
+}
+
+/** `null` for anything that is not a usable roster row. */
+function normalizeRole(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const id = orgText(raw.id, ORG_NAME_MAX);
+  const name = orgText(raw.name, ORG_NAME_MAX);
+  const order = orgOrder(raw.display_order);
+  if (id === null || name === null || order === null) return null;
+  return {
+    id,
+    name,
+    display_order: order,
+    // Both are nullable upstream, and a null one is a fact, not a gap: a role
+    // with no department belongs in 未所属, and a role with no comparison key
+    // is a seat no event can ever fill.
+    department_id: orgText(raw.department_id, ORG_NAME_MAX),
+    runtime_agent_type: orgText(raw.runtime_agent_type, ORG_NAME_MAX),
+  };
+}
+
+/**
+ * All-or-nothing, exactly like the collector's own admission rule: one bad row
+ * refuses the whole list rather than quietly shortening the roster.
+ */
+function normalizeOrgList(raw, limit, normalizeOne) {
+  if (!Array.isArray(raw) || raw.length > limit) return null;
+  const out = [];
+  for (const entry of raw) {
+    const one = normalizeOne(entry);
+    if (one === null) return null;
+    out.push(one);
+  }
+  return out;
+}
+
+function normalizeOrgSnapshot(raw) {
+  if (raw === null || typeof raw !== 'object') return null;
+  const departments = normalizeOrgList(raw.departments, ORG_LIMITS.departments, normalizeDepartment);
+  const roles = normalizeOrgList(raw.roles, ORG_LIMITS.roles, normalizeRole);
+  if (departments === null || roles === null) return null;
+  // `facilities` is carried by the contract but nothing on this screen renders
+  // it yet: 共用施設 are zones on the floor, which arrive with the deterministic
+  // layout (`docs/org-snapshot-design.md` §5 PR-4). Not projected here rather
+  // than projected and unused.
+  return { departments, roles };
+}
+
+/**
+ * The organisation, from a snapshot's `state.org`, as a closed three-value
+ * vocabulary.
+ *
+ * A payload is data to be checked, not to be trusted, so the accepted case is
+ * rebuilt row by row here as well. The important half is what happens when that
+ * fails: the result is `rejected`, never `absent`. Those two mean different
+ * things to the reader - "no organisation was configured" versus "an
+ * organisation was configured and this screen refused it" - and collapsing the
+ * second into the first is exactly the silent degradation
+ * `docs/org-snapshot-design.md` §2.4 forbids.
+ */
+export function normalizeOrg(raw) {
+  if (raw === null || typeof raw !== 'object') return ORG_ABSENT_STATE;
+  if (raw.status === 'rejected') {
+    const known = ORG_REJECT_RULES.indexOf(raw.rule) !== -1;
+    return {
+      status: 'rejected',
+      field: typeof raw.field === 'string' ? clampChars(raw.field, ORG_FIELD_MAX) : 'snapshot',
+      rule: known ? raw.rule : 'type_error',
+    };
+  }
+  if (raw.status !== 'accepted') return ORG_ABSENT_STATE;
+  const snapshot = normalizeOrgSnapshot(raw.snapshot);
+  if (snapshot === null) return { status: 'rejected', field: 'snapshot', rule: 'type_error' };
+  return { status: 'accepted', snapshot };
 }
 
 /** A new prototype-less map: a `session_id` of `__proto__` is just a key. */
@@ -367,6 +529,12 @@ export function createClientState(namespace) {
      * entity the server already holds.
      */
     player: null,
+    /**
+     * The organisation, from the server's own `state.org`. Operator input, not
+     * stream content: only a `snapshot` can change it, and no event ever does
+     * (`docs/org-snapshot-design.md` §2.1).
+     */
+    org: ORG_ABSENT_STATE,
     last_ingest_seq: 0,
     last_event_ts: null,
     /**
@@ -616,6 +784,11 @@ export function applySnapshot(state, payload, atMs = null) {
     // that can name the player. A snapshot without one leaves the screen with
     // none rather than keeping a person the server no longer reports.
     player: normalizePlayer(served.player),
+    // Same rule as the player: the snapshot is the server's whole state, so it
+    // is the only frame that can name an organisation. A snapshot without one
+    // leaves the screen with none rather than keeping an organisation the
+    // server no longer reports.
+    org: normalizeOrg(served.org),
     last_ingest_seq: typeof payload.last_ingest_seq === 'number' ? payload.last_ingest_seq : 0,
     last_event_ts: latestTs,
     // A snapshot replaces the office wholesale, so an actor that was selected
@@ -773,6 +946,162 @@ export function selectDesks(state) {
   });
 }
 
+/** Declared order first, identifier second, so the order is total. */
+function compareOrgOrder(left, right) {
+  if (left.display_order !== right.display_order) return left.display_order - right.display_order;
+  return compareStrings(left.id, right.id);
+}
+
+/** The seat of a roster member no event has ever mentioned. */
+function vacantSeat(role, rosterSeat) {
+  return {
+    // A seat nobody occupies has no actor to select, so it carries no key. The
+    // click handler asks `setSelectedActor` for this and gets a cleared
+    // selection, and the button itself is disabled - a vacant seat is not a
+    // colleague you can open.
+    actor_key: null,
+    occupied: false,
+    seat: null,
+    roster_seat: rosterSeat,
+    role_id: role.id,
+    display_name: role.name,
+    is_main_orchestrator: false,
+    selected: false,
+    // Every one of these is a fact the stream never reported. They stay null so
+    // the card renders 「—」 rather than inventing an activity for somebody the
+    // roster only promises has a desk (`docs/org-snapshot-design.md` §2.3).
+    role: null,
+    resolved: false,
+    status_label: null,
+    last_tool: null,
+    last_event_ts: null,
+    session_id: null,
+    event_count: 0,
+    visual: VACANT_SEAT_VISUAL,
+    stale: false,
+    last_known_visual: VACANT_SEAT_VISUAL,
+  };
+}
+
+/**
+ * The office as zones of desks, or the flat colleague list when there is no
+ * organisation to group by.
+ *
+ * This is the first projection that mixes two sources, and the whole contract is
+ * in how it refuses to blend them (`docs/org-snapshot-design.md` §2.3):
+ *
+ * - a roster member with a matching actor is seated, with the actor's state;
+ * - a roster member with no actor keeps their seat and gets **no** state;
+ * - an actor with no roster member goes to 未所属 and is **never dropped**,
+ *   because the event stream is the record and the roster is not.
+ *
+ * The comparison key is `runtime_agent_type` and only that (§4.2). `agent_id` is
+ * a name inside a session and `session_id` is a run, while a roster seat belongs
+ * to a person across every session they ever appear in - so several actors can
+ * answer to one seat, and the seat stays one seat.
+ *
+ * Grouping is refused wholesale unless the organisation was accepted, which is
+ * what makes the degraded path identical to the pre-organisation screen rather
+ * than a half-built version of this one.
+ */
+export function selectOffice(state) {
+  const desks = selectDesks(state);
+  const org = state === null || state === undefined ? null : (state.org ?? null);
+  if (org === null || org.status !== 'accepted') return { grouped: false, zones: [], desks };
+
+  const snapshot = org.snapshot;
+  const zoneIndex = emptyMap();
+  const zones = snapshot.departments
+    .slice()
+    .sort(compareOrgOrder)
+    .map((department) => {
+      const zone = { id: department.id, name: department.name, kind: 'department', desks: [] };
+      zoneIndex[department.id] = zone;
+      return zone;
+    });
+  // 未所属 is a container this screen makes, not a department the organisation
+  // declares: it holds the roles that belong to no department *and* the actors
+  // the roster does not know (`docs/org-snapshot-design.md` §4.1).
+  const unassigned = {
+    id: UNASSIGNED_ZONE_ID,
+    name: UNASSIGNED_ZONE_NAME,
+    kind: 'unassigned',
+    desks: [],
+  };
+  zones.push(unassigned);
+
+  // Occupied desks by comparison key, keeping `selectDesks` order inside each
+  // bucket so "which actor represents this seat" is decided by the ordering the
+  // office already uses, not by a second rule invented here.
+  const byType = emptyMap();
+  for (const desk of desks) {
+    const actor = ownProp(state.actors, desk.actor_key);
+    const type = actor === undefined ? null : actor.runtime_agent_type;
+    if (typeof type !== 'string' || type.length === 0) continue;
+    const bucket = ownProp(byType, type);
+    if (bucket === undefined) byType[type] = [desk];
+    else bucket.push(desk);
+  }
+
+  const rolesByZone = emptyMap();
+  for (const role of snapshot.roles) {
+    const zoneId =
+      role.department_id !== null && ownProp(zoneIndex, role.department_id) !== undefined
+        ? role.department_id
+        : UNASSIGNED_ZONE_ID;
+    const bucket = ownProp(rolesByZone, zoneId);
+    if (bucket === undefined) rolesByZone[zoneId] = [role];
+    else bucket.push(role);
+  }
+
+  const seated = emptyMap();
+  let rosterSeat = 0;
+  for (const zone of zones) {
+    const roles = (ownProp(rolesByZone, zone.id) ?? []).slice().sort(compareOrgOrder);
+    for (const role of roles) {
+      rosterSeat += 1;
+      const bucket = role.runtime_agent_type === null ? [] : (ownProp(byType, role.runtime_agent_type) ?? []);
+      // The first actor that is not already sitting somewhere else. Two roles
+      // sharing a comparison key would otherwise seat one actor twice, and an
+      // actor rendered twice is an actor the reader counts twice.
+      let match = null;
+      for (const desk of bucket) {
+        if (ownProp(seated, desk.actor_key) === undefined) {
+          match = desk;
+          break;
+        }
+      }
+      if (match === null) {
+        zone.desks.push(vacantSeat(role, rosterSeat));
+        continue;
+      }
+      seated[match.actor_key] = true;
+      zone.desks.push({
+        ...match,
+        occupied: true,
+        // Kept beside `seat`, never instead of it: `seat` is this actor's place
+        // in the dynamic ordering and moves as colleagues come and go, while
+        // this one belongs to the roster and does not. Neither is derived from
+        // the other (`docs/org-snapshot-design.md` §4.4).
+        roster_seat: rosterSeat,
+        role_id: role.id,
+        display_name: role.name,
+      });
+    }
+  }
+
+  // Everyone the roster does not know, in the office's own order. Appended
+  // rather than dropped: the stream said they are here.
+  for (const desk of desks) {
+    if (ownProp(seated, desk.actor_key) !== undefined) continue;
+    unassigned.desks.push({ ...desk, occupied: true, roster_seat: null, role_id: null });
+  }
+
+  const flat = [];
+  for (const zone of zones) for (const desk of zone.desks) flat.push(desk);
+  return { grouped: true, zones, desks: flat };
+}
+
 /**
  * The human player in the office, or null before a snapshot named one.
  *
@@ -896,6 +1225,64 @@ export function selectBanner(header) {
   const code = bannerCode(header);
   const visual = ownProp(BANNER_VISUALS, code) ?? BANNER_VISUALS.CONNECTED;
   return { code, tone: visual.tone, symbol: visual.symbol, message: bannerMessage(code, header) };
+}
+
+/**
+ * The second status surface, as a closed vocabulary.
+ *
+ * Separate from the banner on purpose. The banner shows exactly one code and
+ * that code is about the *stream*; folding an organisation code into it would
+ * let 「組織なし」 push `FAIL_CLOSED` or `DISCONNECTED` off the screen and hide a
+ * broken stream behind a merely-degraded office
+ * (`docs/org-snapshot-design.md` §4.7).
+ *
+ * The surface is general - run state, approvals and stalls are meant to land
+ * here too once their vocabulary is fixed - but the vocabulary shipped with it
+ * is the organisation's alone. It is also not a live region: the banner stays
+ * the only one, so a rare organisation change never interrupts a screen reader
+ * mid-sentence.
+ */
+export const SECONDARY_STATUS_CODES = Object.freeze([
+  'ORG_ACCEPTED',
+  'ORG_ABSENT',
+  'ORG_REJECTED',
+]);
+
+const SECONDARY_STATUS_VISUALS = Object.freeze({
+  ORG_ACCEPTED: Object.freeze({
+    tone: 'ok',
+    message: '組織snapshotを採用しています。席は組織定義の順で固定です。',
+  }),
+  ORG_ABSENT: Object.freeze({
+    tone: 'info',
+    message: '組織snapshotが未設定のため、組織なしの表示へ縮退しています。',
+  }),
+  ORG_REJECTED: Object.freeze({
+    tone: 'warn',
+    message: '組織snapshotを検証で拒否したため、組織なしの表示へ縮退しています。',
+  }),
+});
+
+/**
+ * Always returns a code. There is no state in which this surface is blank:
+ * a screen that silently stops grouping is the one failure
+ * `docs/org-snapshot-design.md` §2.4 rules out.
+ */
+export function selectSecondaryStatus(state) {
+  const org = state === null || state === undefined ? null : (state.org ?? null);
+  const status = org === null ? 'absent' : org.status;
+  const code = status === 'accepted' ? 'ORG_ACCEPTED' : status === 'rejected' ? 'ORG_REJECTED' : 'ORG_ABSENT';
+  const visual = ownProp(SECONDARY_STATUS_VISUALS, code) ?? SECONDARY_STATUS_VISUALS.ORG_ABSENT;
+  return {
+    code,
+    tone: visual.tone,
+    message: visual.message,
+    // Field path and rule name only - both closed, both index-bearing at most.
+    // No employee name, department name or path ever reaches the screen
+    // (`docs/org-snapshot-design.md` §2.4).
+    detail: code === 'ORG_REJECTED' ? `${org.field} / ${org.rule}` : null,
+    degraded: code !== 'ORG_ACCEPTED',
+  };
 }
 
 /**

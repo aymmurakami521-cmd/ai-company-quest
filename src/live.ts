@@ -13,6 +13,7 @@ import { Collector } from './collector/collector.ts';
 import { seedDemoStore } from './demo/fixtures.ts';
 import { DEMO_TIMELINE, DemoPlayer } from './demo/timeline.ts';
 import { APPROVAL_COMMAND, attachApprovalConsole } from './demo/approval.ts';
+import { DEMO_ORG } from './demo/orgFixture.ts';
 import { loadOrgState } from './collector/orgLoader.ts';
 import { orgStatusDetail } from './domain/org.ts';
 import { QuestServer } from './server/server.ts';
@@ -63,6 +64,10 @@ export async function main(): Promise<number> {
     dedupeCapacity: config.dedupeCapacity,
     maxLineBytes: config.maxLineBytes,
     player,
+    // Static data, never a file: DEMO does no external I/O, and the LIVE store
+    // above keeps the operator-configured snapshot it was given
+    // (`docs/org-snapshot-design.md` §4.6).
+    org: DEMO_ORG,
     // Fires on the 0 -> 1 subscriber transition only, so the mission starts when
     // somebody is actually watching and a reconnect never restarts it. LIVE
     // never gets this hook: the callback closes over the DEMO store alone.

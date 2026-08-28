@@ -28,6 +28,8 @@
   --state-ended: #99a2b8;
   --state-idle: #6ec5ff;
   --state-unknown: #8b8fa3;
+  /* A roster seat with no events. Not a state an event can produce. */
+  --state-vacant: #5a6076;
 
   /* The human player. Not one of the state colours, and never used for a desk. */
   --player-accent: #7fc8ff;
@@ -227,6 +229,51 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+/* The second status surface. Same shape as the banner so it reads as a status
+   line, deliberately quieter so it never competes with the stream banner. */
+.orgstatus {
+  margin: 0;
+  padding: 6px 12px;
+  border: var(--pixel) solid var(--panel-edge);
+  background: var(--panel);
+  color: var(--text-dim);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 0.82rem;
+}
+
+.orgstatus[data-tone='ok'] {
+  border-color: var(--state-working);
+}
+
+.orgstatus[data-tone='warn'] {
+  border-color: var(--state-awaiting_approval);
+}
+
+.orgstatus__code {
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.orgstatus__message {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.orgstatus__detail:empty {
+  display: none;
+}
+
+.orgstatus__detail {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
 /* ------------------------------------------------------------- office --- */
 
 .office__room {
@@ -330,6 +377,55 @@ h3 {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   gap: 12px;
+}
+
+/* A department spans the whole grid and holds its own grid of desks, so the
+   flat list and the grouped list share one set of desk styles. */
+.zone {
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.zone__name {
+  margin: 0 0 8px;
+  padding: 4px 8px;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  background: var(--panel);
+  border-left: var(--pixel) solid var(--accent);
+}
+
+.zone[data-kind='unassigned'] .zone__name {
+  border-left-color: var(--state-vacant);
+}
+
+.zone__desks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 12px;
+}
+
+/* A seat the roster promises exists, with nobody reported at it. Dimmed, never
+   hidden: the seat is the fact, and the absence is the state. */
+.desk[data-occupied='false'] {
+  opacity: 0.72;
+}
+
+.desk[data-occupied='false'] .desk__card {
+  border-style: dashed;
+}
+
+.desk__vacant {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -447,6 +543,10 @@ h3 {
 }
 .desk[data-state='unknown'] {
   --state-color: var(--state-unknown);
+}
+
+.desk[data-state='vacant'] {
+  --state-color: var(--state-vacant);
 }
 
 /*

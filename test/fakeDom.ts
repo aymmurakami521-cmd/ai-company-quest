@@ -282,6 +282,14 @@ export function pageNodes(): [string, FakeElement | FakeTemplate][] {
       ]),
     ],
     [
+      'org-status',
+      new FakeElement('orgstatus', [
+        new FakeElement('orgstatus__code'),
+        new FakeElement('orgstatus__message'),
+        new FakeElement('orgstatus__detail'),
+      ]),
+    ],
+    [
       'desk-template',
       new FakeTemplate('desk', [
         // Carries the marker the app's one delegated listener finds by
@@ -298,6 +306,7 @@ export function pageNodes(): [string, FakeElement | FakeTemplate][] {
         'desk__session',
         'desk__ts',
         'desk__frozen',
+        'desk__vacant',
         'desk__frozen-text',
       ]),
     ],
@@ -310,6 +319,7 @@ export function pageNodes(): [string, FakeElement | FakeTemplate][] {
         'detail__recent-detail',
       ]),
     ],
+    ['zone-template', new FakeTemplate('zone', ['zone__name', 'zone__desks'])],
     ['log-template', new FakeTemplate('log__row', ['log__symbol', 'log__seq', 'log__ts', 'log__actor', 'log__type', 'log__detail'])],
     ['legend-template', new FakeTemplate('legend__row', ['legend__symbol', 'legend__label', 'legend__code'])],
   ];
