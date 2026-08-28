@@ -794,6 +794,8 @@ code 変更ゼロ、runtime 影響ゼロ、338 test に影響ゼロ、owner 承�
 | 4 | 人件費単価・粗利率等、価値換算に使う業務前提 | owner の決定事項。VALUE-1 の前提 |
 | 5 | budget period の実際の運用単位（月次固定か） | owner の決定事項。§6.2 で固定していません |
 | 6 | `docs/automation-protocol.md` の不在 | 前 run が報告した escalation。本 run でも `docs/` に**存在しないことを確認**（`event-contract.md` / `live-wire-contract.md` / `org-snapshot-design.md` のみ） |
+| 7 | 正式月額 / プラン名 / プラン別の月間標準 Skill 導入枠 / リセット周期 | **未決**（事業側正本 D-017。以前の月額前提は現行価格ではありません）。Founding 実績後に確定。**設定・事業ポリシーとして扱い、定数化しない**（[`company-model-design.md`](company-model-design.md) §6） |
+| 8 | 「標準 Skill 1 件の導入枠」の商用定義 | **未決**。ファイル複製に限らず、設定 / 接続・権限 / test / ARK Core 連携確認 / 受入 を含みます。Founding 検証で確定（`company-model-design.md` §5.2） |
 
 ---
 
