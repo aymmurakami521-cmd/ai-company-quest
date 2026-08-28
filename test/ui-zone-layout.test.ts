@@ -16,6 +16,7 @@
  */
 
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 
 import { NamespaceStore } from '../src/collector/store.ts';
@@ -400,6 +401,79 @@ test('a room the canvas cannot draw is still counted, seats and all', () => {
     'a failure inside an undrawn room is still reported',
   );
   assert.ok(built.overflow_label.text.includes('区画'), 'and the notice says rooms were left out');
+});
+
+test('rooms left out are announced even when they held no seats', () => {
+  // The overflow notice used to appear only when *desks* were hidden, so an
+  // organisation whose extra rooms were all empty lost them without a word -
+  // the same silent truncation, one level up.
+  const state = client(['impl-1']);
+  const office = selectOffice(state);
+  const empties: OfficeZone[] = Array.from({ length: MAX_ZONES + 4 }, (_unused, index) => ({
+    id: `facility:filler-${index}`,
+    name: `施設${index}`,
+    kind: 'facility' as const,
+    seats: false,
+    desks: [],
+  }));
+  const built = buildWorld({
+    desks: office.desks,
+    zones: [...office.zones, ...empties],
+    player: selectPlayer(state),
+    header: selectHeader(state),
+    viewport: VIEWPORT,
+  });
+
+  assert.ok(built.overflow.zones.hidden > 0, 'rooms really were left out');
+  assert.equal(built.overflow.hidden, 0, 'and no seat was, which is the case that used to be silent');
+  assert.notEqual(built.overflow_label.text, '', 'the notice still appears');
+  assert.ok(built.overflow_label.text.includes('区画'), 'and says rooms were left out');
+});
+
+test('the canvas asks for a colour by state name, not by the whole record', () => {
+  // `hidden_state` became `{state, code, symbol}` when the notice had to name
+  // what was hidden. Passing the record to `stateColor` silently falls back to
+  // the idle colour, so a room holding an error is outlined as calm - the very
+  // thing the outline exists to prevent.
+  const canvas = readFileSync(new URL('../src/ui/public/quest-canvas.js', import.meta.url), 'utf8');
+  assert.match(canvas, /stateColor\(zone\.hidden_state\.state\)/, 'the room outline reads .state');
+  assert.match(canvas, /stateColor\(world\.overflow\.hidden_state\.state\)/, 'so does the notice');
+  assert.equal(
+    /stateColor\((?:zone|world\.overflow)\.hidden_state\)/.test(canvas),
+    false,
+    'and neither passes the record',
+  );
+});
+
+test('在席 counts colleagues, never roster seats nobody answered to', () => {
+  // A full roster with an empty stream: the DOM says nobody is at their desk,
+  // and the canvas caption has to agree with it.
+  const built = world(client([]));
+  assert.ok(built.actors.length > 0, 'the seats are drawn');
+  assert.equal(built.hud.desk_count, 0, 'and none of them is counted as present');
+
+  const busy = world(client(['impl-1', 'stranger-1']));
+  assert.equal(busy.hud.desk_count, 2, 'only the actors count');
+  assert.ok(busy.overflow.total > 2, 'while the layout still accounts for every seat');
+});
+
+test('the player in the 社長室 does not also get a strip below the office', () => {
+  // The unit-space budget stopped adding the strip once the player moved into a
+  // band; the pixel-space calculation did not, so the room was drawn taller than
+  // the height it had been scaled to fit.
+  const built = world(client(['impl-1']));
+  assert.ok(built.player !== null);
+
+  const bands = built.zones.reduce((sum, zone) => sum + zone.rect.height, 0);
+  const wall = built.wall.height;
+  const padding = built.room.height - wall - bands;
+  // Whatever the padding rounds to, it is the room's own padding twice over and
+  // not padding plus an orphaned player strip.
+  assert.ok(padding >= 0, 'the bands fit inside the room');
+  assert.ok(
+    padding < Math.round(58 * built.scale),
+    'and there is no leftover strip the height of a player under them',
+  );
 });
 
 test('an ungrouped office is the single room it has always been', () => {

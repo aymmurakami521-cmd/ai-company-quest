@@ -348,7 +348,7 @@ function drawPlayer(ctx, player) {
  */
 function drawZone(ctx, zone) {
   const { rect } = zone;
-  const accent = zone.hidden_state === null ? PALETTE.zoneEdge : stateColor(zone.hidden_state);
+  const accent = zone.hidden_state === null ? PALETTE.zoneEdge : stateColor(zone.hidden_state.state);
   panel(ctx, PALETTE.zoneHeader, accent, {
     x: rect.x,
     y: rect.y,

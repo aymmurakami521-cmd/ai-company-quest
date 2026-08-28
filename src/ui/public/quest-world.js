@@ -536,7 +536,7 @@ function buildProps(roomX, roomY, scale, roomWidthUnits) {
  * wire - a `status` label, a `stream_gap` reason - stay in the DOM layer that
  * already renders them as text.
  */
-function buildHud(header, overflow, player) {
+function buildHud(header, overflow, player, present) {
   const source = header === null || header === undefined ? {} : header;
   const connection = source.connection === null || typeof source.connection !== 'object' ? {} : source.connection;
   return {
@@ -547,9 +547,12 @@ function buildHud(header, overflow, player) {
     replaying: source.replaying === true,
     // Presence only: the reason string is free-form, so it is never painted.
     gapped: source.gap !== null && source.gap !== undefined,
-    // The full count, always: the canvas caps what it *paints*, never what it
-    // admits exists.
-    desk_count: overflow.total,
+    // Colleagues, not seats. `overflow.total` counts everything the canvas has
+    // to lay out, and in a grouped office that includes roster seats nobody has
+    // answered to - so reading it here would put 「在席 7」 on the canvas while
+    // the DOM, which counts actors, says 0. The canvas still caps what it
+    // *paints* and never what it admits exists; that is `drawn`/`hidden` below.
+    desk_count: present,
     drawn_count: overflow.drawn,
     hidden_count: overflow.hidden,
     session_count: typeof source.session_count === 'number' ? source.session_count : 0,
@@ -606,6 +609,10 @@ function normalizeDesk(desk, index) {
   const visual = source.visual === null || typeof source.visual !== 'object' ? {} : source.visual;
   return {
     seat: typeof source.seat === 'number' ? source.seat : index + 1,
+    // A plain `Desk` carries no `occupied` field and is an actor by
+    // construction, so absence means occupied. Only the office projection marks
+    // a seat as answered by nobody.
+    occupied: source.occupied !== false,
     // Present only on a desk the roster placed. Never filled in from `seat`:
     // one is a position in a dynamic ordering, the other belongs to the
     // organisation (`docs/org-snapshot-design.md` §4.4).
@@ -710,7 +717,13 @@ export function buildWorld(input) {
     zones: { total: allZones.length, drawn: zonesDrawn.length, hidden: allZones.length - zonesDrawn.length },
   };
 
-  const hud = buildHud(source.header ?? null, overflow, player);
+  // Occupied desks only. A `Desk` from `selectDesks` has no `occupied` field
+  // and is an actor by construction, so the default is true and the ungrouped
+  // office counts exactly as it always did.
+  const present = grouped
+    ? allZones.reduce((sum, zone) => sum + zone.desks.filter((desk) => desk.occupied).length, 0)
+    : desks.length;
+  const hud = buildHud(source.header ?? null, overflow, player, present);
 
   // The player's strip is added to the room, never taken out of the grid: the
   // desks keep the seats and the coordinates they would have had without one,
@@ -751,7 +764,11 @@ export function buildWorld(input) {
   const margin = Math.round(OUTER_MARGIN * scale);
   const cellWidth = Math.round(CELL_UNITS.width * scale);
   const cellHeight = Math.round(CELL_UNITS.height * scale);
-  const playerStrip = player === null ? 0 : Math.round(PLAYER_STRIP_UNITS * scale);
+  // Zero in a grouped office: the player stands in the 社長室 band, whose height
+  // already includes this strip. Adding it again would leave an empty floor band
+  // under every zone and make the room taller than the unit-space budget it was
+  // scaled from.
+  const playerStrip = playerStripUnits === 0 ? 0 : Math.round(PLAYER_STRIP_UNITS * scale);
 
   const zoneHeader = grouped ? Math.round(ZONE_HEADER_UNITS * scale) : 0;
   const roomWidth = 2 * pad + columns * cellWidth;
@@ -775,7 +792,11 @@ export function buildWorld(input) {
   // furniture and never has to shrink with the scale. An office with seats the
   // canvas did not draw gets a second strip for the count, so the two lines
   // cannot overlap either.
-  const captionLines = overflow.hidden > 0 ? 2 : 1;
+  // A room the canvas could not draw is news even when it held no seats: an
+  // organisation whose thirty-third zone silently vanishes is the same silent
+  // truncation as a dropped desk.
+  const anythingHidden = overflow.hidden > 0 || overflow.zones.hidden > 0;
+  const captionLines = anythingHidden ? 2 : 1;
   const canvasHeight = roomHeight + 2 * margin + CAPTION_STRIP * captionLines;
 
   const roomX = Math.round((canvasWidth - roomWidth) / 2);
@@ -965,7 +986,7 @@ export function buildWorld(input) {
       x: margin,
       y: captionY + CAPTION_STRIP,
       size: CAPTION_SIZE,
-      text: overflow.hidden > 0 ? fitLabel(overflowTextFor(overflow), canvasWidth - 2 * margin, CAPTION_SIZE) : '',
+      text: anythingHidden ? fitLabel(overflowTextFor(overflow), canvasWidth - 2 * margin, CAPTION_SIZE) : '',
     },
   };
 }
