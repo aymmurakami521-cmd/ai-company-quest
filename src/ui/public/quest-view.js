@@ -1218,7 +1218,9 @@ export function selectOffice(state) {
         // them is sitting in it.
         role_name: role.name,
         // Every actor the seat stands for, so an aggregated desk can say how
-        // many sessions are behind it and no actor is silently absorbed.
+        // many are behind it and no actor is silently absorbed. Actors, not
+        // sessions: the key is `(session_id, agent_id)`, so one session running
+        // two agents of this runtime type contributes two of them.
         occupants: occupants.map((desk) => desk.actor_key),
       });
     }

@@ -358,9 +358,12 @@ export type OfficeDesk = Omit<
   /**
    * Every actor this desk stands for, in the office's own order.
    *
-   * More than one when the same colleague is running in several sessions at
-   * once: the seat belongs to the person, so it stays one seat and lists them
-   * (`docs/org-snapshot-design.md` §4.2). Empty on a vacant roster seat.
+   * More than one when several actors answer to the seat's comparison key.
+   * That is usually the same colleague running in several sessions, but an
+   * actor is keyed by `(session_id, agent_id)`, so one session running two
+   * agents of the same runtime type lands here too - this is a count of actors,
+   * never of sessions (`docs/org-snapshot-design.md` §4.2). Empty on a vacant
+   * roster seat.
    */
   occupants: string[];
   visual: OfficeVisual;

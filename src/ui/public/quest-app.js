@@ -340,8 +340,10 @@ function fillDeskNode(node, desk, index) {
   text(item, '.desk__raw-status', desk.status_label ?? '—');
   text(item, '.desk__tool', desk.last_tool ?? '—');
   text(item, '.desk__session', desk.session_id ?? '—');
-  // How many actors this one desk stands for. Shown as a count so an aggregated
-  // seat cannot quietly look like a single session.
+  // How many actors this one desk stands for. Labelled 「actors」 and not
+  // 「sessions」 because an actor is keyed by `(session_id, agent_id)`: one
+  // session running two agents of the same runtime type produces two occupants
+  // and one session, so a session count here would overstate it.
   text(item, '.desk__occupants', desk.occupants === undefined ? '—' : String(desk.occupants.length));
   text(item, '.desk__ts', desk.last_event_ts ?? '—');
 }

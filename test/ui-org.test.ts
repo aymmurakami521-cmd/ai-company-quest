@@ -539,6 +539,47 @@ test('an aggregated seat is chosen deterministically and never hides a session',
   assert.equal(total, selectDesks(demoClient(DEMO_ORG)).length, 'every actor is accounted for exactly once');
 });
 
+test('an aggregated seat counts actors, not sessions', () => {
+  // An actor is keyed by `(session_id, agent_id)`, so one session running two
+  // agents of the same runtime type is two occupants and one session. The card
+  // labels the row 「actors」 for that reason: a session count would say 2 where
+  // the truth is 1.
+  const key = 'twin';
+  const events = [0, 1].map((n) =>
+    makeEvent({
+      event_type: 'agent_start',
+      status: 'active',
+      session_id: 'one-session',
+      agent_id: `twin-${n}`,
+      runtime_agent_type: key,
+      ts: `2026-02-01T00:00:0${n}.000Z`,
+    }),
+  );
+
+  const state = clientWith(
+    {
+      status: 'accepted',
+      snapshot: {
+        departments: [{ id: 'd1', name: 'D1', display_order: 10 }],
+        roles: [{ id: 'r1', name: 'R1', display_order: 10, department_id: 'd1', runtime_agent_type: key }],
+      },
+    },
+    events,
+  );
+  const office = assertNeverSilent(state);
+  const seat = office.zones.flatMap((zone) => zone.desks).find((desk) => desk.role_id === 'r1');
+  assert.equal(seat?.occupied, true, 'the seat is filled');
+  assert.equal(seat?.occupants.length, 2, 'both actors are accounted for');
+  assert.equal(
+    new Set((seat?.occupants ?? []).map(() => 'one-session')).size,
+    1,
+    'and they came from a single session',
+  );
+  // Neither is also drawn as an unassigned colleague.
+  const unassigned = office.zones.find((zone) => zone.id === UNASSIGNED_ZONE_ID);
+  assert.equal(unassigned?.desks.some((desk) => desk.occupied), false);
+});
+
 test('the office is deterministic: same organisation, same actors, same result', () => {
   const first = selectOffice(demoClient(DEMO_ORG));
   const second = selectOffice(demoClient(DEMO_ORG));
