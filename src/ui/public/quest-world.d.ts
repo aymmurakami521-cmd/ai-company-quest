@@ -99,6 +99,14 @@ export type WorldHud = {
   player_present: boolean;
 };
 
+/**
+ * The worst thing the canvas left out, in the closed vocabulary it may print.
+ *
+ * The code and symbol travel with the state because the reader has to be told
+ * *what* was hidden, not only how much.
+ */
+export type WorstHidden = { state: string; code: string; symbol: string };
+
 /** How much of the office the canvas drew. `drawn + hidden === total`, always. */
 export type WorldOverflow = {
   total: number;
@@ -110,7 +118,7 @@ export type WorldOverflow = {
    * A count on its own lets a hidden failure sit behind a tidy number, which is
    * the one thing this screen may not do.
    */
-  hidden_state: string | null;
+  hidden_state: WorstHidden | null;
   /** Rooms, counted the same way. All zero when the office is ungrouped. */
   zones: { total: number; drawn: number; hidden: number };
 };
@@ -126,7 +134,7 @@ export type WorldZone = {
   drawn: number;
   hidden: number;
   /** Worst state this room could not draw, or null. */
-  hidden_state: string | null;
+  hidden_state: WorstHidden | null;
 };
 
 export type World = {

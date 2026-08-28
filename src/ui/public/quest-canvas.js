@@ -437,7 +437,10 @@ export function drawWorld(ctx, world) {
   // paints nothing for the empty string, so an office that fits gets no line.
   label(
     ctx,
-    PALETTE.text,
+    // Painted in the state it is reporting when it has one to report, so the
+    // ungrouped office - which has no room outline to carry it - still shows a
+    // hidden failure as something other than a tidy number.
+    world.overflow.hidden_state === null ? PALETTE.text : stateColor(world.overflow.hidden_state.state),
     world.overflow_label.text,
     world.overflow_label.x,
     world.overflow_label.y,

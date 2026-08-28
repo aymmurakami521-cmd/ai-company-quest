@@ -85,11 +85,16 @@ export const ZONE_HEADER_UNITS = 18;
  * Most zones the canvas ever draws.
  *
  * The collector accepts 64 departments and 64 facilities, and a room with 129
- * name strips is not a floor plan. Beyond this the zones are counted and
- * reported, exactly as overflowing seats already are - the DOM list stays the
- * complete view.
+ * name strips is not a floor plan, so there is a bound. It has to clear the
+ * organisation this screen is actually built for, though: six departments,
+ * seven shared facilities, the 社長室 and 未所属 is fifteen rooms, and a bound
+ * that hid three of them would drop rooms from the documented configuration.
+ *
+ * Zones past the bound are still *counted*, and the seats inside them are still
+ * part of the office totals and of the worst-hidden-state report - being
+ * undrawable is not the same as being absent.
  */
-export const MAX_ZONES = 12;
+export const MAX_ZONES = 32;
 
 /**
  * How much taller than its viewport a grouped office may be.
@@ -132,7 +137,15 @@ function attentionRank(state) {
   return index === -1 ? ATTENTION_ORDER.length : index;
 }
 
-/** The state among these desks that most asks to be looked at, or null. */
+/**
+ * The desk among these that most asks to be looked at, reduced to the closed
+ * vocabulary the screen may print: state, code and symbol. Null when there are
+ * none.
+ *
+ * The code and symbol travel with the state because the *reader* has to be told
+ * what was hidden, not just how much. A number alone is the calm-looking report
+ * of a failure this screen may not make.
+ */
 function worstState(desks) {
   let worst = null;
   let rank = ATTENTION_ORDER.length + 1;
@@ -140,7 +153,7 @@ function worstState(desks) {
     const candidate = attentionRank(desk.state);
     if (candidate < rank) {
       rank = candidate;
-      worst = desk.state;
+      worst = { state: desk.state, code: desk.code, symbol: desk.symbol };
     }
   }
   return worst;
@@ -576,7 +589,16 @@ function captionFor(hud) {
  * rest of it is.
  */
 function overflowTextFor(overflow) {
-  return `表示 ${overflow.drawn} 席 / 全 ${overflow.total} 席  ·  残り ${overflow.hidden} 席は下の一覧に表示`;
+  const parts = [`表示 ${overflow.drawn} 席 / 全 ${overflow.total} 席`];
+  if (overflow.zones.hidden > 0) parts.push(`区画 ${overflow.zones.drawn} / ${overflow.zones.total}`);
+  // What was left out, not only how much. Without this the ungrouped office -
+  // which has no zone outline to colour - reports a hidden failure as a calm
+  // number, and the room outlines are the only other place a state is drawn.
+  if (overflow.hidden_state !== null) {
+    parts.push(`未描画に ${overflow.hidden_state.symbol} ${overflow.hidden_state.code} あり`);
+  }
+  parts.push(`残り ${overflow.hidden} 席は下の一覧に表示`);
+  return parts.join('  ·  ');
 }
 
 function normalizeDesk(desk, index) {
@@ -584,6 +606,10 @@ function normalizeDesk(desk, index) {
   const visual = source.visual === null || typeof source.visual !== 'object' ? {} : source.visual;
   return {
     seat: typeof source.seat === 'number' ? source.seat : index + 1,
+    // Present only on a desk the roster placed. Never filled in from `seat`:
+    // one is a position in a dynamic ordering, the other belongs to the
+    // organisation (`docs/org-snapshot-design.md` §4.4).
+    roster_seat: typeof source.roster_seat === 'number' ? source.roster_seat : null,
     actor_key: typeof source.actor_key === 'string' ? source.actor_key : `seat-${index + 1}`,
     session_id: typeof source.session_id === 'string' ? source.session_id : '',
     display_name: typeof source.display_name === 'string' ? source.display_name : '',
@@ -617,12 +643,27 @@ export function buildWorld(input) {
   const grouped = rawZones.length > 0;
   const allZones = rawZones.map(normalizeZone);
   const zonesDrawn = allZones.slice(0, MAX_ZONES);
+  const zonesCut = allZones.slice(MAX_ZONES);
 
-  // One column count for the whole room, taken from the largest zone, so the
-  // bands line up and a zone's width never depends on how many colleagues
-  // happen to be in it.
-  const widestZone = zonesDrawn.reduce((most, zone) => Math.max(most, zone.desks.length), 0);
-  const columns = columnsFor(grouped ? widestZone : desks.length, viewport.width);
+  // A grouped office takes its column count from the **roster alone**.
+  //
+  // This is the difference between a floor plan and a list. `columnsFor` reads
+  // the desk count and the viewport width, and both of those move: a colleague
+  // the roster does not know joins 未所属 and widens it, or the viewport crosses a
+  // width threshold. Either one would re-flow every band - changing which row a
+  // seat is on, where the zones below it start, and in a tight budget whether a
+  // seat is drawn at all - which is precisely the "actors and resize never move
+  // a roster seat" contract (`docs/org-snapshot-design.md` §3.2 ①③).
+  //
+  // So the width of the grid is a fact about the organisation, and the viewport
+  // decides only how many pixels each cell gets.
+  const widestRoster = zonesDrawn.reduce(
+    (most, zone) => Math.max(most, zone.desks.filter((desk) => desk.roster_seat !== null).length),
+    0,
+  );
+  const columns = grouped
+    ? clamp(widestRoster, 1, MAX_COLUMNS)
+    : columnsFor(desks.length, viewport.width);
 
   // Rows are capped before anything is sized, so the office the canvas has to
   // hold is bounded whatever the collector accepted. `drawn` are the seats that
@@ -650,8 +691,14 @@ export function buildWorld(input) {
 
   const rows = bands.reduce((sum, band) => sum + band.rows, 0);
   const drawn = bands.flatMap((band) => band.drawn);
-  const hiddenDesks = bands.flatMap((band) => band.hidden);
-  const total = grouped ? zonesDrawn.reduce((sum, zone) => sum + zone.desks.length, 0) : desks.length;
+  // Seats inside a zone the canvas could not draw are hidden seats, not absent
+  // ones: they count towards the totals and towards the worst-hidden-state
+  // report exactly like a seat that overflowed its own band. Dropping them here
+  // is what would make an unrenderable room a silent truncation.
+  const hiddenDesks = [...bands.flatMap((band) => band.hidden), ...zonesCut.flatMap((zone) => zone.desks)];
+  const total = grouped
+    ? allZones.reduce((sum, zone) => sum + zone.desks.length, 0)
+    : desks.length;
   const overflow = {
     total,
     drawn: drawn.length,

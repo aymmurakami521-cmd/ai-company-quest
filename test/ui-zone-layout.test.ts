@@ -36,7 +36,7 @@ import {
   selectPlayer,
   visualForState,
 } from '../src/ui/public/quest-view.js';
-import { ATTENTION_ORDER, MAX_ROWS, buildWorld } from '../src/ui/public/quest-world.js';
+import { ATTENTION_ORDER, MAX_ROWS, MAX_ZONES, buildWorld } from '../src/ui/public/quest-world.js';
 
 // ------------------------------------------------------------------ setup ---
 
@@ -89,6 +89,31 @@ function world(state: ClientState, viewport = VIEWPORT) {
 /** Where each roster seat sits, keyed by the actor or role it belongs to. */
 function seatBoxes(built: ReturnType<typeof world>): Map<string, string> {
   return new Map(built.actors.map((actor) => [actor.actor_key, JSON.stringify(actor.cell)]));
+}
+
+/**
+ * Each seat's *place* in the office: which room, and where in that room.
+ *
+ * The distinction matters. Pixels legitimately move - a taller office is drawn
+ * at a smaller scale, so every coordinate shrinks with it. What may never move
+ * is the arrangement: the room a seat is in, and its row and column inside that
+ * room. That is the property `docs/org-snapshot-design.md` §3.2 ③ is about, and
+ * it is what an operator actually navigates by.
+ */
+function logicalSeats(built: ReturnType<typeof world>): Map<string, string> {
+  const rooms = built.zones.filter((zone) => zone.seats);
+  const counts = new Map<string, number>();
+  const places = new Map<string, string>();
+  for (const actor of built.actors) {
+    const room = rooms.find(
+      (zone) => actor.cell.y >= zone.rect.y && actor.cell.y + actor.cell.height <= zone.rect.y + zone.rect.height,
+    );
+    const id = room?.id ?? 'nowhere';
+    const seen = counts.get(id) ?? 0;
+    counts.set(id, seen + 1);
+    places.set(actor.actor_key, `${id}#${Math.floor(seen / built.columns)},${seen % built.columns}`);
+  }
+  return places;
 }
 
 // ------------------------------------------------- the copied vocabulary ---
@@ -156,25 +181,44 @@ test('actors coming and going never move a roster seat', () => {
   // The property the whole feature is for. `seat` in the ungrouped office is an
   // index into a sorted list, so it moves whenever anybody joins; a roster seat
   // belongs to the organisation and may not.
-  const empty = seatBoxes(world(client([])));
-  const some = seatBoxes(world(client(['impl-1'])));
-  const more = seatBoxes(world(client(['orch-1', 'impl-1', 'ver-1', 'rev-1'])));
-  const withStranger = seatBoxes(world(client(['orch-1', 'impl-1', 'ver-1', 'rev-1', 'stranger-1'])));
+  //
+  // "May not move" is about the arrangement, not the pixels: a busier office is
+  // taller and is therefore drawn smaller, so coordinates shrink together. What
+  // has to hold is that the seat is in the same room, in the same row and
+  // column, whoever else is on screen.
+  const crowd = Array.from({ length: 40 }, (_unused, index) => `bulk-${index}`);
+  const empty = logicalSeats(world(client([])));
 
-  // Every roster seat that exists in the empty office keeps its exact box in
-  // every busier one. Seats are keyed by role there, by actor once filled, so
-  // the comparison is made on the boxes themselves.
-  const boxesOf = (map: Map<string, string>) => [...map.values()].sort();
-  const rosterBoxes = boxesOf(empty);
-  for (const [label, busier] of [
-    ['one actor', some],
-    ['four actors', more],
-    ['plus a stranger', withStranger],
+  for (const [label, agents] of [
+    ['one actor', ['impl-1']],
+    ['four actors', ['orch-1', 'impl-1', 'ver-1', 'rev-1']],
+    ['plus a stranger', ['orch-1', 'impl-1', 'ver-1', 'rev-1', 'stranger-1']],
+    // The case the first version of this test missed: the column count was
+    // taken from the widest *zone*, so colleagues the roster does not know
+    // widened 未所属 and re-flowed every band on the floor.
+    ['swamped by strangers', ['orch-1', 'impl-1', ...crowd]],
   ] as const) {
-    for (const box of rosterBoxes) {
-      assert.ok(boxesOf(busier).includes(box), `${label}: the roster seat at ${box} did not move`);
+    const busier = logicalSeats(world(client(agents)));
+    const places = new Set(busier.values());
+    for (const place of empty.values()) {
+      assert.ok(places.has(place), `${label}: the roster seat at ${place} is still there`);
     }
   }
+
+  // The column count is the thing every seat position is derived from, so it is
+  // asserted directly rather than only through its consequences.
+  const columnsOf = (agents: readonly string[]) => world(client(agents)).columns;
+  const base = columnsOf([]);
+  for (const agents of [['impl-1'], ['orch-1', 'impl-1', 'ver-1', 'rev-1'], ['orch-1', ...crowd]]) {
+    assert.equal(columnsOf(agents), base, 'the grid width is a fact about the organisation');
+  }
+
+  // Pixels are allowed to move, and do - otherwise the distinction above would
+  // be untested.
+  assert.notDeepEqual(
+    [...seatBoxes(world(client(['orch-1', ...crowd]))).values()].sort(),
+    [...seatBoxes(world(client([]))).values()].sort(),
+  );
 });
 
 test('the seat a colleague occupies is decided by the roster, not by arrival order', () => {
@@ -193,8 +237,22 @@ test('resizing changes pixels, never the logical arrangement', () => {
   const shape = (viewport: typeof VIEWPORT) => {
     const built = world(state, viewport);
     return {
-      zones: built.zones.map((zone) => ({ id: zone.id, kind: zone.kind, seats: zone.seats, drawn: zone.drawn })),
+      // `columns` is what the first version of this test left out, and it is
+      // what decides the row and column every seat lands on: reading only the
+      // ids let a viewport-derived grid width pass as "the same arrangement".
+      columns: built.columns,
+      rows: built.rows,
+      zones: built.zones.map((zone) => ({
+        id: zone.id,
+        kind: zone.kind,
+        seats: zone.seats,
+        drawn: zone.drawn,
+        hidden: zone.hidden,
+      })),
       seats: built.actors.map((actor) => actor.actor_key),
+      // Where each seat sits *within its own band*, which is the logical
+      // position pixels are allowed to scale but not to rearrange.
+      grid: built.actors.map((actor, index) => `${index % built.columns}/${Math.floor(index / built.columns)}`),
     };
   };
 
@@ -283,9 +341,65 @@ test('a room that could not draw a failing seat does not look calm', () => {
 
   const crowded = built.zones.find((zone) => zone.id === UNASSIGNED_ZONE_ID);
   assert.ok((crowded?.hidden ?? 0) > 0, 'the room really did run out of space');
-  assert.equal(crowded?.hidden_state, 'error', 'and says the worst thing it could not draw');
-  assert.equal(built.overflow.hidden_state, 'error', 'the office says so too');
+  // The state travels with its code and symbol, because the reader has to be
+  // told *what* was hidden and the label prints from a closed vocabulary.
+  assert.deepEqual(
+    crowded?.hidden_state,
+    { state: 'error', code: 'ERROR', symbol: '✖' },
+    'and says the worst thing it could not draw',
+  );
+  assert.deepEqual(built.overflow.hidden_state, crowded?.hidden_state, 'the office says so too');
+  // And it is on the canvas, not only in the model.
+  assert.ok(built.overflow_label.text.includes('ERROR'), 'the notice names the hidden state');
+  assert.ok(built.overflow_label.text.includes('✖'));
   assert.equal(built.overflow.drawn + built.overflow.hidden, built.overflow.total, 'nothing unaccounted for');
+});
+
+test('a room the canvas cannot draw is still counted, seats and all', () => {
+  // Truncating the zone list used to drop its seats from every total, so an
+  // organisation with more rooms than the canvas draws reported fewer seats
+  // than it had - and a failure inside one of those rooms vanished with it.
+  const state = client(['impl-1']);
+  const office = selectOffice(state);
+  const failing = visualForState('error');
+  const extra: OfficeZone[] = Array.from({ length: MAX_ZONES + 4 }, (_unused, index) => ({
+    id: `dept:filler-${index}`,
+    name: `部署${index}`,
+    kind: 'department' as const,
+    seats: true,
+    desks: [
+      {
+        ...(office.desks as OfficeDesk[])[0]!,
+        actor_key: null,
+        role_id: `filler-${index}`,
+        occupants: [],
+        occupied: false,
+        visual: failing,
+        last_known_visual: failing,
+      },
+    ],
+  }));
+  const built = buildWorld({
+    desks: office.desks,
+    zones: [...office.zones, ...extra],
+    player: selectPlayer(state),
+    header: selectHeader(state),
+    viewport: VIEWPORT,
+  });
+
+  assert.ok(built.overflow.zones.hidden > 0, 'some rooms really did not fit');
+  assert.equal(
+    built.overflow.zones.drawn + built.overflow.zones.hidden,
+    built.overflow.zones.total,
+    'and the rooms are all accounted for',
+  );
+  assert.equal(built.overflow.drawn + built.overflow.hidden, built.overflow.total, 'so are their seats');
+  assert.deepEqual(
+    built.overflow.hidden_state,
+    { state: 'error', code: 'ERROR', symbol: '✖' },
+    'a failure inside an undrawn room is still reported',
+  );
+  assert.ok(built.overflow_label.text.includes('区画'), 'and the notice says rooms were left out');
 });
 
 test('an ungrouped office is the single room it has always been', () => {
