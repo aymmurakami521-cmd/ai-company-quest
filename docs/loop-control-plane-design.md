@@ -11,7 +11,7 @@ runtime 挙動、環境変数、依存のいずれも追加しません。
 実装とこの文書が食い違った場合は、常に **実装（`src/`）が正** です。
 
 関連: [event-contract.md](event-contract.md) / [live-wire-contract.md](live-wire-contract.md) /
-[org-snapshot-design.md](org-snapshot-design.md)
+[org-snapshot-design.md](org-snapshot-design.md) / [company-model-design.md](company-model-design.md)
 
 **この文書の言語**: 日本語散文 + 英語識別子。既存 docs の慣行に合わせています（§11）。
 
@@ -629,6 +629,11 @@ Quest は **Control Plane ではありません。** AI Company の Run State / 
 「read-only」は **server が GET のみを受ける**という意味に留まりません。Quest は
 **control 要求を送る client にもなりません**。表示している事実に対して操作を発生させる手段を、
 Quest の server 側にも UI 側にも持たせません。
+
+なお §12 が分けているのは Control Plane / Management Console / Quest の **機能責務** です。
+**顧客所有 Skill と ARK Core の「所有・保守責務」**という別軸の分界は
+[`company-model-design.md`](company-model-design.md) §5.1〜§5.3 に記録しています。
+事業 / 製品ポリシーの正本は同文書が参照する外部 book で、**本文書は技術契約側の正本** です。
 
 ### 12.2 この計画で緩めない Quest の安全境界
 

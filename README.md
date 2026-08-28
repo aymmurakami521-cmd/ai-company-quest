@@ -633,3 +633,8 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
   実装していません。将来要件としての整理と、現行コードのどこへ載せられるか（拡張点）は
   [`docs/company-model-design.md`](docs/company-model-design.md) に記録しています
   （設計記録のみ・実装なし）。
+- **事業・料金・プラン境界の現行正本はこのrepositoryではなく外部bookです**
+  （[Business_Model_v2.0](https://docs.google.com/spreadsheets/d/1fCBjAK1xaiRIT7BgNJQ5gX033DGmaVboVGFg5K_WFao/edit)）。
+  本repositoryが正本なのは Schema / State / Event / 実装 です。
+  導入済みSkillの所有、ARK Coreとの責任境界、Skill Contract / adapter境界は
+  [`docs/company-model-design.md`](docs/company-model-design.md) §5.1〜§5.3 にあります。
