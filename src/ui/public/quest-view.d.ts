@@ -338,7 +338,10 @@ export declare function normalizePlayer(raw: unknown): ViewPlayer | null;
  * does not know has no roster seat. Neither field is ever derived from the
  * other (`docs/org-snapshot-design.md` §4.4).
  */
-export type OfficeDesk = Omit<Desk, 'seat' | 'actor_key' | 'visual' | 'last_known_visual' | 'session_id'> & {
+export type OfficeDesk = Omit<
+  Desk,
+  'seat' | 'actor_key' | 'visual' | 'last_known_visual' | 'session_id' | 'display_name'
+> & {
   /** False for a roster seat no actor answers to. */
   occupied: boolean;
   /** Position in the dynamic ordering. Null for a vacant roster seat. */
@@ -348,6 +351,10 @@ export type OfficeDesk = Omit<Desk, 'seat' | 'actor_key' | 'visual' | 'last_know
   actor_key: string | null;
   session_id: string | null;
   role_id: string | null;
+  /** What the stream called this actor. Null on a seat no actor answers to. */
+  display_name: string | null;
+  /** The roster's label for this seat. Null for an actor the roster does not know. */
+  role_name: string | null;
   visual: OfficeVisual;
   last_known_visual: OfficeVisual;
 };

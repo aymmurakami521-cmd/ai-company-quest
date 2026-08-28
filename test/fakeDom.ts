@@ -300,6 +300,7 @@ export function pageNodes(): [string, FakeElement | FakeTemplate][] {
         'desk__agent',
         'desk__symbol',
         'desk__state-label',
+        'desk__roster',
         'desk__role',
         'desk__raw-status',
         'desk__tool',

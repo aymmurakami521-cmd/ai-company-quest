@@ -319,7 +319,10 @@ function fillDeskNode(node, desk, index) {
   // produced (`docs/org-snapshot-design.md` §4.4).
   const seatNumber = desk.roster_seat ?? desk.seat;
   text(item, '.desk__seat', seatNumber === null || seatNumber === undefined ? '—' : `#${seatNumber}`);
-  text(item, '.desk__agent', desk.display_name);
+  // The reported name when there is one; a vacant seat has only its roster
+  // label. The two are never merged into one another.
+  text(item, '.desk__agent', desk.display_name ?? desk.role_name ?? '—');
+  text(item, '.desk__roster', desk.role_name ?? '—');
   badge.hidden = !desk.is_main_orchestrator;
   text(item, '.desk__symbol', desk.visual.symbol);
   text(item, '.desk__state-label', `${desk.visual.label} (${desk.visual.code})`);

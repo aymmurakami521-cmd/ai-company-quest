@@ -327,13 +327,11 @@ test('an actor the roster does not know goes to 未所属 and is never dropped',
 });
 
 test('no organisation can make an actor disappear or appear twice', () => {
-  // Comparison keys that match nothing, keys that are absent, and two roles
-  // fighting over one key - the three ways matching can go wrong at once.
+  // Comparison keys that match nobody, and roster members with no key at all.
   const roles = [
     { id: 'a', name: 'A', display_order: 10, department_id: null, runtime_agent_type: 'implementer' },
-    { id: 'b', name: 'B', display_order: 20, department_id: null, runtime_agent_type: 'implementer' },
     { id: 'c', name: 'C', display_order: 30, department_id: null, runtime_agent_type: null },
-    { id: 'd', name: 'D', display_order: 40, department_id: 'nowhere', runtime_agent_type: 'ghost' },
+    { id: 'd', name: 'D', display_order: 40, department_id: null, runtime_agent_type: 'ghost' },
   ];
   const state = demoClient({ status: 'accepted', snapshot: { departments: [], roles } });
   const office = assertNeverSilent(state);
@@ -349,10 +347,149 @@ test('no organisation can make an actor disappear or appear twice', () => {
   );
   assert.equal(new Set(keys).size, keys.length, 'and no actor appears twice');
 
-  // A role pointing at a department that does not exist is placed, not dropped.
-  const placed = office.zones.flatMap((zone) => zone.desks).filter((desk) => desk.role_id === 'd');
-  assert.equal(placed.length, 1, 'the dangling role still has its seat');
-  assert.equal(placed[0]?.occupied, false, 'and nobody was invented to fill it');
+  // A comparison key nobody runs under is a seat, not a licence to invent one.
+  const ghost = office.zones.flatMap((zone) => zone.desks).filter((desk) => desk.role_id === 'd');
+  assert.equal(ghost.length, 1);
+  assert.equal(ghost[0]?.occupied, false);
+});
+
+// ------------------------------- cross-row invariants (review findings) ----
+
+test('a department literally called 未所属\'s id does not collide with the container', () => {
+  // `unassigned` matches the upstream identifier grammar, so the collector
+  // accepts a department with that id. If the synthetic zone shared the name,
+  // both zones would take the same role bucket and every seat in that
+  // department would be emitted - and rendered - twice.
+  const state = demoClient({
+    status: 'accepted',
+    snapshot: {
+      departments: [{ id: 'unassigned', name: 'ほんとうの部署', display_order: 10 }],
+      roles: [
+        { id: 'r1', name: 'R1', display_order: 10, department_id: 'unassigned', runtime_agent_type: 'orchestrator' },
+        { id: 'r2', name: 'R2', display_order: 20, department_id: null, runtime_agent_type: null },
+      ],
+    },
+  });
+  const office = assertNeverSilent(state);
+  assert.equal(office.grouped, true);
+
+  const ids = office.zones.map((zone) => zone.id);
+  assert.equal(new Set(ids).size, ids.length, 'zone ids are unique');
+  assert.equal(UNASSIGNED_ZONE_ID.includes(':'), true, 'the container uses a name the grammar cannot produce');
+
+  const roleIds = office.zones.flatMap((zone) => zone.desks).map((desk) => desk.role_id).filter((id) => id !== null);
+  assert.deepEqual(roleIds.sort(), ['r1', 'r2'], 'each roster member is emitted exactly once');
+  // `r2` has no department, so it belongs to the container, not to the
+  // department that happens to share its name.
+  const container = office.zones.find((zone) => zone.id === UNASSIGNED_ZONE_ID);
+  assert.ok(container?.desks.some((desk) => desk.role_id === 'r2'));
+  assert.equal(container?.desks.some((desk) => desk.role_id === 'r1'), false);
+});
+
+test('cross-row invariants are refused here too, because nothing else re-checks them', () => {
+  const base = { departments: [{ id: 'd1', name: 'D1', display_order: 10 }], roles: [] as unknown[] };
+  const role = (over: Record<string, unknown>) => ({
+    id: 'r1',
+    name: 'R1',
+    display_order: 10,
+    department_id: null,
+    runtime_agent_type: null,
+    ...over,
+  });
+
+  const refused: [string, unknown][] = [
+    ['duplicate department id', { ...base, departments: [base.departments[0], { ...base.departments[0] }] }],
+    ['duplicate role id', { ...base, roles: [role({}), role({ display_order: 20 })] }],
+    [
+      'duplicate comparison key',
+      {
+        ...base,
+        roles: [role({ runtime_agent_type: 'x' }), role({ id: 'r2', runtime_agent_type: 'x' })],
+      },
+    ],
+    ['dangling department reference', { ...base, roles: [role({ department_id: 'nowhere' })] }],
+    ['identifier outside the grammar', { ...base, roles: [role({ id: 'Not An Id' })] }],
+    ['comparison key outside the wire grammar', { ...base, roles: [role({ runtime_agent_type: 'テスト' })] }],
+    ['a name with a control character', { ...base, roles: [role({ name: 'R\u0007' })] }],
+    ['a name past the upstream bound', { ...base, roles: [role({ name: 'あ'.repeat(101) })] }],
+  ];
+
+  for (const [why, snapshot] of refused) {
+    const state = demoClient({ status: 'accepted', snapshot });
+    assert.equal(selectSecondaryStatus(state).code, 'ORG_REJECTED', `${why} is refused`);
+    assert.equal(assertNeverSilent(state).grouped, false, `${why} produces no partial grouping`);
+  }
+});
+
+test('a comparison key at the wire bound still matches, because it is not clamped to the name bound', () => {
+  // The wire allows 128 characters and a display name 100. Clamping the key to
+  // the shorter of the two would make a long-keyed roster member permanently
+  // 不在 while the actor answering to it sat in 未所属 - misreporting exactly
+  // who is missing.
+  const key = 'a'.repeat(128);
+  const events = [
+    { ...DEMO_EVENTS[0], agent_id: 'long-1', runtime_agent_type: key },
+  ] as typeof DEMO_EVENTS;
+  const state = clientWith(
+    {
+      status: 'accepted',
+      snapshot: {
+        departments: [{ id: 'd1', name: 'D1', display_order: 10 }],
+        roles: [{ id: 'r1', name: 'R1', display_order: 10, department_id: 'd1', runtime_agent_type: key }],
+      },
+    },
+    events,
+  );
+  const office = assertNeverSilent(state);
+  const seat = office.zones.flatMap((zone) => zone.desks).find((desk) => desk.role_id === 'r1');
+  assert.equal(seat?.occupied, true, 'the seat is filled, not left 不在');
+});
+
+test('a rejection field that is not a path is refused rather than printed', () => {
+  for (const field of ['SECRET=abcdefgh', 'roles[0].name; rm -rf', '../etc', '', '.a', 'a b']) {
+    const state = demoClient({ status: 'rejected', field, rule: 'type_error' });
+    const detail = selectSecondaryStatus(state).detail;
+    assert.equal(detail, 'snapshot / type_error', `${JSON.stringify(field)} is not echoed`);
+  }
+  // An over-long value is bounded before the grammar sees it, so what reaches
+  // the screen is length-limited whether or not it is path-shaped.
+  const long = demoClient({ status: 'rejected', field: 'a'.repeat(200), rule: 'type_error' });
+  const longDetail = selectSecondaryStatus(long).detail ?? '';
+  assert.ok(longDetail.length <= 128 + ' / type_error'.length, 'the field path is bounded');
+
+  // The shapes the collector actually emits still survive.
+  for (const field of ['(root)', 'schema_version', 'company.id', 'roles[12].runtime_agent_type']) {
+    const state = demoClient({ status: 'rejected', field, rule: 'invalid_format' });
+    assert.equal(selectSecondaryStatus(state).detail, `${field} / invalid_format`);
+  }
+});
+
+test('a seated roster member keeps the name the stream reported for them', () => {
+  // The roster label is shown beside the reported name, never instead of it.
+  // The canvas sprite and the detail pane are both fed `selectDesks`, so
+  // replacing `display_name` here would leave one card reading 開発担当 while
+  // the same actor reads `dev-1` two panes away - and with two actors answering
+  // to one seat, nothing would say which of them is in it.
+  const state = demoClient(DEMO_ORG);
+  const office = selectOffice(state);
+  const reported = new Map(selectDesks(state).map((desk) => [desk.actor_key, desk.display_name]));
+
+  const seated = (office.desks as OfficeDesk[]).filter((desk) => desk.occupied);
+  assert.ok(seated.length > 0);
+  for (const desk of seated) {
+    assert.equal(desk.display_name, reported.get(desk.actor_key ?? ''), 'the reported name is untouched');
+  }
+  const onRoster = seated.filter((desk) => desk.roster_seat !== null);
+  assert.ok(onRoster.length > 0);
+  for (const desk of onRoster) {
+    assert.ok((desk.role_name ?? '').length > 0, 'and the roster label rides alongside it');
+    assert.notEqual(desk.role_name, desk.display_name);
+  }
+  // A vacant seat has no reported name at all, only the roster label.
+  for (const desk of (office.desks as OfficeDesk[]).filter((desk) => !desk.occupied)) {
+    assert.equal(desk.display_name, null);
+    assert.ok((desk.role_name ?? '').length > 0);
+  }
 });
 
 test('a seat belongs to a person, not to a session: two actors, one seat, nobody lost', () => {
