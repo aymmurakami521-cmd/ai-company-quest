@@ -1060,6 +1060,49 @@ export function selectDesks(state) {
   });
 }
 
+/**
+ * How loudly a state asks to be looked at.
+ *
+ * `ACTOR_VISUAL_STATES` is already written worst-first - error, approval,
+ * planning, working, ended, idle - so its index *is* the rank and there is no
+ * second ordering to keep in step with it. `unknown` is not in that list and
+ * sorts last, which is right: while the stream is not confirming anything every
+ * desk is `unknown` together, so the rank cannot decide anything and the
+ * ordering below falls through to the office's own.
+ */
+function attentionRank(visual) {
+  const index = ACTOR_VISUAL_STATES.indexOf(visual.state);
+  return index === -1 ? ACTOR_VISUAL_STATES.length : index;
+}
+
+/**
+ * Which of the actors behind one roster seat the seat shows.
+ *
+ * `docs/org-snapshot-design.md` §4.2 requires this to be derived from the whole
+ * group, and the reason is the failure it prevents: `selectDesks` orders actors
+ * by oldest session, so simply taking the first lets a finished older run sit on
+ * top of a newer one that is failing. The DEMO does exactly that - `dev-1`
+ * ended while `sync-1` errored - and the seat would have read 完了 with the
+ * error nowhere on the screen.
+ *
+ * So the seat shows the state that most asks to be looked at, and ties fall back
+ * to the office's existing order, which makes the choice total and repeatable.
+ * One seat can only carry one state; the rule is that the one it carries is
+ * never the one that hides a problem.
+ */
+function representative(occupants) {
+  let best = occupants[0];
+  let bestRank = attentionRank(best.visual);
+  for (let i = 1; i < occupants.length; i += 1) {
+    const rank = attentionRank(occupants[i].visual);
+    if (rank < bestRank) {
+      best = occupants[i];
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
 /** Declared order first, identifier second, so the order is total. */
 function compareOrgOrder(left, right) {
   if (left.display_order !== right.display_order) return left.display_order - right.display_order;
@@ -1197,9 +1240,8 @@ export function selectOffice(state) {
         zone.desks.push(vacantSeat(role, rosterSeat));
         continue;
       }
-      // Which of them the seat shows is decided by the ordering the office
-      // already uses, so it is deterministic rather than arrival-ordered.
-      const lead = occupants[0];
+      // Derived from the whole group, not from whoever happens to be first.
+      const lead = representative(occupants);
       for (const desk of occupants) seated[desk.actor_key] = true;
       zone.desks.push({
         ...lead,

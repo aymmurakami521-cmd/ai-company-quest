@@ -42,6 +42,7 @@ import { makeEvent } from './helpers.ts';
 import type { ClientState, OfficeDesk, OfficeProjection } from '../src/ui/public/quest-view.js';
 import {
   ACTOR_LEGEND_STATES,
+  ACTOR_VISUAL_STATES,
   ORG_LIMITS,
   ORG_REJECT_RULES,
   SECONDARY_STATUS_CODES,
@@ -537,6 +538,75 @@ test('an aggregated seat is chosen deterministically and never hides a session',
   const desks = first.desks as OfficeDesk[];
   const total = desks.reduce((sum, desk) => sum + desk.occupants.length, 0);
   assert.equal(total, selectDesks(demoClient(DEMO_ORG)).length, 'every actor is accounted for exactly once');
+});
+
+test('an aggregated seat never lets a finished run hide a failing one', () => {
+  // `selectDesks` orders actors by oldest session, so taking the first would let
+  // a completed older run sit on top of a newer one that is failing. The shipped
+  // DEMO is the case: `dev-1` ends while `sync-1` errors, both as `implementer`.
+  // The seat has to be derived from the whole group, or the office reads 完了
+  // with the error nowhere on screen (`docs/org-snapshot-design.md` §4.2).
+  const state = demoClient(DEMO_ORG);
+  const byKey = new Map(selectDesks(state).map((desk) => [desk.actor_key, desk]));
+  const seat = selectOffice(state)
+    .zones.flatMap((zone) => zone.desks)
+    .find((desk) => desk.role_id === 'role-implementer');
+
+  assert.equal(seat?.occupants.length, 2, 'the seat really is aggregating');
+  const states = (seat?.occupants ?? []).map((key) => byKey.get(key)?.visual.state);
+  assert.ok(states.includes('error'), 'and one of them is failing');
+  assert.equal(seat?.visual.state, 'error', 'so the seat shows the failure');
+  assert.notEqual(seat?.visual.state, 'ended', 'never the finished run');
+  // The identity shown is the failing actor's, so the card, the canvas and the
+  // detail pane all name the same colleague.
+  assert.equal(seat?.display_name, byKey.get(seat?.actor_key ?? '')?.display_name);
+});
+
+test('the representative is the most attention-seeking state, then the office order', () => {
+  // `ACTOR_VISUAL_STATES` is written worst-first, so it is the rank itself.
+  const worseThan = (a: string, b: string) =>
+    ACTOR_VISUAL_STATES.indexOf(a as never) < ACTOR_VISUAL_STATES.indexOf(b as never);
+  assert.ok(worseThan('error', 'ended'));
+  assert.ok(worseThan('awaiting_approval', 'working'));
+
+  const key = 'twin';
+  const events = [
+    makeEvent({ event_type: 'agent_start', status: 'active', session_id: 's1', agent_id: 'a', runtime_agent_type: key, ts: '2026-02-01T00:00:00.000Z' }),
+    makeEvent({ event_type: 'agent_start', status: 'awaiting_approval', session_id: 's2', agent_id: 'b', runtime_agent_type: key, ts: '2026-02-01T00:00:01.000Z' }),
+  ];
+  const state = clientWith(
+    {
+      status: 'accepted',
+      snapshot: {
+        departments: [{ id: 'd1', name: 'D1', display_order: 10 }],
+        roles: [{ id: 'r1', name: 'R1', display_order: 10, department_id: 'd1', runtime_agent_type: key }],
+      },
+    },
+    events,
+  );
+  const seat = selectOffice(state)
+    .zones.flatMap((zone) => zone.desks)
+    .find((desk) => desk.role_id === 'r1');
+  assert.equal(seat?.occupants.length, 2);
+  // `s1` is the older session and would win on order alone; `s2` is waiting on a
+  // person, which is the thing the operator has to act on.
+  assert.equal(seat?.visual.state, 'awaiting_approval');
+  assert.equal(seat?.session_id, 's2');
+
+  // Same input, same seat: the choice is total, not just severity-first.
+  assert.deepEqual(
+    selectOffice(clientWith(
+      {
+        status: 'accepted',
+        snapshot: {
+          departments: [{ id: 'd1', name: 'D1', display_order: 10 }],
+          roles: [{ id: 'r1', name: 'R1', display_order: 10, department_id: 'd1', runtime_agent_type: key }],
+        },
+      },
+      events,
+    )).zones.flatMap((zone) => zone.desks).find((desk) => desk.role_id === 'r1'),
+    seat,
+  );
 });
 
 test('an aggregated seat counts actors, not sessions', () => {
