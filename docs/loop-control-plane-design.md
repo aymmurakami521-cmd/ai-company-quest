@@ -780,7 +780,9 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 - 本文書（LCP-0）と PR-1 は **どちらも docs のみ・相互依存なし**なので並行可能です。
 - ~~ただし §14.2 の理由により、PR-1 の §4.7 決定は LCP-1 の後に行うのが望ましい構成です。~~
   **失効**（§14.2 の訂正）。PR-1 は LCP-1 を待たずに完了しました。
-- PR-1 の §4.1〜§4.6 は外部事実の確認なので、LCP-1 と**並行して owner 側で進められます**。
+- ~~PR-1 の §4.1〜§4.6 は外部事実の確認なので、LCP-1 と並行して owner 側で進められます。~~
+  **完了済み**（Issue #23）。§4.1〜§4.7 はすべて「確認済み」または「設計判断済み」で、
+  owner 側に残っている確認作業はありません。
 
 ---
 
@@ -849,8 +851,8 @@ source と consumer の所有関係が反転するからです。
    ここを飛ばすと、以後の provider 置換が必ず read model まで波及します。
 4. code 変更ゼロなので、この breakpoint の 338 件の test を一切揺らしません。
 
-**owner 側で並行して進められるもの**: ORG-PR-1 の §4.1〜§4.6（外部 org 定義の実在確認）と、
-DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依存し、agent 側では確認できません。
+**owner 側で並行して進められるもの**: **DOC-1 の内容決定**のみです。
+（ORG-PR-1 の §4.1〜§4.6 も以前はここに挙げていましたが、**Issue #23 で完了済み**です。）
 
 ### 15.2 LCP-1 の完了 evidence（provider 中立検査を executable にするための成果物）
 
@@ -1039,7 +1041,7 @@ adapter 境界を指す説明と binding 値**なので、例外として通し�
 | 5 | Run/Event Store の実体（file / 埋め込み / 外部）。**依存追加・DB 導入は本フェーズの禁止事項**なので、選択肢の評価も STORE-1 まで先送り | STORE-1 |
 | 6 | Quest が run event を受ける経路の具体（既存 namespace 分離の作法は決定済み・§5.3。**供給元が STORE-1 であることは §15.0 で決定済み**、受け口の形が未決） | LCP-3 |
 | 7 | ~~汎用 status 表示面の具体~~ → **確定済み**。第 2 面・非 live region・`ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED` の閉じた語彙（`org-snapshot-design.md` §4.7、実装は PR #35）。run state の code は LCP-1 後に同じ面へ追加 | 完了 |
-| 8 | `org-snapshot-design.md` §4.1〜§4.6 の未決事項 | ORG-PR-1（変更なし） |
+| 8 | ~~`org-snapshot-design.md` §4.1〜§4.6 の未決事項~~ → **確定済み**。§4.1〜§4.7 はすべて「確認済み」または「設計判断済み」（Issue #23）。実装された仕様は同文書 §5.1 | 完了 |
 | 9 | budget の単位（cost unit の定義） | LCP-1 以降 |
 | 10 | lease の TTL と stall threshold の具体値 | STORE-1 |
 
