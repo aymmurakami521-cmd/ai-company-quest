@@ -215,6 +215,7 @@ LIVEへは到達せず、networkからも到達しません。
 | 変数 | 既定値 | 説明 |
 |------|--------|------|
 | `QUEST_INPUT_PATH` | なし（必須） | tailするsanitized JSONLのpath |
+| `QUEST_ORG_SNAPSHOT_PATH` | なし（任意） | LIVEが起動時に1回だけ読む検証済み組織snapshot（`company/org.snapshot.json`）のpath。未設定は `ORG_ABSENT` で正常動作します。DEMOはこの変数を見ません（組み込みfixture・外部I/Oなし） |
 | `QUEST_PORT` | `4317` | SSE/healthのport |
 | `QUEST_START_FROM` | `beginning` | `beginning` / `end`。既存行を読むか末尾から追うか |
 | `QUEST_POLL_INTERVAL_MS` | `100` | tail pollingの間隔 |
@@ -284,10 +285,12 @@ replay経路だけは `snapshot` を送らないため、client切断中にhalt�
 
 1画面に次を表示します。
 
-- pixel風のオフィス空間（壁・窓・床・机）と、actorごとの席＋キャラクター
+- pixel風のオフィス空間（壁・窓・床・机）と、席＋キャラクター。組織snapshotを採用している間は
+  部署・社長室・未所属・共用施設の**区画**に分かれます（「組織snapshotと区画レイアウト」参照）
 - actorの表示名（`agent_id`。producerが特定できない場合は `unattributed`）、
   role（**`resolved` のときだけ**。推測はしません）、現在状態、last tool、session、最終event時刻
 - 接続モード **LIVE / DEMO**、接続状態、最終更新、最新 `ingest_seq`、在席数
+- 組織snapshotの採用状態を示す**第2 status面**（`ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED`）
 - 状態の凡例と、上限付きのアクティビティログ
 
 ### 画面に出る状態
@@ -361,6 +364,106 @@ gap reason（`invalid_last_event_id` /
 `unknown_event_id` / `evicted`）はどちらも**閉じた語彙**です。既知のtokenだけが日本語labelへ
 変換され、未知の文字列はbannerへ出しません（wireの自由記述をそのまま表示しません）。
 
+### 組織snapshotと区画レイアウト
+
+固定rosterと部署構成は **event streamからは導けない事実** なので、event経路には載せません。
+LIVEは `QUEST_ORG_SNAPSHOT_PATH` の**検証済みsnapshot**（`company/org.snapshot.json`）を
+**起動時に1回だけ**読み、DEMOは組み込みfixture（`src/demo/orgFixture.ts`）を使います
+（DEMOは外部I/Oなし）。読み取りは `src/collector/orgLoader.ts` の1箇所だけで、
+event内容からpathを組み立てることはありません。責務境界の設計記録は
+[`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) にあります。
+
+#### 用語（机・席・actor・session）
+
+この4語は別物で、混同すると数え方が狂います。
+
+| 語 | 意味 | 誰が決めるか |
+|----|------|--------------|
+| **机（desk）** | 画面に描かれる**枠**。誰も座っていない枠もある | 画面（projection / layout） |
+| **席（seat）** | rosterが定める**位置**。`roster_seat` は区画内で固定され、同じ照合keyを持つ複数actorを1席に集約することがある | 組織snapshot |
+| **actor** | streamが観測したruntime entity。identityは `actor_key` = `(session_id, agent_id)` | event stream |
+| **session** | Claude Code session。**席には属しません**（固定rosterは特定sessionのものではないため） | event stream |
+
+**在席数は actorの数** です。机の数でも席の数でもありません。空席（`不在`）は0人と数え、
+1席に3 actorが集約されていれば3人と数えます。HUDの `在席` とcanvas下部の `在席 N` は
+どちらもこの同じ数で、人間player（`QUEST_PLAYER_NAME`）はどちらにも入りません。
+
+#### 第2 status面（`ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED`）
+
+組織snapshotの採用状態は、status bannerとは**別のDOM要素**（`#org-status`）に出ます。
+bannerは常にちょうど1 codeで、その1 codeは **streamについての事実**です。
+「組織なし」をbannerへ畳み込むと、縮退したofficeが壊れたstreamを隠せてしまうため分けています。
+
+| code | tone | 意味 |
+|------|------|------|
+| `ORG_ACCEPTED` | ok | 組織snapshotを採用。席は組織定義の順で固定 |
+| `ORG_ABSENT` | info | 未設定のため、組織なしの表示へ縮退 |
+| `ORG_REJECTED` | warn | 検証で拒否したため、組織なしの表示へ縮退 |
+
+- **常にちょうど1 code**が出ており、空の状態はありません。無言の縮退は起こりません。
+- `ORG_REJECTED` のときだけ内訳を `field / rule` の形で添えます。`field` は
+  `roles[3].name` のような**添字までのpath**、`rule` は閉じた語彙
+  （`not_object` / `unsupported_schema` / `missing_key` / `type_error` / `invalid_format` /
+  `field_too_long` / `control_chars` / `unsafe_content` / `duplicate_id` /
+  `unknown_reference` / `limit_exceeded`）です。社員名・部署名・値・path・file内容は出しません。
+- この面は **live regionではありません**。live regionはstatus bannerの1つだけのままです
+  （組織の変化はsnapshotあたり高々1回で、読み上げを割り込ませる緊急性がないため）。
+- 組織snapshotの不在・拒否で **ingestはhaltしません**。組織の有無はstreamの健全性と無関係です。
+
+#### 縮退（組織なしの表示へ戻る）
+
+`ORG_ACCEPTED` 以外では、社員一覧は**組織導入前とまったく同じ**ungroupedな動的一覧に戻ります
+（`selectOffice` は `grouped: false` を返し、`selectDesks` の出力をそのまま使います）。
+半分だけ組み立てられた区画表示は作りません。1件でも不正な行があればroster全体を不採用にします
+（部分rosterは「誰がいないのか」を誤って伝えるため）。
+縮退中もbanner・接続状態・fail-closed表示・アクティビティログは何ひとつ隠れません。
+
+#### 区画（部署 / 社長室 / 未所属 / 共用施設）
+
+採用中の区画の並びは **snapshotの宣言順だけ**で決まります（`display_order`、同値なら `id` 順）。
+hash・時刻・乱数・actor数は座標に混ざりません。
+
+| 区画 | 由来 | 席 |
+|------|------|----|
+| **社長室** | organisation定義には存在せず、`state.player` 由来。playerがいるときだけ現れる | 持たない（playerが立つ） |
+| **部署** | `departments[]` を `display_order` 順 | 持つ |
+| **未所属** | 画面が作る器。`department_id: null` のroster社員と、rosterが知らないactorの両方が入る | 持つ |
+| **共用施設** | `facilities[]` を `display_order` 順 | 持たない（部屋であって人ではない） |
+
+- **席座標は `(区画の宣言順, 区画内のroster順)` の2段だけ**で決まります。actorの増減・到着順・
+  viewport幅は席を動かしません。区画表示の列数は**rosterだけ**から決まります
+  （roster席が最も多い区画のroster席数を1〜6にclamp。rosterが知らないactorは列数に影響しません）。
+  viewportが決めるのは1 cellのpixel数だけです。
+- **空席**: 対応actorのいないroster社員は席だけを描き、状態は `□ 不在（VACANT）` です。
+  `actor_key` を持たないので選択できません（buttonは `disabled`）。名前はrosterのlabelだけで、
+  席番号は `roster_seat`、roleは `未解決`、raw status・last tool・sessionは `—` です（捏造しません）。
+  `不在` は **actorの状態語彙の外**（`ACTOR_VISUAL_STATES` にも凡例にも入らない）なので、
+  凡例の件数にも在席数にも入りません。
+- **roster外actor**: rosterが知らないactor（照合keyを持たないactorを含む）は **未所属** に置き、
+  捨てません。eventが正本なので、消すとstreamの事実と食い違います。
+- **集約**: 照合keyは `runtime_agent_type` **だけ**です（bare `agent_id` でも `session_id` でもありません）。
+  同じkeyのactorが複数sessionで同時に動いていても席は1つのままで、その席が表示する状態は
+  **最も注意を要する状態**（error → 承認待ち → 計画中 → 作業中 → 完了 → 待機、同順位はoffice順）です。
+  古い完了runが新しい失敗runを隠さないための規則です。集約された席は在席数に**人数分**寄与します。
+- 未所属区画は、中身が空のときだけDOMから隠れます（「誰もいない」ことがnewsではない唯一の区画のため）。
+
+#### canvasが描き切れないとき
+
+canvasは装飾層なので上限があります（区画 `MAX_ZONES = 32`、席の行 `MAX_ROWS = 16`）。
+行の予算は**区画の宣言順**に消費されるため、どれが溢れるかは組織が決め、到着順は関与しません。
+予算を使い切った区画も**帯と名前は描かれます**（部署は机が描けなくても存在するため）。
+
+上限に当たった分は黙って落とさず、canvas下部に整数と閉じた語彙だけで明示します:
+
+```
+表示 12 席 / 全 20 席  ·  区画 32 / 35  ·  未描画に ✖ ERROR あり  ·  残り 8 席は下の一覧に表示
+```
+
+- 描けなかった区画の中の席も「隠れた席」として総数と状態報告に含めます。描けないことは不在ではありません。
+- 席を落とした区画は、その席の状態色で枠が縁取られます。件数だけを出して穏やかに見せることはしません。
+- **DOMが正本、canvasは `aria-hidden` の装飾層**という関係は組織導入後も不変です。
+  区画名・所属・空席・集約された同僚は、canvasに描けたかどうかに関係なく必ずDOM側の一覧に出ます。
+
 ### Canvas描画（`World → draw(World)`）
 
 DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオフィスとしても描画します。
@@ -376,8 +479,11 @@ DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオ�
   同じactorは常に同じ姿で、乱数もclockも使いません。
 - **状態表現**: 5状態それぞれに**形の違うpixel marker**（`▶`＝三角 / `‼`＝感嘆符 / `✖`＝×印 /
   `■`＝四角 / `⋯`＝点列）を頭上に描き、記号と状態codeをtextでも併記します。色だけには依存しません。
-- **responsive / DPR**: viewport幅から列数（最大6）とscale（0.25刻み）を決め、部屋がcanvasに
-  必ず収まるようにします。bufferは `devicePixelRatio`（1〜4にclamp）倍で確保します。
+- **responsive / DPR**: 組織なしの表示ではviewport幅から列数（最大6）とscale（0.25刻み）を決め、
+  部屋がcanvasに必ず収まるようにします。**区画表示のときは列数をrosterだけから決め**
+  （viewport幅は列数に影響しません）、部屋の高さはviewportの2倍まで許してページをscrollさせます
+  （6部署＋社長室＋未所属＋共用施設を1画面へ押し込むとscaleが潰れて読めなくなるためです）。
+  bufferは `devicePixelRatio`（1〜4にclamp）倍で確保します。
   CSSは `width:100%; height:auto` だけで、scriptはinline styleを書きません。
 - **backing storeの上限**: collectorは `max_actors`（既定4096）まで受け付けるので、席数がそのまま
   canvas高さになるとbrowserが確保できないbufferになります（6列 × 683行 = 3840×125904 device px、
@@ -385,7 +491,9 @@ DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオ�
 
   | 定数 | 値 | 意味 |
   |------|----|------|
-  | `MAX_ROWS` | `16` | 描画する席の行数上限（最大6列なので96席） |
+  | `MAX_ROWS` | `16` | 描画する席の行数上限（最大6列なので96席）。区画表示では宣言順に消費する行の予算 |
+  | `MAX_ZONES` | `32` | 描画する区画数の上限（6部署＋7共用施設＋社長室＋未所属＝15区画を余裕を持って上回る値） |
+  | `GROUPED_HEIGHT_RATIO` | `2` | 区画表示のときに部屋がviewport高さの何倍まで伸びてよいか |
   | `MAX_DEVICE_SIDE` | `8192` | backing store 1辺の上限（device px） |
   | `MAX_DEVICE_PIXELS` | `16777216` | backing store 総面積の上限（device px） |
 
@@ -393,10 +501,13 @@ DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオ�
   `min(devicePixelRatio, 辺の上限, sqrt(面積の上限 / CSS面積))` へ落とします。上限に当たらない通常の
   officeでは要求DPRがそのまま使われるので、見た目は変わりません。4096席・DPR 4・960×560では
   3840×3240（約1244万pixel ≒ 49.8MB）に収まります。
-- **描き切れない席**: 上限を超えた分は黙って落とさず、canvas下部に固定文言＋整数だけで
-  `表示 N 席 / 全 M 席 · 残り K 席は下の一覧に表示` と明示します（`world.overflow` は
-  `drawn + hidden === total` を常に満たします）。DOMの社員一覧・凡例・logは従来通り**全actor**を
-  表示し、そちらがアクセシビリティ正本です。canvasが描くのは先頭からの連続した席で、
+- **描き切れない席・区画**: 上限を超えた分は黙って落とさず、canvas下部に固定文言＋整数＋
+  閉じた語彙だけで `表示 N 席 / 全 M 席 · 区画 D / T · 未描画に ✖ ERROR あり · 残り K 席は下の一覧に表示`
+  と明示します（`world.overflow` は `drawn + hidden === total` を常に満たします）。区画の行と
+  「未描画に含まれる最も注意を要する状態」は、該当するときだけ足されます。件数だけを出して
+  隠れた失敗を穏やかに見せないためです。描けなかった区画の中の席も総数と状態報告に含めます。
+  DOMの社員一覧・凡例・logは従来通り**全actor**（区画表示では全roster席も）を表示し、
+  そちらがアクセシビリティ正本です。canvasが描くのは区画の宣言順に先頭からの連続した席で、
   並べ替えも間引きも代替actorの生成もしません。
 - **motion**: canvasは**完全に静的**です。timerもanimation frameも使わず、state変化とresize時にだけ
   再描画するので、`prefers-reduced-motion` で止めるものがありません。
@@ -421,7 +532,7 @@ canvasが上限で描き切れない席があっても、DOMの一覧は**常に
 | 項目 | 実装 |
 |------|------|
 | キーボード操作 | 操作はすべてnativeの `<button>` / `<a>`。LIVE/DEMO切替・再接続・skip link・**AI社員の選択**はTabとEnter/Spaceだけで完結します。独自key handlerもcustom widgetもありません |
-| 社員の選択 | 社員カードの見出しがnativeの `<button>`（`.desk__select`）です。Tabで全社員に届き、Enter/Spaceで選択・再度押すと解除します。選択状態は `aria-pressed` と `data-selected` で公開し、色だけには依存しません。listenerは一覧に1つのdelegationで、席数が増えても増えません |
+| 社員の選択 | 社員カードの見出しがnativeの `<button>`（`.desk__select`）です。Tabで全社員に届き、Enter/Spaceで選択・再度押すと解除します。選択状態は `aria-pressed` と `data-selected` で公開し、色だけには依存しません。listenerは一覧に1つのdelegationで、席数が増えても増えません。**空席（`不在`）のbuttonは `disabled`** です（選択できる `actor_key` が無いため） |
 | 操作の正本 | 選択はDOM側だけで完結します。canvasにはlistenerを付けず、pointer座標から席を引く処理（hit test）も持ちません。選択中のactorは `actor_key`（`ClientState.selected_actor_key`）で保持し、席番号では保持しません |
 | tab順 | `tabindex` は `0` のみ。正の値も `-1` も使わず、scriptがfocusを奪うこともありません |
 | scroll領域 | 独自scrollbarを持つのはアクティビティログだけで、その容器が `tabindex="0"` + `aria-labelledby` の名前付きfocus stopです（keyboardだけでscrollできます） |
@@ -589,18 +700,23 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
 - **「次に何が起きるか」は予測しません。** eventに明示があるときだけ表示し、無ければ
   `未報告` です。DEMOのミッションでは各beatの `summary` が次の段階を読める文になっていますが、
   それは台本に書かれた事実であって、UIが導出した予測ではありません。
-- **組織snapshotを採用したときだけ、社員一覧が部署ごとにgroup化されます。**
+- **組織snapshotを採用したときだけ、officeが区画に分かれます。**
+  部署・社長室・未所属・共用施設の区画矩形と固定席座標は実装済みで、DOMの社員一覧も
+  同じ区画でgroup化されます（「組織snapshotと区画レイアウト」参照）。
   照合keyは `runtime_agent_type` だけで、対応actorのいないroster社員は席だけを描いて
   状態は出さず（`不在`）、roster外actorは `未所属` に置いて捨てません。
-  組織snapshotが未設定・拒否のときは現行の単一一覧へ縮退し、**縮退した事実を
+  組織snapshotが未設定・拒否のときは組織導入前と同じ単一一覧へ縮退し、**縮退した事実を
   bannerとは別の第2 status面（`ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED`）に必ず表示します。**
-  拒否の内訳は field名 + rule名のみで、社員名・部署名・pathは出しません。
+  拒否の内訳は field名 + rule名のみで、社員名・部署名・値・pathは出しません。
   LIVEは `QUEST_ORG_SNAPSHOT_PATH`、DEMOは組み込みfixtureを使います（DEMOは外部I/Oなし）。
-- **部署room矩形・固定席座標・社長室・共用施設のfloor layoutはまだありません。**
-  canvasは現行どおりactorのみを描く装飾層で、区画名はDOM側にだけ出ます。
-  在席数（`stat-desks`）もactorのみを数え、`不在` の席は含めません。
-  残りの責務境界・停止条件・未決事項は
-  [`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) に記録しています（§5 PR-4以降）。
+- **在席数（`stat-desks`）はactorの数です。**机の数でも席の数でもないので、`不在` の席は
+  0人と数え、1席に集約された複数actorは人数分数えます。人間playerはどちらにも入りません。
+  責務境界・停止条件・確認結果は
+  [`docs/org-snapshot-design.md`](docs/org-snapshot-design.md) に記録しています。
+- **組織snapshotは起動時に1回だけ読む read-only 入力です。** runtimeで差し替えるendpointは
+  ありません（変更するにはprocess再起動）。組織側の上限（既定: 部署64 / 役職512 / 共用施設64 /
+  文書1MiB）に当たった場合はsilent truncateではなく組織snapshot全体を拒否し、
+  **ingestはhaltしません**（組織の有無はstreamの健全性と無関係です）。
 - **Run / Goal / Approval / Evidence という運用単位はこのrepoにありません。** 本repoが描くのは
   event streamから畳み込んだactor状態までで、goal・run state machine・承認・risk分類・
   retry予算・stall検出・永続run履歴はいずれも実装していません。
@@ -612,9 +728,11 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
   （設計記録のみ・実装なし）。この計画でもQuestは **read-only / GETのみ / loopback限定** のままです。
 - **人間playerはserverの `state.player` entityからのみ描画します。** `QUEST_PLAYER_NAME`
   で決まる1人だけで、`snapshot` frameが名前を運んできて初めて表示されます（それまでは
-  非表示で、人物を捏造しません）。AI社員とは別のactorとして扱い、社員一覧にも在席数にも
+  非表示で、人物を捏造しません）。AI社員（actor）とは**別の種類のentity**として扱い、
+  席番号も `actor_key` も session も持たず、社員一覧にも在席数にも
   入らず、選択もできません（選択できる状態を持たないため）。canvasでは机の下の専用stripに
-  立ち姿で描き、AI社員には決して割り当てられない服の色とYOU badgeで区別します。
+  立ち姿で描き（区画表示のときは**社長室**の中に立ちます）、AI社員には決して割り当てられない
+  服の色とYOU badgeで区別します。playerの有無で席の座標は動きません。
   `reduce` はplayerを書き換えないので、どのClaude eventもこの人物を動かせません
   （`test/ui-view.test.ts` と `test/ui-dom.test.ts` で保証）。
   歩行・行動・指示送信はPhase 3の範囲で、ここには含みません。
@@ -635,14 +753,17 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
   `npm run demo:static` にはこの経路自体がありません。
 - Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界・backing store上限（0/1/40/95/96/97/
   4096席 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
-  までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。
+  までです（区画矩形の非重複・席座標の不動・区画の溢れ報告は `test/ui-zone-layout.test.ts`）。
+  実ブラウザでのpixel比較やfont metricsの検証はしていません。
 - canvasのlabel幅は `measureText` ではなく等幅fontを前提とした概算で決めています
   （全角は1em、半角は0.62em）。実際のfontが大きく異なる場合、長い名前の省略位置が
   1〜2文字ずれることがあります。切れて読めなくなるのではなく、省略記号が付きます。
-- canvasの席は最大6列・最大16行（96席）です。それを超える席はcanvasには描かれず、件数だけを
-  canvas下部に明示します。全actorはDOMの社員一覧に従来通り表示されます。
+- canvasの席は最大6列・最大16行（96席）、区画は最大32です。それを超える席・区画はcanvasには
+  描かれず、件数と「未描画に含まれる最も注意を要する状態」をcanvas下部に明示します。
+  全actorと全roster席はDOMの社員一覧に従来通り表示されます。
 - 行数が増えて高さがviewportに収まらない場合はcanvas自体が縦に伸び、ページがscrollします
-  （96席までは内容が切れることはありません）。
+  （96席までは内容が切れることはありません）。区画表示ではviewport高さの2倍までを上限に、
+  最初からscrollする前提で描きます。
 - 非常に大きなviewport（例: 8192×8192）ではbacking storeの面積上限に当たり、実効device scaleが
   1未満まで下がってcanvasがやや甘くなることがあります。表示内容は欠けません。
 - canvasの説明labelは名前・状態記号・状態codeだけです。role・last tool・session・最終event時刻は
