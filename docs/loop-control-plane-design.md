@@ -796,14 +796,14 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 | **LCP-2** | §13.5 の 1〜3・8 を deterministic gate にする**設計**（docs） | LCP-1 | **A**（設計のみ） |
 | **DOC-1** | `docs/automation-protocol.md` の新規作成（§1.3）。内容は owner が確定 | owner の内容決定 | **A** |
 | **WF-1** | §1.3 の workflow 側参照の整合、LCP-2 の gate の**実装**、および §17.2 manifest を読む provider 中立 scan の CI 実装 | LCP-1（manifest）／LCP-2 / DOC-1 | **C**（workflow 変更。owner 承認・owner 実施） |
-| **ORG-PR-2** | 既存 §5 PR-2。org snapshot 読み取りと検証 | ORG-PR-1 | **B** |
+| **ORG-PR-2** | 既存 §5 PR-2。org snapshot 読み取りと検証 | ORG-PR-1 | **B** ✅ **完了**（PR #27・上限修正 #33） |
 | **STORE-1** | **最小の権威 run source**。永続 Run / Event Store と単一 writer の deterministic controller（§4.2）。**run state の供給元はここに一本化される** | LCP-1 / LCP-2 | **C**（永続化基盤の導入。owner 承認必須） |
 | **LCP-3** | Run Read Model を Quest が read-only で受ける。独立 namespace、GET のみ、既存 SSE surface に mutation を足さない。**供給元は STORE-1** | LCP-1 / ORG-PR-2（取り込みの型を共有）／**STORE-1**（供給元） | **B** |
 | **ORG-PR-3** | 既存 §5 PR-3。roster projection + 汎用 status 面での縮退表示 | **ORG-PR-2 のみ**（下記の訂正）| **B** ✅ **完了**（PR #35） |
 | **MC-1** | read-only Management Console（Goal / Run / State / Role / Risk / Approval / Evidence 中心） | **STORE-1** / LCP-3 | **B** |
 | **ORG-PR-4** | 既存 §5 PR-4。決定論的 layout と固定席座標 | ORG-PR-3 | **B** ✅ **完了**（PR #37） |
 | **OBS-1** | Eval / post-merge observer / recovery | STORE-1 | **C** |
-| **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** |
+| **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** ⏳ **実施中**（PR #40） |
 | **CTRL-1** | 認証済み介入操作（Control API + Policy/Approval Gate）。**起点は Management Console または明示的に分離された認証済み運用 client のみで、Quest は含みません**（§12.2） | STORE-1 / OBS-1 / MC-1 | **C**（安全基盤が揃うまで着手しない） |
 
 **訂正（ORG-PR-1 / ORG-PR-3 の依存）**: この表は当初 `ORG-PR-1` の表示面決定を `LCP-1` に、
