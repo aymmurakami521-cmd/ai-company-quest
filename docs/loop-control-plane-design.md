@@ -805,7 +805,7 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 | **MC-1** | read-only Management Console（Goal / Run / State / Role / Risk / Approval / Evidence 中心） | **STORE-1** / LCP-3 | **B** |
 | **ORG-PR-4** | 既存 §5 PR-4。決定論的 layout と固定席座標 | ORG-PR-3 | **B** ✅ **完了**（PR #37） |
 | **OBS-1** | Eval / post-merge observer / recovery | STORE-1 | **C** |
-| **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** ⏳ **実施中**（PR #40） |
+| **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** ✅ **完了**（PR #40） |
 | **CTRL-1** | 認証済み介入操作（Control API + Policy/Approval Gate）。**起点は Management Console または明示的に分離された認証済み運用 client のみで、Quest は含みません**（§12.2） | STORE-1 / OBS-1 / MC-1 | **C**（安全基盤が揃うまで着手しない） |
 
 **訂正（ORG-PR-1 / ORG-PR-3 の依存）**: この表は当初 `ORG-PR-1` の表示面決定を `LCP-1` に、

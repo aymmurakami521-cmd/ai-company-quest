@@ -68,8 +68,8 @@ Phase 2の未達条件2つについて、**実装せずに責務境界だけを�
 | 席は **collectorが解決したruntime actorの数だけ**存在する。`seat` は並べ替え後のindex+1で、actorが増減すれば番号は変わる | `src/ui/public/quest-view.js:612` `selectDesks` |
 | 部署・部屋・フロア・共用施設という区画の概念がない。canvasは**壁1枚と床1枚の単一room**で、`columns × rows` のgridに席を並べるだけ | `src/ui/public/quest-world.js:511` `buildWorld`、`MAX_COLUMNS=6`（:49）、`MAX_ROWS=16`（:73） |
 | 固定rosterが無い。誰がいるかはstreamに現れたactorだけで決まり、着任前・退席後の社員という状態を持たない | `src/domain/reducer.ts:230` `reduce`（`state.actors` はevent到着時に作られる） |
-| `buildWorld` はorganisation snapshotを入力に取らないことをdoc commentで明言している | `src/ui/public/quest-world.js:5-8` |
-| READMEの「既知の制限」が同じことを明記している | `README.md:437-439` |
+| `buildWorld` はorganisation snapshotを入力に取らないことをdoc commentで明言している | `src/ui/public/quest-world.js:5-8` — **この doc comment は PR #37 以降 事実と食い違ったまま残っています**（`buildWorld` は `zones` / `grouped` を受け取り、grouped のとき player は「机の下のstrip」ではなく社長室のbandに立ちます）。`src/` の訂正は PR-5 の安全境界外のため未着手。既知の残件として記録します |
+| READMEの「既知の制限」が同じことを明記している | `README.md` 「既知の制限」節（`7c9da9c` 時点で `README.md:437-439`。現在この記述は PR-5 で訂正済み） |
 
 ### 1.2 role は解決されるが、配属は解決されない
 
@@ -431,12 +431,12 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 - **対象外**: 操作、選択、pointer hit test（Phase 3の範囲）
 - **完了判定**: §3.1 検証方法 ①②、§3.2 検証方法 ①②③ が通る
 
-### PR-5: 縮退経路の最終整合とREADME更新（分類A: docs 中心）— **実施中**
+### PR-5: 縮退経路の最終整合とREADME更新（分類A: docs 中心）— ✅ **完了**（PR #40）
 
 縮退表示そのものはPR-3で入っているため、このPRは**文書と実態の突き合わせ**に縮小します。
 
 - **前提**: PR-4
-- **成果契約**: PR-3で入った縮退表示の語彙と挙動をREADMEへ記載し、「既知の制限」（`README.md:437-439`）と本文書を実態に合わせて更新する。canvas layout追加後（PR-4）も縮退経路が変わっていないことを確認する
+- **成果契約**: PR-3で入った縮退表示の語彙と挙動をREADMEへ記載し、README の「既知の制限」節と本文書を実態に合わせて更新する。canvas layout追加後（PR-4）も縮退経路が変わっていないことを確認する
 - **対象外**: 新しい表示状態の追加、新しい自由記述メッセージ（表示は閉じた語彙のまま）
 - **完了判定**: READMEに未実装と書かれたままの項目が残らず、本文書の未決事項（§4）に確認済みの項目が残らない
 
@@ -475,6 +475,12 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
   順位は `ACTOR_VISUAL_STATES` の並び（`error` → `awaiting_approval` → `planning` →
   `working` → `ended` → `idle`）で、同順位は既存の office 順で解決する。
   **終了した古い run が、失敗中の新しい run を覆い隠してはならない**
+- 順位を読む field は `visual` ではなく **`last_known_visual`**。凍結中（fail-closed /
+  切断 / 再接続中）は全 desk の `visual` が `unknown` で揃うため、`visual` で順位を付けると
+  全員が同順位になり、席は office 順の先頭＝古い actor に落ちる。その結果
+  「停止時点」の行が `✖ エラー` ではなく `■ 完了` を名乗る。接続中は両者が等しいので
+  挙動は変わらず、**読み手が自分で確認できなくなるまさにその瞬間**に規則が成立しなくなるのを防ぐ
+  （`test/ui-org.test.ts`「a frozen aggregated seat still reports the failure, not the finished run」）
 - 席は代表 actor の `display_name` を保持し、roster 名は `role_name` として**併記**する。
   片方を他方で上書きしない（canvas / 詳細pane と食い違うため）
 - 何 actor を代表しているかは常に表示する（カードの `actors` 行）

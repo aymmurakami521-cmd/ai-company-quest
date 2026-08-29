@@ -428,24 +428,28 @@ DOMの社員カードに加えて、同じstateを**Canvas 2D**のレトロオ�
   同じactorは常に同じ姿で、乱数もclockも使いません。
 - **状態表現**: 5状態それぞれに**形の違うpixel marker**（`▶`＝三角 / `‼`＝感嘆符 / `✖`＝×印 /
   `■`＝四角 / `⋯`＝点列）を頭上に描き、記号と状態codeをtextでも併記します。色だけには依存しません。
-- **responsive / DPR**: viewport幅から列数（最大6）とscale（0.25刻み）を決め、部屋がcanvasに
-  必ず収まるようにします。bufferは `devicePixelRatio`（1〜4にclamp）倍で確保します。
+- **responsive / DPR**: 列数（最大6）の決まり方は2通りです。組織snapshotが無い単一roomのときは
+  viewport幅から決めますが、**部屋に分かれているときは最も広い区画のroster数だけで決まり、
+  viewport幅にも actor数にも依存しません**（そうでないと resize や roster外actorの増減で
+  全部屋が組み直しになるため。`test/ui-zone-layout.test.ts` が固定しています）。
+  scale（0.25刻み）はどちらの場合もviewportから決め、部屋がcanvasに必ず収まるように
+  canvas側の大きさを合わせます。bufferは `devicePixelRatio`（1〜4にclamp）倍で確保します。
   CSSは `width:100%; height:auto` だけで、scriptはinline styleを書きません。
-- **backing storeの上限**: collectorは `max_actors`（既定4096）まで受け付けるので、席数がそのまま
+- **backing storeの上限**: collectorは `max_actors`（既定4096）まで受け付けるので、枠数がそのまま
   canvas高さになるとbrowserが確保できないbufferになります（6列 × 683行 = 3840×125904 device px、
   約4.83億pixel ≒ RGBA 1.9GB）。そこで描画側に決定論的な上限を置いています。
 
   | 定数 | 値 | 意味 |
   |------|----|------|
-  | `MAX_ROWS` | `16` | 描画する席の行数上限（最大6列なので96席） |
+  | `MAX_ROWS` | `16` | 描画する枠の行数上限（最大6列なので96枠。常に96枠描けるという意味ではありません → [既知の制限](#既知の制限)） |
   | `MAX_DEVICE_SIDE` | `8192` | backing store 1辺の上限（device px） |
   | `MAX_DEVICE_PIXELS` | `16777216` | backing store 総面積の上限（device px） |
 
   行数を先にcapしてからscaleを決め、最後に実効device scale（`world.canvas.dpr`）を
   `min(devicePixelRatio, 辺の上限, sqrt(面積の上限 / CSS面積))` へ落とします。上限に当たらない通常の
-  officeでは要求DPRがそのまま使われるので、見た目は変わりません。4096席・DPR 4・960×560では
+  officeでは要求DPRがそのまま使われるので、見た目は変わりません。4096枠・DPR 4・960×560では
   3840×3240（約1244万pixel ≒ 49.8MB）に収まります。
-- **描き切れない席**: 上限を超えた分は黙って落とさず、canvas下部に固定文言＋整数だけで
+- **描き切れない枠**: 上限を超えた分は黙って落とさず、canvas下部に固定文言＋整数だけで
   `表示 N 枠 / 全 M 枠 · 残り K 枠は下の一覧に表示` と明示します（`world.overflow` は
   `drawn + hidden === total` を常に満たします）。描けなかった部屋があるときは
   `区画 N / M` が、描けなかった枠の中に注意を要する状態があるときは
@@ -696,7 +700,7 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
   1 beatも進みません。この1語以外は受け付けず、HTTP surfaceは増えていません。
   `npm run demo:static` にはこの経路自体がありません。
 - Canvas描画のtestは、`World` の決定論・座標の収まり・DPR境界・backing store上限（0/1/40/95/96/97/
-  4096席 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
+  4096枠 × DPR 1〜4 × viewport 240〜8192）と、記録用の偽contextに対する `drawWorld` の呼び出し列
   までです。実ブラウザでのpixel比較やfont metricsの検証はしていません。
 - canvasのlabel幅は `measureText` ではなく等幅fontを前提とした概算で決めています
   （全角は1em、半角は0.62em）。実際のfontが大きく異なる場合、長い名前の省略位置が
@@ -746,7 +750,7 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
 - Mac hookの登録、cloud/web session、外部deployは対象外です。
 - **AI利用量・費用・予算・ROIはこのrepositoryに一切存在しません。** wireの19 key
   （`src/domain/wire.ts:39`）にも内部event model（`docs/event-contract.md`）にも
-  `QuestState`（`src/domain/reducer.ts:113`）にも、usage / cost / token / price に
+  `QuestState`（`src/domain/reducer.ts:131`）にも、usage / cost / token / price に
   相当するfieldはありません。集計も予算判定も停止判断も実装していません。
   これらを実装する前に決めるべき帰属軸・provider独立性・見積り/確定の区別・
   予算policyの境界・ROI用語は
