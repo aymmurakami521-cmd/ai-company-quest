@@ -556,6 +556,40 @@ test('the grouped height budget is a target the room may exceed, not a cap', () 
   assert.ok(built.canvas.device_width <= MAX_DEVICE_SIDE && built.canvas.device_height <= MAX_DEVICE_SIDE);
 });
 
+test('96 frames is a single-room ceiling, not a promise every office reaches', () => {
+  // `MAX_ROWS` is shared across zones and every seat-bearing zone takes at least
+  // one row, so a grouped office can overflow far below 6x16. Seventeen
+  // departments holding one desk each is seventeen desks in total, and the
+  // seventeenth still cannot be drawn.
+  const one = (key: string): OfficeDesk => ({
+    ...(selectOffice(client(['impl-1'])).desks as OfficeDesk[])[0]!,
+    actor_key: key,
+    role_id: key,
+    roster_seat: 1,
+    occupants: [key],
+    occupied: true,
+  });
+  const zones: OfficeZone[] = Array.from({ length: MAX_ROWS + 1 }, (_unused, z) => ({
+    id: `dept:z${z}`,
+    name: `部署${z}`,
+    kind: 'department' as const,
+    seats: true,
+    desks: [one(`a${z}`)],
+  }));
+  const built = buildWorld({
+    desks: zones.flatMap((zone) => zone.desks),
+    zones,
+    header: selectHeader(client(['impl-1'])),
+    viewport: VIEWPORT,
+  });
+
+  assert.equal(built.overflow.total, MAX_ROWS + 1, 'seventeen desks in total');
+  assert.ok(built.overflow.total < 96, 'far below the single-room ceiling');
+  assert.equal(built.overflow.hidden, 1, 'and one of them still cannot be drawn');
+  // Never silently: the notice says so.
+  assert.notEqual(built.overflow_label.text, '');
+});
+
 test('an ungrouped office is the single room it has always been', () => {
   const state = client(['impl-1', 'stranger-1']);
   const plain: ClientState = { ...state, org: { status: 'absent' } };
