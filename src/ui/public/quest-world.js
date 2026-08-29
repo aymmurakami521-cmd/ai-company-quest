@@ -97,17 +97,26 @@ export const ZONE_HEADER_UNITS = 18;
 export const MAX_ZONES = 32;
 
 /**
- * How much taller than its viewport a grouped office may be.
+ * The height a grouped office is *scaled to aim for*, as a multiple of the
+ * viewport. **Not a cap on how tall the room can get.**
  *
  * The ungrouped office is one room and is fitted into the viewport, height
  * included. A floor plan is not one room: fitting six departments, the 社長室,
  * 未所属 and the shared facilities into the same box collapses the scale until
  * the desks are unreadable - correct geometry that nobody can read, which fails
- * the point of drawing a floor plan at all.
+ * the point of drawing a floor plan at all. So a grouped office is allowed to
+ * run past the fold and be scrolled, and this is the target it is fitted to.
  *
- * So a grouped office is allowed to run past the fold and be scrolled, and this
- * is the bound on how far. It is not a licence to grow without limit: the
- * backing-store ceilings still apply on top of it.
+ * It is a target and not a bound because `snapScale` clamps at `MIN_SCALE`:
+ * once the office is large enough that meeting this budget would need a smaller
+ * scale than that, the scale stops shrinking and the room grows past the budget
+ * instead. That is the intended trade - past a certain size, legible and
+ * scrollable beats fitted and unreadable - and the reader scrolls further.
+ * A short viewport with many zones reaches it easily: 240px tall with 32 zones
+ * lands at `MIN_SCALE` and a room over four viewports tall.
+ *
+ * What *is* bounded whatever happens: the backing store, by the device-pixel
+ * ceilings above.
  */
 export const GROUPED_HEIGHT_RATIO = 2;
 

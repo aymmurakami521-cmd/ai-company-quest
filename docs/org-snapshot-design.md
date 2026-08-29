@@ -490,8 +490,12 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
   （どちらかに依存すると、roster外 actor の増減や resize で全 band が再flowする）
 - **viewport が変えるのは pixel の大きさだけ**で、論理配置（どの部屋の何行何列か）は
   変えない。room が高くなれば scale は縮むので pixel は動く — 動いてはいけないのは配置
-- grouped の room は viewport 高の2倍までを許容する（全部屋を1画面に押し込むと
-  scale が潰れて読めなくなるため）。backing store の上限は従来どおり効く
+- grouped の room は **viewport 高の2倍を scale の目標 budget** にする（全部屋を1画面に
+  押し込むと scale が潰れて読めなくなるため）。**これは上限ではない**: `snapScale` が
+  `MIN_SCALE` で止まるので、それ以上縮めないと収まらない大きさになると scale の縮小が
+  止まり、room は budget を超えて伸びる。読めない状態で収めるより、読める状態で
+  スクロールさせる方を採るという判断。実測で 240px 高・32区画では `MIN_SCALE` に達し、
+  room は viewport の4倍を超える。**どんな場合でも効く上限は backing store 側**
 
 ### 描き切れないものの扱い
 
