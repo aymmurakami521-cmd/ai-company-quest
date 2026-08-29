@@ -5,7 +5,14 @@
  * contract is declared here and exercised by `test/ui-world.test.ts`.
  */
 
-import type { ActorDisplayState, Desk, Header, PlayerProjection } from './quest-view.js';
+import type {
+  ActorDisplayState,
+  Desk,
+  Header,
+  OfficeDesk,
+  OfficeZone,
+  PlayerProjection,
+} from './quest-view.js';
 
 export type Rect = { x: number; y: number; width: number; height: number };
 
@@ -92,8 +99,43 @@ export type WorldHud = {
   player_present: boolean;
 };
 
+/**
+ * The worst thing the canvas left out, in the closed vocabulary it may print.
+ *
+ * The code and symbol travel with the state because the reader has to be told
+ * *what* was hidden, not only how much.
+ */
+export type WorstHidden = { state: string; code: string; symbol: string };
+
 /** How much of the office the canvas drew. `drawn + hidden === total`, always. */
-export type WorldOverflow = { total: number; drawn: number; hidden: number };
+export type WorldOverflow = {
+  total: number;
+  drawn: number;
+  hidden: number;
+  /**
+   * The worst state among the seats that were left out, or null when none were.
+   *
+   * A count on its own lets a hidden failure sit behind a tidy number, which is
+   * the one thing this screen may not do.
+   */
+  hidden_state: WorstHidden | null;
+  /** Rooms, counted the same way. All zero when the office is ungrouped. */
+  zones: { total: number; drawn: number; hidden: number };
+};
+
+/** One room on the floor plan. */
+export type WorldZone = {
+  id: string;
+  kind: string;
+  rect: Rect;
+  name_label: WorldLabel;
+  /** False for rooms nobody sits in: 社長室 and 共用施設. */
+  seats: boolean;
+  drawn: number;
+  hidden: number;
+  /** Worst state this room could not draw, or null. */
+  hidden_state: WorstHidden | null;
+};
 
 export type World = {
   viewport: Viewport;
@@ -117,6 +159,10 @@ export type World = {
   floor: Rect & { tile: number; cols: number; rows: number };
   props: WorldProp[];
   actors: WorldActor[];
+  /** The rooms, in draw order. Empty whenever the office is ungrouped. */
+  zones: WorldZone[];
+  /** True when an accepted organisation grouped the office into rooms. */
+  grouped: boolean;
   /** Null when no snapshot has named a player yet. */
   player: WorldPlayer | null;
   notice: WorldLabel;
@@ -139,7 +185,15 @@ export type CanvasMeasurement = {
 };
 
 export type WorldInput = {
-  desks?: readonly Desk[];
+  desks?: readonly Desk[] | readonly OfficeDesk[];
+  /**
+   * The rooms to lay the desks out in.
+   *
+   * Empty or absent lays out the single ungrouped room, which is what the
+   * office was before an organisation could group it - the same code path, with
+   * one band and no name strip.
+   */
+  zones?: readonly OfficeZone[];
   player?: PlayerProjection | null;
   header?: Header | null;
   viewport?: Partial<Viewport> | null;
@@ -160,6 +214,11 @@ export declare const CAPTION_STRIP: number;
 export declare const TARGET_CELL_PX: number;
 export declare const MAX_DPR: number;
 export declare const MAX_ROWS: number;
+export declare const MAX_ZONES: number;
+export declare const ZONE_HEADER_UNITS: number;
+export declare const GROUPED_HEIGHT_RATIO: number;
+/** A copy of `ACTOR_VISUAL_STATES`; `test/ui-zone-layout.test.ts` pins them equal. */
+export declare const ATTENTION_ORDER: readonly string[];
 export declare const MAX_DEVICE_SIDE: number;
 export declare const MAX_DEVICE_PIXELS: number;
 export declare const MIN_DEVICE_SCALE: number;

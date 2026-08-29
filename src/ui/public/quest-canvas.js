@@ -41,6 +41,9 @@ export const PALETTE = Object.freeze({
   paneGlass: '#7fc8ff',
   paneFrame: '#151d33',
   poster: '#f7d51d',
+  zoneEdge: '#33271f',
+  zoneHeader: '#3b2d24',
+  zoneEdgeQuiet: '#2b2119',
   posterInk: '#1b2440',
   clockFace: '#e8ecf6',
   badge: '#f7d51d',
@@ -332,6 +335,37 @@ function drawPlayer(ctx, player) {
   label(ctx, PALETTE.text, player.name_label.text, player.name_label.x, player.name_label.y, player.name_label.size, 'center');
 }
 
+/**
+ * One room on the floor plan: its outline and its name.
+ *
+ * Drawn under the desks, so a seat is never obscured by the room it is in, and
+ * the name sits in the band's own header strip rather than between bands - two
+ * rooms cannot overlap by the height of a label.
+ *
+ * A zone that had to leave a seat out is outlined in that seat's state colour.
+ * A count alone would let a room holding a hidden failure look like a room with
+ * nothing wrong in it.
+ */
+function drawZone(ctx, zone) {
+  const { rect } = zone;
+  const accent = zone.hidden_state === null ? PALETTE.zoneEdge : stateColor(zone.hidden_state.state);
+  panel(ctx, PALETTE.zoneHeader, accent, {
+    x: rect.x,
+    y: rect.y,
+    width: rect.width,
+    height: rect.height,
+  });
+  label(
+    ctx,
+    PALETTE.text,
+    zone.name_label.text,
+    zone.name_label.x,
+    zone.name_label.y,
+    zone.name_label.size,
+    'left',
+  );
+}
+
 function drawMarker(ctx, actor) {
   const bitmap = markerBitmap(actor.state);
   const pixel = Math.max(1, Math.round(actor.marker.width / 5));
@@ -386,6 +420,9 @@ export function drawWorld(ctx, world) {
   drawWall(ctx, world.wall);
   for (const prop of world.props) drawProp(ctx, prop);
   drawFloor(ctx, world.floor);
+  // Rooms first: they are the ground the desks stand on, and drawing them after
+  // would paint over the colleagues they contain.
+  for (const zone of world.zones ?? []) drawZone(ctx, zone);
 
   for (const actor of world.actors) drawActor(ctx, actor);
   // The player last, so an office at its row limit cannot paint over them.
@@ -400,7 +437,10 @@ export function drawWorld(ctx, world) {
   // paints nothing for the empty string, so an office that fits gets no line.
   label(
     ctx,
-    PALETTE.text,
+    // Painted in the state it is reporting when it has one to report, so the
+    // ungrouped office - which has no room outline to carry it - still shows a
+    // hidden failure as something other than a tidy number.
+    world.overflow.hidden_state === null ? PALETTE.text : stateColor(world.overflow.hidden_state.state),
     world.overflow_label.text,
     world.overflow_label.x,
     world.overflow_label.y,

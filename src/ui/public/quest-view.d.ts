@@ -68,9 +68,19 @@ export type ViewOrgRole = {
   runtime_agent_type: string | null;
 };
 
+/**
+ * A shared facility the organisation declares: 会議室, Skill工房 and the like.
+ *
+ * Not the runtime `activity.facility` the hook wire carries and `hookAdapter.ts`
+ * drops. That one is where an actor currently is; this one is a room on the
+ * floor plan. Different concepts, kept apart on purpose.
+ */
+export type ViewOrgFacility = { id: string; name: string; display_order: number };
+
 export type ViewOrgSnapshot = {
   departments: ViewOrgDepartment[];
   roles: ViewOrgRole[];
+  facilities: ViewOrgFacility[];
 };
 
 /**
@@ -371,9 +381,18 @@ export type OfficeDesk = Omit<
 };
 
 export type OfficeZone = {
+  /**
+   * Namespaced by kind: `dept:`, `facility:`, or a `zone:` container.
+   *
+   * Departments and facilities are drawn from one identifier space upstream, so
+   * an unprefixed id lets a facility and a department share a zone key - which
+   * hands one role bucket to two zones and aliases the rendered element.
+   */
   id: string;
   name: string;
-  kind: 'department' | 'unassigned';
+  kind: 'executive' | 'department' | 'unassigned' | 'facility';
+  /** False for rooms nobody sits in: 社長室 and 共用施設. They hold no desk. */
+  seats: boolean;
   desks: OfficeDesk[];
 };
 
@@ -403,9 +422,17 @@ export type SecondaryStatus = {
 };
 
 export declare const VACANT_SEAT_VISUAL: VacantVisual;
+export declare const DEPARTMENT_ZONE_PREFIX: string;
+export declare const FACILITY_ZONE_PREFIX: string;
 export declare const UNASSIGNED_ZONE_ID: string;
 export declare const UNASSIGNED_ZONE_NAME: string;
-export declare const ORG_LIMITS: { readonly departments: number; readonly roles: number };
+export declare const EXECUTIVE_ZONE_ID: string;
+export declare const EXECUTIVE_ZONE_NAME: string;
+export declare const ORG_LIMITS: {
+  readonly departments: number;
+  readonly roles: number;
+  readonly facilities: number;
+};
 export declare const ORG_REJECT_RULES: readonly OrgRejectRule[];
 export declare const SECONDARY_STATUS_CODES: readonly SecondaryStatusCode[];
 

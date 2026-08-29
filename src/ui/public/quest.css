@@ -402,6 +402,21 @@ h3 {
   border-left-color: var(--state-vacant);
 }
 
+/* 社長室 and 共用施設: rooms, not seating. They carry a name and no desk, so the
+   empty list below the heading is collapsed rather than left as a gap. */
+.zone[data-kind='executive'] .zone__name {
+  border-left-color: var(--player-accent);
+}
+
+.zone[data-kind='facility'] .zone__name {
+  border-left-color: var(--state-idle);
+  color: var(--text-dim);
+}
+
+.zone[data-seats='false'] .zone__desks {
+  display: none;
+}
+
 .zone__desks {
   list-style: none;
   margin: 0;

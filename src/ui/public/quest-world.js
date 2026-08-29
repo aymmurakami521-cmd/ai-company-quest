@@ -72,6 +72,93 @@ export const MAX_DPR = 4;
  */
 export const MAX_ROWS = 16;
 
+/**
+ * Height of the strip that carries a zone's name, in layout units.
+ *
+ * Part of the zone's own band rather than a gap between bands, so a zone
+ * rectangle always encloses its own label and two zones can never overlap by
+ * the width of a heading.
+ */
+export const ZONE_HEADER_UNITS = 18;
+
+/**
+ * Most zones the canvas ever draws.
+ *
+ * The collector accepts 64 departments and 64 facilities, and a room with 129
+ * name strips is not a floor plan, so there is a bound. It has to clear the
+ * organisation this screen is actually built for, though: six departments,
+ * seven shared facilities, the 社長室 and 未所属 is fifteen rooms, and a bound
+ * that hid three of them would drop rooms from the documented configuration.
+ *
+ * Zones past the bound are still *counted*, and the seats inside them are still
+ * part of the office totals and of the worst-hidden-state report - being
+ * undrawable is not the same as being absent.
+ */
+export const MAX_ZONES = 32;
+
+/**
+ * How much taller than its viewport a grouped office may be.
+ *
+ * The ungrouped office is one room and is fitted into the viewport, height
+ * included. A floor plan is not one room: fitting six departments, the 社長室,
+ * 未所属 and the shared facilities into the same box collapses the scale until
+ * the desks are unreadable - correct geometry that nobody can read, which fails
+ * the point of drawing a floor plan at all.
+ *
+ * So a grouped office is allowed to run past the fold and be scrolled, and this
+ * is the bound on how far. It is not a licence to grow without limit: the
+ * backing-store ceilings still apply on top of it.
+ */
+export const GROUPED_HEIGHT_RATIO = 2;
+
+/**
+ * How loudly a state asks to be looked at, worst first.
+ *
+ * A copy of `ACTOR_VISUAL_STATES` from `quest-view.js`, which this module
+ * deliberately does not import: `buildWorld` takes projections and a viewport
+ * and nothing else. `test/ui-world.test.ts` asserts the two lists are identical
+ * so the copy cannot drift.
+ *
+ * It exists because seats the canvas could not draw must not be reported as a
+ * bare number. A zone that has left a failing seat out looks calm, and a calm
+ * room with an error hidden behind it is the one thing this screen may not do.
+ */
+export const ATTENTION_ORDER = Object.freeze([
+  'error',
+  'awaiting_approval',
+  'planning',
+  'working',
+  'ended',
+  'idle',
+]);
+
+function attentionRank(state) {
+  const index = ATTENTION_ORDER.indexOf(state);
+  return index === -1 ? ATTENTION_ORDER.length : index;
+}
+
+/**
+ * The desk among these that most asks to be looked at, reduced to the closed
+ * vocabulary the screen may print: state, code and symbol. Null when there are
+ * none.
+ *
+ * The code and symbol travel with the state because the *reader* has to be told
+ * what was hidden, not just how much. A number alone is the calm-looking report
+ * of a failure this screen may not make.
+ */
+function worstState(desks) {
+  let worst = null;
+  let rank = ATTENTION_ORDER.length + 1;
+  for (const desk of desks) {
+    const candidate = attentionRank(desk.state);
+    if (candidate < rank) {
+      rank = candidate;
+      worst = { state: desk.state, code: desk.code, symbol: desk.symbol };
+    }
+  }
+  return worst;
+}
+
 /** Hard ceiling on either side of the backing store, in device pixels. */
 export const MAX_DEVICE_SIDE = 8192;
 
@@ -379,6 +466,26 @@ function place(originX, originY, scale, spec) {
  * An office with nobody in it still gets a room-shaped room rather than a
  * one-desk-wide corridor.
  */
+/**
+ * A zone, rebuilt from the projection key by key.
+ *
+ * `seats: false` is a room nobody sits in - 社長室 and 共用施設 - so it gets a
+ * band and a name and never a cell. A zone with no desks is still a zone: a
+ * department the stream has said nothing about exists, and drawing the empty
+ * room is how the screen says so.
+ */
+function normalizeZone(zone, index) {
+  const source = zone === null || typeof zone !== 'object' ? {} : zone;
+  const rawDesks = Array.isArray(source.desks) ? source.desks : [];
+  return {
+    id: typeof source.id === 'string' ? source.id : `zone-${index + 1}`,
+    name: typeof source.name === 'string' ? source.name : '',
+    kind: typeof source.kind === 'string' ? source.kind : 'department',
+    seats: source.seats !== false,
+    desks: rawDesks.map(normalizeDesk),
+  };
+}
+
 function columnsFor(deskCount, viewportWidth) {
   const usable = viewportWidth - 2 * OUTER_MARGIN;
   const byWidth = Math.floor(usable / TARGET_CELL_PX);
@@ -429,7 +536,7 @@ function buildProps(roomX, roomY, scale, roomWidthUnits) {
  * wire - a `status` label, a `stream_gap` reason - stay in the DOM layer that
  * already renders them as text.
  */
-function buildHud(header, overflow, player) {
+function buildHud(header, overflow, player, present) {
   const source = header === null || header === undefined ? {} : header;
   const connection = source.connection === null || typeof source.connection !== 'object' ? {} : source.connection;
   return {
@@ -440,9 +547,12 @@ function buildHud(header, overflow, player) {
     replaying: source.replaying === true,
     // Presence only: the reason string is free-form, so it is never painted.
     gapped: source.gap !== null && source.gap !== undefined,
-    // The full count, always: the canvas caps what it *paints*, never what it
-    // admits exists.
-    desk_count: overflow.total,
+    // Colleagues, not seats. `overflow.total` counts everything the canvas has
+    // to lay out, and in a grouped office that includes roster seats nobody has
+    // answered to - so reading it here would put 「在席 7」 on the canvas while
+    // the DOM, which counts actors, says 0. The canvas still caps what it
+    // *paints* and never what it admits exists; that is `drawn`/`hidden` below.
+    desk_count: present,
     drawn_count: overflow.drawn,
     hidden_count: overflow.hidden,
     session_count: typeof source.session_count === 'number' ? source.session_count : 0,
@@ -482,7 +592,16 @@ function captionFor(hud) {
  * rest of it is.
  */
 function overflowTextFor(overflow) {
-  return `表示 ${overflow.drawn} 席 / 全 ${overflow.total} 席  ·  残り ${overflow.hidden} 席は下の一覧に表示`;
+  const parts = [`表示 ${overflow.drawn} 席 / 全 ${overflow.total} 席`];
+  if (overflow.zones.hidden > 0) parts.push(`区画 ${overflow.zones.drawn} / ${overflow.zones.total}`);
+  // What was left out, not only how much. Without this the ungrouped office -
+  // which has no zone outline to colour - reports a hidden failure as a calm
+  // number, and the room outlines are the only other place a state is drawn.
+  if (overflow.hidden_state !== null) {
+    parts.push(`未描画に ${overflow.hidden_state.symbol} ${overflow.hidden_state.code} あり`);
+  }
+  parts.push(`残り ${overflow.hidden} 席は下の一覧に表示`);
+  return parts.join('  ·  ');
 }
 
 function normalizeDesk(desk, index) {
@@ -490,6 +609,24 @@ function normalizeDesk(desk, index) {
   const visual = source.visual === null || typeof source.visual !== 'object' ? {} : source.visual;
   return {
     seat: typeof source.seat === 'number' ? source.seat : index + 1,
+    // A plain `Desk` carries no `occupied` field and is an actor by
+    // construction, so absence means occupied. Only the office projection marks
+    // a seat as answered by nobody.
+    occupied: source.occupied !== false,
+    /**
+     * How many colleagues this one desk stands for.
+     *
+     * A desk is not a person. A roster seat with nobody at it stands for none;
+     * a seat several actors of the same runtime type answer to stands for all
+     * of them; every other desk stands for exactly one. Counting desks instead
+     * would make the canvas disagree with the DOM about how many people are in
+     * the company, which is the one number they both claim to show.
+     */
+    occupant_count: Array.isArray(source.occupants) ? source.occupants.length : 1,
+    // Present only on a desk the roster placed. Never filled in from `seat`:
+    // one is a position in a dynamic ordering, the other belongs to the
+    // organisation (`docs/org-snapshot-design.md` §4.4).
+    roster_seat: typeof source.roster_seat === 'number' ? source.roster_seat : null,
     actor_key: typeof source.actor_key === 'string' ? source.actor_key : `seat-${index + 1}`,
     session_id: typeof source.session_id === 'string' ? source.session_id : '',
     display_name: typeof source.display_name === 'string' ? source.display_name : '',
@@ -515,28 +652,121 @@ export function buildWorld(input) {
   const player = normalizePlayer(source.player ?? null);
   const viewport = normalizeViewport(source.viewport);
 
-  const columns = columnsFor(desks.length, viewport.width);
+  // Zones, when the office is grouped by an organisation. Absent, the office is
+  // the single ungrouped room it has always been, expressed below as one band
+  // with no name strip - so the ungrouped layout is not a second code path that
+  // could drift from this one.
+  const rawZones = Array.isArray(source.zones) ? source.zones : [];
+  const grouped = rawZones.length > 0;
+  const allZones = rawZones.map(normalizeZone);
+  const zonesDrawn = allZones.slice(0, MAX_ZONES);
+  const zonesCut = allZones.slice(MAX_ZONES);
+
+  // A grouped office takes its column count from the **roster alone**.
+  //
+  // This is the difference between a floor plan and a list. `columnsFor` reads
+  // the desk count and the viewport width, and both of those move: a colleague
+  // the roster does not know joins 未所属 and widens it, or the viewport crosses a
+  // width threshold. Either one would re-flow every band - changing which row a
+  // seat is on, where the zones below it start, and in a tight budget whether a
+  // seat is drawn at all - which is precisely the "actors and resize never move
+  // a roster seat" contract (`docs/org-snapshot-design.md` §3.2 ①③).
+  //
+  // So the width of the grid is a fact about the organisation, and the viewport
+  // decides only how many pixels each cell gets.
+  const widestRoster = zonesDrawn.reduce(
+    (most, zone) => Math.max(most, zone.desks.filter((desk) => desk.roster_seat !== null).length),
+    0,
+  );
+  const columns = grouped
+    ? clamp(widestRoster, 1, MAX_COLUMNS)
+    : columnsFor(desks.length, viewport.width);
+
   // Rows are capped before anything is sized, so the office the canvas has to
   // hold is bounded whatever the collector accepted. `drawn` are the seats that
   // get painted; the rest are counted, named on the canvas only as a number,
   // and shown in full by the DOM desk list.
-  const rows = Math.min(Math.max(1, Math.ceil(desks.length / columns)), MAX_ROWS);
-  const drawn = desks.slice(0, Math.min(desks.length, rows * columns));
-  const overflow = { total: desks.length, drawn: drawn.length, hidden: desks.length - drawn.length };
+  const bands = [];
+  if (grouped) {
+    // The row budget is spent in declared zone order, so which seats overflow is
+    // decided by the organisation and not by who arrived first. A zone that runs
+    // out of budget still gets its band and its name: the department exists
+    // whether or not the canvas can draw its desks.
+    let remaining = MAX_ROWS;
+    for (const zone of zonesDrawn) {
+      const needed = zone.seats ? Math.max(1, Math.ceil(zone.desks.length / columns)) : 0;
+      const rows = Math.min(needed, Math.max(0, remaining));
+      remaining -= rows;
+      const drawn = zone.desks.slice(0, Math.min(zone.desks.length, rows * columns));
+      bands.push({ zone, rows, drawn, hidden: zone.desks.slice(drawn.length) });
+    }
+  } else {
+    const rows = Math.min(Math.max(1, Math.ceil(desks.length / columns)), MAX_ROWS);
+    const drawn = desks.slice(0, Math.min(desks.length, rows * columns));
+    bands.push({ zone: null, rows, drawn, hidden: desks.slice(drawn.length) });
+  }
 
-  const hud = buildHud(source.header ?? null, overflow, player);
+  const rows = bands.reduce((sum, band) => sum + band.rows, 0);
+  const drawn = bands.flatMap((band) => band.drawn);
+  // Seats inside a zone the canvas could not draw are hidden seats, not absent
+  // ones: they count towards the totals and towards the worst-hidden-state
+  // report exactly like a seat that overflowed its own band. Dropping them here
+  // is what would make an unrenderable room a silent truncation.
+  const hiddenDesks = [...bands.flatMap((band) => band.hidden), ...zonesCut.flatMap((zone) => zone.desks)];
+  const total = grouped
+    ? allZones.reduce((sum, zone) => sum + zone.desks.length, 0)
+    : desks.length;
+  const overflow = {
+    total,
+    drawn: drawn.length,
+    hidden: total - drawn.length,
+    // A count alone would let a zone that left a failing seat out look calm.
+    // The worst state among the seats the canvas could not draw is reported
+    // with the number, so a hidden error is still on the screen as a fact.
+    hidden_state: worstState(hiddenDesks),
+    zones: { total: allZones.length, drawn: zonesDrawn.length, hidden: allZones.length - zonesDrawn.length },
+  };
+
+  // Colleagues, counted the way the DOM counts them: per actor, not per desk.
+  //
+  // A `Desk` from `selectDesks` carries no `occupants`, so it stands for one and
+  // the ungrouped office counts exactly as it always did. In a grouped office a
+  // vacant roster seat stands for nobody and an aggregated seat stands for
+  // everyone behind it - anything else puts a different number of colleagues on
+  // the canvas than in the header above it.
+  const countPresent = (rows) => rows.reduce((sum, desk) => sum + desk.occupant_count, 0);
+  const present = grouped
+    ? allZones.reduce((sum, zone) => sum + countPresent(zone.desks), 0)
+    : countPresent(desks);
+  const hud = buildHud(source.header ?? null, overflow, player, present);
 
   // The player's strip is added to the room, never taken out of the grid: the
   // desks keep the seats and the coordinates they would have had without one,
   // so whether a snapshot names a player changes nothing about the seating.
-  const playerStripUnits = player === null ? 0 : PLAYER_STRIP_UNITS;
+  //
+  // When the office is grouped the player is not in a strip at all: they stand
+  // in the 社長室, which is a band like any other (`docs/org-snapshot-design.md`
+  // §4.1). The strip below the grid is the ungrouped office's arrangement.
+  const executiveBand = grouped
+    ? (bands.find((band) => band.zone !== null && band.zone.kind === 'executive') ?? null)
+    : null;
+  const playerInZone = executiveBand !== null && player !== null;
+  const playerStripUnits = player === null || playerInZone ? 0 : PLAYER_STRIP_UNITS;
+  // Height each band contributes: its name strip, its rows, and - for the
+  // 社長室 - room for the person standing in it.
+  const bandUnits = (band) =>
+    (band.zone === null ? 0 : ZONE_HEADER_UNITS) +
+    band.rows * CELL_UNITS.height +
+    (band === executiveBand && player !== null ? PLAYER_STRIP_UNITS : 0);
+  const bandsUnits = bands.reduce((sum, band) => sum + bandUnits(band), 0);
   const roomWidthUnits = columns * CELL_UNITS.width + 2 * ROOM_PADDING;
-  const roomHeightUnits = WALL_UNITS + rows * CELL_UNITS.height + playerStripUnits + 2 * ROOM_PADDING;
+  const roomHeightUnits = WALL_UNITS + bandsUnits + playerStripUnits + 2 * ROOM_PADDING;
 
+  const heightBudget = grouped ? viewport.height * GROUPED_HEIGHT_RATIO : viewport.height;
   const scale = snapScale(
     Math.min(
       (viewport.width - 2 * OUTER_MARGIN) / roomWidthUnits,
-      (viewport.height - 2 * OUTER_MARGIN) / roomHeightUnits,
+      (heightBudget - 2 * OUTER_MARGIN) / roomHeightUnits,
       MAX_SCALE,
     ),
   );
@@ -549,10 +779,20 @@ export function buildWorld(input) {
   const margin = Math.round(OUTER_MARGIN * scale);
   const cellWidth = Math.round(CELL_UNITS.width * scale);
   const cellHeight = Math.round(CELL_UNITS.height * scale);
-  const playerStrip = player === null ? 0 : Math.round(PLAYER_STRIP_UNITS * scale);
+  // Zero in a grouped office: the player stands in the 社長室 band, whose height
+  // already includes this strip. Adding it again would leave an empty floor band
+  // under every zone and make the room taller than the unit-space budget it was
+  // scaled from.
+  const playerStrip = playerStripUnits === 0 ? 0 : Math.round(PLAYER_STRIP_UNITS * scale);
 
+  const zoneHeader = grouped ? Math.round(ZONE_HEADER_UNITS * scale) : 0;
   const roomWidth = 2 * pad + columns * cellWidth;
-  const roomHeight = wallHeight + 2 * pad + rows * cellHeight + playerStrip;
+  const bandHeight = (band) =>
+    (band.zone === null ? 0 : zoneHeader) +
+    band.rows * cellHeight +
+    (band === executiveBand && player !== null ? Math.round(PLAYER_STRIP_UNITS * scale) : 0);
+  const bandsHeight = bands.reduce((sum, band) => sum + bandHeight(band), 0);
+  const roomHeight = wallHeight + 2 * pad + bandsHeight + playerStrip;
 
   // The room is centred in whatever width the canvas ends up with, so sideways
   // the outer margin decides one thing only: whether the canvas has to be wider
@@ -567,7 +807,11 @@ export function buildWorld(input) {
   // furniture and never has to shrink with the scale. An office with seats the
   // canvas did not draw gets a second strip for the count, so the two lines
   // cannot overlap either.
-  const captionLines = overflow.hidden > 0 ? 2 : 1;
+  // A room the canvas could not draw is news even when it held no seats: an
+  // organisation whose thirty-third zone silently vanishes is the same silent
+  // truncation as a dropped desk.
+  const anythingHidden = overflow.hidden > 0 || overflow.zones.hidden > 0;
+  const captionLines = anythingHidden ? 2 : 1;
   const canvasHeight = roomHeight + 2 * margin + CAPTION_STRIP * captionLines;
 
   const roomX = Math.round((canvasWidth - roomWidth) / 2);
@@ -585,11 +829,47 @@ export function buildWorld(input) {
   const stateSize = Math.max(7, Math.round(CELL_PARTS.stateLabel.height * scale));
   const labelBox = Math.round(CELL_PARTS.nameLabel.width * scale);
 
-  const actors = drawn.map((desk, index) => {
-    const column = index % columns;
-    const row = Math.floor(index / columns);
-    const cellX = gridX + column * cellWidth;
-    const cellY = gridY + row * cellHeight;
+  // Bands are walked in order and each keeps its own running origin, so a seat's
+  // coordinate comes from (which zone, which place in that zone) and from
+  // nothing else. Actors arriving or leaving change what is *in* a cell, never
+  // where the cell is.
+  const zoneRects = [];
+  const actors = [];
+  let bandY = gridY;
+  let playerCell = null;
+  const zoneNameSize = Math.max(8, Math.round(11 * scale));
+  for (const band of bands) {
+    const headerHeight = band.zone === null ? 0 : zoneHeader;
+    const height = bandHeight(band);
+    if (band.zone !== null) {
+      zoneRects.push({
+        id: band.zone.id,
+        kind: band.zone.kind,
+        rect: { x: gridX, y: bandY, width: columns * cellWidth, height },
+        name_label: {
+          x: gridX + Math.round(4 * scale),
+          y: bandY + Math.round(ZONE_HEADER_UNITS * scale) - Math.round(5 * scale),
+          size: zoneNameSize,
+          text: fitLabel(band.zone.name, columns * cellWidth - Math.round(8 * scale), zoneNameSize),
+        },
+        seats: band.zone.seats,
+        drawn: band.drawn.length,
+        hidden: band.hidden.length,
+        // Same rule as the office-wide count: a zone that could not draw a
+        // failing seat must not look like a zone with nothing wrong in it.
+        hidden_state: worstState(band.hidden),
+      });
+    }
+    if (band === executiveBand && player !== null) {
+      playerCell = { x: gridX, y: bandY + headerHeight };
+    }
+    band.drawn.forEach((desk, index) => {
+      actors.push({ desk, cellX: gridX + (index % columns) * cellWidth, cellY: bandY + headerHeight + Math.floor(index / columns) * cellHeight });
+    });
+    bandY += height;
+  }
+
+  const placedActors = actors.map(({ desk, cellX, cellY }) => {
     const name = place(cellX, cellY, scale, CELL_PARTS.nameLabel);
     const stateLabel = place(cellX, cellY, scale, CELL_PARTS.stateLabel);
     return {
@@ -634,8 +914,12 @@ export function buildWorld(input) {
     player === null
       ? null
       : (() => {
-          const cellX = gridX;
-          const cellY = gridY + rows * cellHeight;
+          // In the 社長室 when the office is grouped, in the strip below the
+          // last desk row when it is not. Either way the position comes from
+          // the grid's own geometry, so it is as reproducible as every seat and
+          // never overlaps one.
+          const cellX = playerCell === null ? gridX : playerCell.x;
+          const cellY = playerCell === null ? gridY + bandsHeight : playerCell.y;
           const name = place(cellX, cellY, scale, PLAYER_PARTS.nameLabel);
           return {
             kind: 'player',
@@ -667,7 +951,7 @@ export function buildWorld(input) {
     scale,
     columns,
     rows,
-    empty: actors.length === 0,
+    empty: placedActors.length === 0,
     hud,
     overflow,
     // The caption strip spans the canvas, not the room: a one-desk office is a
@@ -695,7 +979,12 @@ export function buildWorld(input) {
       rows: Math.ceil(floorHeight / floorTile),
     },
     props: buildProps(roomX, roomY, scale, roomWidth / scale),
-    actors,
+    actors: placedActors,
+    // The rooms the office is divided into, in the order they are drawn. Empty
+    // whenever the office is ungrouped, which is what the canvas reads to know
+    // it is painting the single-room layout.
+    zones: zoneRects,
+    grouped,
     // A field of its own, never an entry in `actors`: the seat count, the
     // overflow arithmetic and every loop over colleagues stay untouched by it.
     player: worldPlayer,
@@ -712,7 +1001,7 @@ export function buildWorld(input) {
       x: margin,
       y: captionY + CAPTION_STRIP,
       size: CAPTION_SIZE,
-      text: overflow.hidden > 0 ? fitLabel(overflowTextFor(overflow), canvasWidth - 2 * margin, CAPTION_SIZE) : '',
+      text: anythingHidden ? fitLabel(overflowTextFor(overflow), canvasWidth - 2 * margin, CAPTION_SIZE) : '',
     },
   };
 }
