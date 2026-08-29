@@ -102,7 +102,7 @@ producerが未知keyを送っても wire には出ません（`src/domain/wire.t
 | `DEFAULT_STATE_LIMITS` = `max_sessions:512` / `max_actors:4096` / `max_actors_per_session:256` / `max_event_types:64` | `src/domain/reducer.ts:98` |
 | 上限超過は silent eviction ではなく **ingest halt**（fail closed）。`halt_reason` は `state_limit:<上限名>:<値>` でstream内容を含まない | `src/domain/reducer.ts:134` `StateLimitExceededError`、`README.md:347-357` |
 | bannerは閉じた語彙で、常にちょうど1 codeが表示される | `src/ui/public/quest-view.js:712` `BANNER_CODES`、`README.md:202-211` |
-| canvasは上限超過分を黙って落とさず、`表示 N 席 / 全 M 席 · 残り K 席は下の一覧に表示` を出す。DOM側は常に全actorを表示する | `src/ui/public/quest-world.js:484` `overflowTextFor`、`README.md:250-254` |
+| canvasは上限超過分を黙って落とさず、`表示 N 枠 / 全 M 枠 · 残り K 枠は下の一覧に表示` を出す（区画が溢れれば `区画 N / M`、未描画に注意状態があれば `未描画に ✖ ERROR あり` も付く）。DOM側は常に全**枠**を表示する（集約席の非代表actorは人数のみ） | `src/ui/public/quest-world.js:484` `overflowTextFor`、`README.md:250-254` |
 
 ---
 
