@@ -592,7 +592,9 @@ function captionFor(hud) {
  * rest of it is.
  */
 function overflowTextFor(overflow) {
-  const parts = [`表示 ${overflow.drawn} 席 / 全 ${overflow.total} 席`];
+  // 「枠」 and not 「席」: this counts drawn cards, and a roster seat can hold
+  // several colleagues while a vacant one holds none. README uses the same word.
+  const parts = [`表示 ${overflow.drawn} 枠 / 全 ${overflow.total} 枠`];
   if (overflow.zones.hidden > 0) parts.push(`区画 ${overflow.zones.drawn} / ${overflow.zones.total}`);
   // What was left out, not only how much. Without this the ungrouped office -
   // which has no zone outline to colour - reports a hidden failure as a calm
@@ -600,7 +602,7 @@ function overflowTextFor(overflow) {
   if (overflow.hidden_state !== null) {
     parts.push(`未描画に ${overflow.hidden_state.symbol} ${overflow.hidden_state.code} あり`);
   }
-  parts.push(`残り ${overflow.hidden} 席は下の一覧に表示`);
+  parts.push(`残り ${overflow.hidden} 枠は下の一覧に表示`);
   return parts.join('  ·  ');
 }
 

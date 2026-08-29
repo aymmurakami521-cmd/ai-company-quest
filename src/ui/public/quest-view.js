@@ -1127,12 +1127,21 @@ function attentionRank(visual) {
  * to the office's existing order, which makes the choice total and repeatable.
  * One seat can only carry one state; the rule is that the one it carries is
  * never the one that hides a problem.
+ *
+ * The rank reads `last_known_visual`, not `visual`, and that difference only
+ * shows itself when the stream stops. While stale every desk's `visual` is
+ * `UNKNOWN` together, so ranking on it would tie every occupant and hand the
+ * seat to whoever came first - and the frozen 「停止時点」 line would then report
+ * the *older* actor. A disconnection would quietly turn 「停止時点: ✖ エラー」 into
+ * 「停止時点: ■ 完了」. While connected the two fields are equal, so this changes
+ * nothing there; it only keeps the rule true when the office freezes, which is
+ * exactly when the reader can no longer check for themselves.
  */
 function representative(occupants) {
   let best = occupants[0];
-  let bestRank = attentionRank(best.visual);
+  let bestRank = attentionRank(best.last_known_visual);
   for (let i = 1; i < occupants.length; i += 1) {
-    const rank = attentionRank(occupants[i].visual);
+    const rank = attentionRank(occupants[i].last_known_visual);
     if (rank < bestRank) {
       best = occupants[i];
       bestRank = rank;
