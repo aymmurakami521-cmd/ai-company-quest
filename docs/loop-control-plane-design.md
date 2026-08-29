@@ -791,12 +791,21 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 | **ORG-PR-2** | 既存 §5 PR-2。org snapshot 読み取りと検証 | ORG-PR-1 | **B** |
 | **STORE-1** | **最小の権威 run source**。永続 Run / Event Store と単一 writer の deterministic controller（§4.2）。**run state の供給元はここに一本化される** | LCP-1 / LCP-2 | **C**（永続化基盤の導入。owner 承認必須） |
 | **LCP-3** | Run Read Model を Quest が read-only で受ける。独立 namespace、GET のみ、既存 SSE surface に mutation を足さない。**供給元は STORE-1** | LCP-1 / ORG-PR-2（取り込みの型を共有）／**STORE-1**（供給元） | **B** |
-| **ORG-PR-3** | 既存 §5 PR-3。roster projection + 汎用 status 面での縮退表示 | ORG-PR-2 / LCP-3 | **B** |
+| **ORG-PR-3** | 既存 §5 PR-3。roster projection + 汎用 status 面での縮退表示 | **ORG-PR-2 のみ**（下記の訂正）| **B** ✅ **完了**（PR #35） |
 | **MC-1** | read-only Management Console（Goal / Run / State / Role / Risk / Approval / Evidence 中心） | **STORE-1** / LCP-3 | **B** |
-| **ORG-PR-4** | 既存 §5 PR-4。決定論的 layout と固定席座標 | ORG-PR-3 | **B** |
+| **ORG-PR-4** | 既存 §5 PR-4。決定論的 layout と固定席座標 | ORG-PR-3 | **B** ✅ **完了**（PR #37） |
 | **OBS-1** | Eval / post-merge observer / recovery | STORE-1 | **C** |
 | **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** |
 | **CTRL-1** | 認証済み介入操作（Control API + Policy/Approval Gate）。**起点は Management Console または明示的に分離された認証済み運用 client のみで、Quest は含みません**（§12.2） | STORE-1 / OBS-1 / MC-1 | **C**（安全基盤が揃うまで着手しない） |
+
+**訂正（ORG-PR-3 の依存）**: この表は当初 `ORG-PR-3` の依存に `LCP-3` を挙げていましたが、
+これは**古い記述です**。後から確定した
+[`org-snapshot-design.md`](org-snapshot-design.md) §4.7 が明示的に上書きしています —
+第 2 status 面の**存在と契約**（第 2 面である・閉じた語彙である・banner を隠さない）までを
+確定し、**語彙の中身は org 分だけ先に定義**する、という決定です。run state 側の code は
+LCP-1 確定後に同じ面へ追加します。したがって **ORG-PR-3 は LCP-1 も LCP-3 も待ちません**。
+§14.2 の「PR-1 の §4.7 決定は LCP-1 の後が望ましい」という推奨も、この決定が優先します。
+実際に ORG-PR-3 / ORG-PR-4 は LCP-1 未着手のまま完了しています。
 
 ### 15.0 権威ソースと consumer の順序規則
 
@@ -1015,7 +1024,7 @@ adapter 境界を指す説明と binding 値**なので、例外として通し�
 | 4b | `docs/provider-neutral-scan.manifest.json` の normative schema（field 名の確定）。**path・拘束条件・照合規則は §17.2 / §17.3 で決定済み**で、未決なのは schema 記述の形だけ | **LCP-1** |
 | 5 | Run/Event Store の実体（file / 埋め込み / 外部）。**依存追加・DB 導入は本フェーズの禁止事項**なので、選択肢の評価も STORE-1 まで先送り | STORE-1 |
 | 6 | Quest が run event を受ける経路の具体（既存 namespace 分離の作法は決定済み・§5.3。**供給元が STORE-1 であることは §15.0 で決定済み**、受け口の形が未決） | LCP-3 |
-| 7 | 汎用 status 表示面の具体（banner 拡張か第 2 面か、code 名、DOM 構造） | ORG-PR-1（方式）／ORG-PR-3（実装） |
+| 7 | ~~汎用 status 表示面の具体~~ → **確定済み**。第 2 面・非 live region・`ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED` の閉じた語彙（`org-snapshot-design.md` §4.7、実装は PR #35）。run state の code は LCP-1 後に同じ面へ追加 | 完了 |
 | 8 | `org-snapshot-design.md` §4.1〜§4.6 の未決事項 | ORG-PR-1（変更なし） |
 | 9 | budget の単位（cost unit の定義） | LCP-1 以降 |
 | 10 | lease の TTL と stall threshold の具体値 | STORE-1 |
