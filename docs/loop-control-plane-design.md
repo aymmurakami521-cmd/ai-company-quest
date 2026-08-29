@@ -768,11 +768,21 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 
 この推奨は **PR-1 が LCP-1（§15）に依存する**ことを意味します。表示面を 2 度決めないためです。
 
+> **【後日訂正】この依存は成立しませんでした。** PR-1 は §4.7 で、表示面の
+> **存在と契約**（第 2 面である・閉じた語彙である・banner を隠さない）までを確定し、
+> **語彙の中身は org 分だけ先に定義**する形を採りました。表示面を 2 度決める問題は
+> それで解けており、ORG-PR-1 / ORG-PR-3 / ORG-PR-4 はいずれも LCP-1 未着手のまま
+> 完了しています（PR #35 / #37）。LCP-1 が要るのは、run state の code を
+> **この第 2 面へ追加する**ときだけです。以下 §14.3 の順序推奨も同様に失効しています。
+
 ### 14.3 新規に挿入する位置
 
 - 本文書（LCP-0）と PR-1 は **どちらも docs のみ・相互依存なし**なので並行可能です。
-- ただし §14.2 の理由により、**PR-1 の §4.7 決定は LCP-1 の後**に行うのが望ましい構成です。
-- PR-1 の §4.1〜§4.6 は外部事実の確認なので、LCP-1 と**並行して owner 側で進められます**。
+- ~~ただし §14.2 の理由により、PR-1 の §4.7 決定は LCP-1 の後に行うのが望ましい構成です。~~
+  **失効**（§14.2 の訂正）。PR-1 は LCP-1 を待たずに完了しました。
+- ~~PR-1 の §4.1〜§4.6 は外部事実の確認なので、LCP-1 と並行して owner 側で進められます。~~
+  **完了済み**（Issue #23）。§4.1〜§4.7 はすべて「確認済み」または「設計判断済み」で、
+  owner 側に残っている確認作業はありません。
 
 ---
 
@@ -784,19 +794,31 @@ org / roster はまさにその experience layer の入力です。矛盾しま�
 |----|------|------|------------|
 | **LCP-0** | 本設計文書の追加（この PR） | なし | **A** |
 | **LCP-1** | Run / Event contract v1 の docs 化。state code / event code / evidence kind / 失敗種別の**閉じた語彙を確定**する。成果物は `docs/run-event-contract.md` / `docs/role-binding-registry.md` / `docs/provider-neutral-scan.manifest.json` の 3 件（§15.2）。code 変更なし | LCP-0 | **A** |
-| **ORG-PR-1** | 既存 §5 PR-1。外部 org 定義の事実確認 + §4.7 の表示面決定を**汎用 status 面として**確定（§14.2） | LCP-1（表示面の決定のみ）／§4.1〜§4.6 は並行可 | **A** |
+| **ORG-PR-1** | 既存 §5 PR-1。外部 org 定義の事実確認 + §4.7 の表示面決定を**汎用 status 面として**確定（§14.2） | **なし**（下記の訂正）| **A** ✅ **完了**（Issue #23） |
 | **LCP-2** | §13.5 の 1〜3・8 を deterministic gate にする**設計**（docs） | LCP-1 | **A**（設計のみ） |
 | **DOC-1** | `docs/automation-protocol.md` の新規作成（§1.3）。内容は owner が確定 | owner の内容決定 | **A** |
 | **WF-1** | §1.3 の workflow 側参照の整合、LCP-2 の gate の**実装**、および §17.2 manifest を読む provider 中立 scan の CI 実装 | LCP-1（manifest）／LCP-2 / DOC-1 | **C**（workflow 変更。owner 承認・owner 実施） |
-| **ORG-PR-2** | 既存 §5 PR-2。org snapshot 読み取りと検証 | ORG-PR-1 | **B** |
+| **ORG-PR-2** | 既存 §5 PR-2。org snapshot 読み取りと検証 | ORG-PR-1 | **B** ✅ **完了**（PR #27・上限修正 #33） |
 | **STORE-1** | **最小の権威 run source**。永続 Run / Event Store と単一 writer の deterministic controller（§4.2）。**run state の供給元はここに一本化される** | LCP-1 / LCP-2 | **C**（永続化基盤の導入。owner 承認必須） |
 | **LCP-3** | Run Read Model を Quest が read-only で受ける。独立 namespace、GET のみ、既存 SSE surface に mutation を足さない。**供給元は STORE-1** | LCP-1 / ORG-PR-2（取り込みの型を共有）／**STORE-1**（供給元） | **B** |
-| **ORG-PR-3** | 既存 §5 PR-3。roster projection + 汎用 status 面での縮退表示 | ORG-PR-2 / LCP-3 | **B** |
+| **ORG-PR-3** | 既存 §5 PR-3。roster projection + 汎用 status 面での縮退表示 | **ORG-PR-2 のみ**（下記の訂正）| **B** ✅ **完了**（PR #35） |
 | **MC-1** | read-only Management Console（Goal / Run / State / Role / Risk / Approval / Evidence 中心） | **STORE-1** / LCP-3 | **B** |
-| **ORG-PR-4** | 既存 §5 PR-4。決定論的 layout と固定席座標 | ORG-PR-3 | **B** |
+| **ORG-PR-4** | 既存 §5 PR-4。決定論的 layout と固定席座標 | ORG-PR-3 | **B** ✅ **完了**（PR #37） |
 | **OBS-1** | Eval / post-merge observer / recovery | STORE-1 | **C** |
-| **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** |
+| **ORG-PR-5** | 既存 §5 PR-5。縮退経路の最終整合と README 更新 | ORG-PR-4 | **A** ⏳ **実施中**（PR #40） |
 | **CTRL-1** | 認証済み介入操作（Control API + Policy/Approval Gate）。**起点は Management Console または明示的に分離された認証済み運用 client のみで、Quest は含みません**（§12.2） | STORE-1 / OBS-1 / MC-1 | **C**（安全基盤が揃うまで着手しない） |
+
+**訂正（ORG-PR-1 / ORG-PR-3 の依存）**: この表は当初 `ORG-PR-1` の表示面決定を `LCP-1` に、
+`ORG-PR-3` の依存に `LCP-3` を挙げていましたが、
+これは**古い記述です**。後から確定した
+[`org-snapshot-design.md`](org-snapshot-design.md) §4.7 が明示的に上書きしています —
+第 2 status 面の**存在と契約**（第 2 面である・閉じた語彙である・banner を隠さない）までを
+確定し、**語彙の中身は org 分だけ先に定義**する、という決定です。run state 側の code は
+LCP-1 確定後に同じ面へ追加します。したがって **ORG-PR-3 は LCP-1 も LCP-3 も待ちません**。
+§14.2 の「PR-1 の §4.7 決定は LCP-1 の後が望ましい」という推奨も、この決定が優先します。
+実際に **ORG-PR-1 / ORG-PR-3 / ORG-PR-4 は LCP-1 未着手のまま完了しています**。
+§15.1 の「LCP-1 を先に置かないと PR-1 をやり直す」という理由も、同じ決定により失効済みです。
+LCP-1 が要るのは、run state の code を**この第 2 面へ追加する**ときだけです。
 
 ### 15.0 権威ソースと consumer の順序規則
 
@@ -820,14 +842,17 @@ source と consumer の所有関係が反転するからです。
 理由:
 
 1. **依存が LCP-0 のみ**で、外部事実の確認を必要としません。今すぐ着手できます。
-2. **ORG-PR-1 の §4.7 表示面決定が LCP-1 に依存します**（§14.2）。先に置けば表示面を
-   1 回で決められます。逆順にすると PR-1 をやり直すことになります。
+2. ~~ORG-PR-1 の §4.7 表示面決定が LCP-1 に依存します~~ — **この理由は失効しました**。
+   §4.7 は表示面の**存在と契約**だけを確定し、語彙は org 分から始めると決めたため、
+   ORG-PR-1 は LCP-1 を待たずに完了しています（表を参照）。表示面を 2 度決める心配は
+   すでにありません。run state の code を**同じ面へ追加する**ときに LCP-1 が要るという
+   関係だけが残ります。
 3. **§10.4 の M1 に相当**し、provider 名を含む event code が生まれる前に語彙を固定できます。
    ここを飛ばすと、以後の provider 置換が必ず read model まで波及します。
 4. code 変更ゼロなので、この breakpoint の 338 件の test を一切揺らしません。
 
-**owner 側で並行して進められるもの**: ORG-PR-1 の §4.1〜§4.6（外部 org 定義の実在確認）と、
-DOC-1 の内容決定。どちらもこのリポジトリの外の事実に依存し、agent 側では確認できません。
+**owner 側で並行して進められるもの**: **DOC-1 の内容決定**のみです。
+（ORG-PR-1 の §4.1〜§4.6 も以前はここに挙げていましたが、**Issue #23 で完了済み**です。）
 
 ### 15.2 LCP-1 の完了 evidence（provider 中立検査を executable にするための成果物）
 
@@ -1015,8 +1040,8 @@ adapter 境界を指す説明と binding 値**なので、例外として通し�
 | 4b | `docs/provider-neutral-scan.manifest.json` の normative schema（field 名の確定）。**path・拘束条件・照合規則は §17.2 / §17.3 で決定済み**で、未決なのは schema 記述の形だけ | **LCP-1** |
 | 5 | Run/Event Store の実体（file / 埋め込み / 外部）。**依存追加・DB 導入は本フェーズの禁止事項**なので、選択肢の評価も STORE-1 まで先送り | STORE-1 |
 | 6 | Quest が run event を受ける経路の具体（既存 namespace 分離の作法は決定済み・§5.3。**供給元が STORE-1 であることは §15.0 で決定済み**、受け口の形が未決） | LCP-3 |
-| 7 | 汎用 status 表示面の具体（banner 拡張か第 2 面か、code 名、DOM 構造） | ORG-PR-1（方式）／ORG-PR-3（実装） |
-| 8 | `org-snapshot-design.md` §4.1〜§4.6 の未決事項 | ORG-PR-1（変更なし） |
+| 7 | ~~汎用 status 表示面の具体~~ → **確定済み**。第 2 面・非 live region・`ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED` の閉じた語彙（`org-snapshot-design.md` §4.7、実装は PR #35）。run state の code は LCP-1 後に同じ面へ追加 | 完了 |
+| 8 | ~~`org-snapshot-design.md` §4.1〜§4.6 の未決事項~~ → **確定済み**。§4.1〜§4.7 はすべて「確認済み」または「設計判断済み」（Issue #23）。実装された仕様は同文書 §5.1 | 完了 |
 | 9 | budget の単位（cost unit の定義） | LCP-1 以降 |
 | 10 | lease の TTL と stall threshold の具体値 | STORE-1 |
 

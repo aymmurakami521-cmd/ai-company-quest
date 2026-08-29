@@ -48,6 +48,7 @@ import {
   SECONDARY_STATUS_CODES,
   EXECUTIVE_ZONE_ID,
   UNASSIGNED_ZONE_ID,
+  applyFrame,
   applySnapshot,
   createClientState,
   normalizeOrg,
@@ -608,6 +609,33 @@ test('the representative is the most attention-seeking state, then the office or
     )).zones.flatMap((zone) => zone.desks).find((desk) => desk.role_id === 'r1'),
     seat,
   );
+});
+
+test('a frozen aggregated seat still reports the failure, not the finished run', () => {
+  // While the stream is stale every desk reads UNKNOWN, so ranking on `visual`
+  // would tie every occupant and hand the seat to whoever came first. The
+  // frozen 「停止時点」 line would then name the *older* actor, quietly turning a
+  // failure into a completion at the exact moment the reader can no longer
+  // check for themselves.
+  const live = demoClient(DEMO_ORG);
+  const seatIn = (state: ClientState) =>
+    selectOffice(state)
+      .zones.flatMap((zone) => zone.desks)
+      .find((desk) => desk.role_id === 'role-implementer');
+
+  const before = seatIn(live);
+  assert.equal(before?.occupants.length, 2, 'the seat really is aggregating');
+  assert.equal(before?.visual.state, 'error', 'and while connected it shows the failure');
+
+  // Lose the stream. Every desk goes UNKNOWN together.
+  const frozen = applyFrame(live, { kind: 'fail_closed', payload: { reason: 'state_limit' } });
+  const after = seatIn(frozen);
+  assert.equal(after?.stale, true, 'the office is frozen');
+  assert.equal(after?.visual.state, 'unknown', 'so the seat claims nothing now');
+  // ...but what was last observed is still the failure.
+  assert.equal(after?.last_known_visual.state, 'error', '停止時点 still names the failure');
+  assert.notEqual(after?.last_known_visual.state, 'ended', 'never the finished run');
+  assert.equal(after?.actor_key, before?.actor_key, 'and it is the same colleague as before');
 });
 
 test('an aggregated seat counts actors, not sessions', () => {

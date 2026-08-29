@@ -1,13 +1,26 @@
 # Phase 2 条件1・2 設計記録（org snapshot / 固定roster）
 
-Phase 2の未達条件2つについて、**実装せずに責務境界だけを確定する**ための設計記録です。
+> ## ⚠️ この文書の読み方 — 「当時」と「いま」を混ぜないこと
+>
+> **§1〜§4 は設計を始めた時点（現行main `7c9da9c`）の記録です。**
+> そこに出てくる「現状」「未実装」「存在しない」は、**すべてその時点の話**であって、
+> 現在の実装状態ではありません。設計判断がどの事実の上に立っていたかを残すために、
+> 当時のまま保存しています。
+>
+> **現在の実装状態は [§5.1「実装された仕様」](#51-実装された仕様pr-2pr-4-の結果) を見てください。**
+> 条件1・条件2 はどちらも実装済みです（PR #35 / #37）。§5 の PR 一覧にも各PRの完了状態があります。
+>
+> 文書と実装が食い違った場合は、常に実装（`src/`）が正です。
 
-| # | 条件 | 現状 |
-|---|------|------|
-| 1 | 6部署・社長室・未所属・共用施設のフロア構成 | **未実装**（入力契約は確定済み → §4） |
-| 2 | 15名の固定着席 | **未実装**（入力契約は確定済み → §4） |
+Phase 2の未達条件2つについて、**実装せずに責務境界だけを確定する**ための設計記録として書かれました。
 
-この文書はコードを変更しません。新しいwire schema、API、SSE event、runtime挙動も定義しません。
+| # | 条件 | **設計開始時点**の状況 | 現在 |
+|---|------|------|------|
+| 1 | 6部署・社長室・未所属・共用施設のフロア構成 | 未実装（入力契約は確定済み → §4） | ✅ **実装済み**（PR #37。§5.1） |
+| 2 | 15名の固定着席 | 未実装（入力契約は確定済み → §4） | ✅ **実装済み**（PR #35 / #37。§5.1） |
+
+**この文書自体はコードを変更しませんでした**（当時の docs-only PR としての宣言）。
+新しいwire schema、API、SSE event、runtime挙動も定義しません。
 **新規の内部API名・field名・関数名も決めません**（仮称も置きません）。未実装の要素は役割だけを書き、
 名称は§4.1の確認結果と実装PR（§5）で決めます。既存の名称・`file:line` は事実として引用します。
 **「既存事実」「設計判断」「未決事項」「次PR候補」を混ぜない**ことがこの文書の目的です。
@@ -26,8 +39,8 @@ Phase 2の未達条件2つについて、**実装せずに責務境界だけを�
 >   閉じた語彙の第2 status 面」として行うことを推奨します。** run state・承認待ち・stall も同じ
 >   表示面を使うため、表示面を2度決めないためです。判断基準（閉じた語彙のみ・自由記述なし・
 >   stream 状態を隠さない）は変えません。
-> - この推奨により、**§5 PR-1 の §4.7 決定部分**は Run/Event contract の語彙確定（LCP-1）に依存します。
->   §4.1〜§4.6 の外部事実確認は依存せず、並行して進められます。
+> - ~~この推奨により、**§5 PR-1 の §4.7 決定部分**は Run/Event contract の語彙確定（LCP-1）に依存します。~~
+>   **失効**（すぐ下の「PR-1 での解決」を参照）。PR-1 は LCP-1 を待たずに完了しました。
 >
 > **PR-1（Issue #23）での解決**: §4.7 は「**表示面の契約**（banner とは別の第2面である・閉じた語彙である・
 > stream 状態を隠さない・汎用面として設計する）」までを確定し、**語彙の中身は org 分だけ先に定義**する形で
@@ -40,7 +53,11 @@ Phase 2の未達条件2つについて、**実装せずに責務境界だけを�
 
 ---
 
-## 1. 既存事実
+## 1. 既存事実（設計開始時点）
+
+> **これは `7c9da9c` 時点のスナップショットです。** 以降の PR #27 / #33 / #35 / #37 で
+> 状況は変わっています。ここに「存在しない」と書かれているものの多くは現在は存在します。
+> **現在の姿は §5.1 を参照してください。** この節は、設計判断がどの事実の上に立っていたかの記録です。
 
 現行main（`7c9da9c`）のコードを読んで確認できる事実だけを書きます。推測は §4 に分離しています。
 
@@ -102,13 +119,14 @@ producerが未知keyを送っても wire には出ません（`src/domain/wire.t
 | `DEFAULT_STATE_LIMITS` = `max_sessions:512` / `max_actors:4096` / `max_actors_per_session:256` / `max_event_types:64` | `src/domain/reducer.ts:98` |
 | 上限超過は silent eviction ではなく **ingest halt**（fail closed）。`halt_reason` は `state_limit:<上限名>:<値>` でstream内容を含まない | `src/domain/reducer.ts:134` `StateLimitExceededError`、`README.md:347-357` |
 | bannerは閉じた語彙で、常にちょうど1 codeが表示される | `src/ui/public/quest-view.js:712` `BANNER_CODES`、`README.md:202-211` |
-| canvasは上限超過分を黙って落とさず、`表示 N 席 / 全 M 席 · 残り K 席は下の一覧に表示` を出す。DOM側は常に全actorを表示する | `src/ui/public/quest-world.js:484` `overflowTextFor`、`README.md:250-254` |
+| canvasは上限超過分を黙って落とさず、`表示 N 枠 / 全 M 枠 · 残り K 枠は下の一覧に表示` を出す（区画が溢れれば `区画 N / M`、未描画に注意状態があれば `未描画に ✖ ERROR あり` も付く）。DOM側は常に全**枠**を表示する（集約席の非代表actorは人数のみ） | `src/ui/public/quest-world.js:484` `overflowTextFor`、`README.md:250-254` |
 
 ---
 
 ## 2. 設計判断
 
-ここから先は**この文書が提案する責務境界**です。コードにはまだ存在しません。
+ここから先は**この文書が提案する責務境界**です。**設計開始時点ではコードに存在しませんでした**
+（現在は実装済み。§5.1 を参照）。
 
 ### 2.1 中心となる判断: org snapshot は event stream ではない
 
@@ -190,7 +208,7 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 | authoritative source | ai-company側の **検証済みスナップショット `company/org.snapshot.json`**（**実在・形式ともに確認済み → §4.1**）。社長室だけは org 定義に無く、player 由来で扱う（§4.1） |
 | 必要入力 | 区画の**識別子と順序**のみ。部署id、表示名、区画種別（部署 / 社長室 / 未所属 / 共用施設）、並び順 |
 | 入力に**含めない**もの | 座標、pixel、幅、色。layoutはQuest側が決める（§2.2） |
-| consumer | ① org snapshotのprojection層（新規・未実装。関数名は決めない）が区画一覧を projection する ② `buildWorld()` が区画ごとにroom矩形を割り当てる ③ DOMの社員一覧が区画ごとにgroup化する |
+| consumer | ① org snapshotのprojection層（**設計時点では未実装**。現在は `selectOffice`）が区画一覧を projection する ② `buildWorld()` が区画ごとにroom矩形を割り当てる ③ DOMの社員一覧が区画ごとにgroup化する |
 | DOM/canvasの正本関係 | **不変**: DOMが正本、canvasは `aria-hidden` の装飾層（`README.md:271-273`）。区画名・所属はDOM側にも必ず出る |
 | fail-closed時の挙動 | org snapshotが読めない / 検証に落ちる → **org機能を持たない現行の単一room表示へ縮退**し、閉じた語彙で明示。部分的な区画を描いたり、欠けた部署を推測で補ったりしない。event ingestはhaltさせない（org不在はstreamの健全性と無関係）。**この明示が実装される前にorg-backed UIを有効化しない**（§2.4の順序制約・§5） |
 | 決定論的layout | 区画の描画順は**snapshotの宣言順のみ**で決める。hash・時刻・乱数・actor数を使わない。同じsnapshot + 同じviewport → 同じ座標 |
@@ -204,7 +222,7 @@ roster社員とruntime actorは**別物**であり、対応は3通りしかあ�
 | authoritative source | 同上の snapshot の `roles[]`（**確認済み: 15件 → §4.1**）。15という数はrosterの結果であって、**定数として焼き込まない**（§4.3） |
 | 必要入力 | 社員ごとに: 安定した社員識別子、表示名、所属区画id、区画内の並び順、runtime actorとの照合key |
 | 照合key | **`runtime_agent_type`（確認済み → §4.2）**。wire の19 keyに既に存在し（`src/domain/wire.ts:49`）、`hookAdapter.ts:205` が `wire.agent.type` から載せ、ai-company 側 `roles[].runtime_agent_type` と対になる。bare `agent_id` ではない。`session_id` は照合に使わない |
-| consumer | ① roster projection（新規・未実装。関数名は決めない） ② `selectDesks` 相当が roster席 × actor状態を突き合わせる ③ `buildWorld` がroster順から席座標を決める |
+| consumer | ① roster projection（**設計時点では未実装**。現在は `selectOffice`） ② `selectDesks` 相当が roster席 × actor状態を突き合わせる ③ `buildWorld` がroster順から席座標を決める |
 | 席番号の意味の変更 | 現行 `seat` は「並べ替え後のactor index+1」（`quest-view.js:640-643`）で**動く**。固定着席では席はrosterに属し、actorの増減で動かない。これは既存の `seat` の意味を変えるため、置き換えではなく**別fieldとして導入**すべき（§4.4） |
 | fail-closed時の挙動 | roster不在・検証失敗 → **現行の動的着席へ縮退**し、閉じた語彙で明示。roster社員を推測で生成しない。1件でも不正なら部分適用せずroster全体を不採用にする（部分rosterは「誰がいないのか」を誤って伝えるため）。**この明示が実装される前にroster-backed UIを有効化しない**（§2.4の順序制約・§5） |
 | 未対応actorの扱い | roster外actorは未所属区画へ（§2.3）。**捨てない**。捨てるとstreamの事実と表示が食い違う |
@@ -390,14 +408,14 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 - **完了判定**: §4.1〜§4.7 の未決事項がすべて「確認済み」「設計判断済み」「実在しないため対象外」のいずれかに変わっている
   → **達成**（§4 参照）
 
-### PR-2: org snapshot読み取りと検証（分類B: code、runtime影響あり）
+### PR-2: org snapshot読み取りと検証（分類B: code、runtime影響あり）— ✅ **完了**（PR #27・上限修正 #33）
 
 - **前提**: PR-1 → ✅ **充足済み**
 - **成果契約**: org snapshotを読み、`src/domain/validate.ts` と同等の禁止内容checkを通し、検証失敗時はfail closed（org機能のみ無効、ingestはhaltさせない）。`QuestState` へ**独立fieldとして**置く（**field名はこのPRで決める**。この文書では固定しない）。`reduce` は触らない。あわせて **採用 / 不在 / 拒否のいずれであるかを閉じた語彙で読み取れる状態**を同じ独立fieldに保持する（拒否理由は field名 + rule名のみ・§2.4）。表示面の選択は§4.7の結論に従う
 - **対象外**: UI（org非対応の現行表示のまま据え置く）、layout、wire schema変更、SSE frame追加
 - **完了判定**: 不正なsnapshotが1件でもあればorg全体を不採用にするtestが通る。採用/不在/拒否の状態が閉じた語彙で読めるtestが通る。既存のingest系testが全て不変。**UIの描画結果が現行と一致する**（このPRではorg-backed UIを有効化しない）
 
-### PR-3: roster projection と突き合わせ ＋ 縮退表示（分類B: code、UI影響あり）
+### PR-3: roster projection と突き合わせ ＋ 縮退表示（分類B: code、UI影響あり）— ✅ **完了**（PR #35）
 
 **最初のorg-backed UI consumerであるため、縮退表示契約をこのPRに同梱します**（§2.4順序制約・§4.7）。
 
@@ -406,14 +424,14 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 - **対象外**: canvas layout、席座標、自由記述メッセージ
 - **完了判定**: §3.2 の検証方法 ④⑤⑥⑦ と §3.1 検証方法 ③ が通る。org拒否時に無言で現行表示へ落ちるcaseがtestで再現できない
 
-### PR-4: 決定論的な区画layoutと固定席座標（分類B: code、描画影響あり）
+### PR-4: 決定論的な区画layoutと固定席座標（分類B: code、描画影響あり）— ✅ **完了**（PR #37）
 
 - **前提**: PR-3
 - **成果契約**: `buildWorld` に区画room矩形とroster席座標を追加。actorの有無で座標が動かない。DOM正本 / canvas装飾層の関係は不変
 - **対象外**: 操作、選択、pointer hit test（Phase 3の範囲）
 - **完了判定**: §3.1 検証方法 ①②、§3.2 検証方法 ①②③ が通る
 
-### PR-5: 縮退経路の最終整合とREADME更新（分類A: docs 中心）
+### PR-5: 縮退経路の最終整合とREADME更新（分類A: docs 中心）— **実施中**
 
 縮退表示そのものはPR-3で入っているため、このPRは**文書と実態の突き合わせ**に縮小します。
 
@@ -421,6 +439,90 @@ UIはorg非対応のまま据え置き、無言の縮退状態を作りません
 - **成果契約**: PR-3で入った縮退表示の語彙と挙動をREADMEへ記載し、「既知の制限」（`README.md:437-439`）と本文書を実態に合わせて更新する。canvas layout追加後（PR-4）も縮退経路が変わっていないことを確認する
 - **対象外**: 新しい表示状態の追加、新しい自由記述メッセージ（表示は閉じた語彙のまま）
 - **完了判定**: READMEに未実装と書かれたままの項目が残らず、本文書の未決事項（§4）に確認済みの項目が残らない
+
+---
+
+## 5.1 実装された仕様（PR-2〜PR-4 の結果）
+
+**この節は実装の記録であり、新しい要件ではありません。** §2〜§4 の設計判断のうち、
+実装で具体名が確定したものと、レビューで是正されたものを事実として残します。
+食い違った場合は常に実装（`src/`）が正です。
+
+### 語の区別（数え間違いの原因になったもの）
+
+| 語 | 意味 | 数えるもの |
+|---|---|---|
+| **actor** | runtime の実体。`(session_id, agent_id)` で識別 | **在席数はこれ** |
+| **session** | 1回の実行。1 session が複数 actor を持ちうる | 在席数ではない |
+| **固定席 / seat** | roster 社員に属する席。**1席に複数 actor が座りうる** | 席数。actor 数と一致しない |
+| **枠 / desk** | 画面に描く1カード / セル | 描画数。overflow の分母 |
+
+実装中に3度、この3語の間を滑って誤った（PR #37 のレビュー 2〜4 巡目）。
+**在席数は actor 数**で、DOM header と canvas HUD は同じ数を出す。
+
+### roster projection（§2.3 の3規則）
+
+- 照合keyは **`runtime_agent_type` のみ**。`agent_id` / `session_id` は使わない
+- 対応 actor のいない roster 社員 → **席は描き、状態は出さない**（`不在`）。
+  `status` / `last_tool` / `last_event_ts` / `session_id` / `role` はすべて null
+- roster 外 actor → **未所属へ置く。捨てない**
+- `department_id` が null の roster 社員も未所属の器へ入る（§4.1）
+
+### 同一 key の複数 actor（§4.2 の集約）
+
+- 席は **1つのまま**。session ごとに増やさない
+- 席が代表として表示する状態は、**在席 actor 群の中で最も注意を要するもの**。
+  順位は `ACTOR_VISUAL_STATES` の並び（`error` → `awaiting_approval` → `planning` →
+  `working` → `ended` → `idle`）で、同順位は既存の office 順で解決する。
+  **終了した古い run が、失敗中の新しい run を覆い隠してはならない**
+- 席は代表 actor の `display_name` を保持し、roster 名は `role_name` として**併記**する。
+  片方を他方で上書きしない（canvas / 詳細pane と食い違うため）
+- 何 actor を代表しているかは常に表示する（カードの `actors` 行）
+
+### 第2 status 面（§4.7）
+
+- banner とは**別**の面。`BANNER_CODES` は拡張しない
+- 語彙は org 分のみの閉じた3値: `ORG_ACCEPTED` / `ORG_ABSENT` / `ORG_REJECTED`
+- **live region にしない**（banner がページ唯一）
+- `grouped === !degraded` を不変条件とし、無言の縮退を表現できなくする
+- `accepted` だが client が使えない場合は `absent` ではなく **`rejected`**。
+  両者は読み手にとって別の意味であり、混ぜることが §2.4 の禁じる無言の縮退そのもの
+- 拒否の内訳は **field名 + rule名のみ**。文法に一致しない `field` は `snapshot` へ落とす
+
+### 区画（zone）
+
+- 種別は **社長室 / 部署 / 未所属 / 共用施設** の4つ。順序はこの通りに固定
+- 社長室は org 定義に無く **`state.player` 由来**（§4.1）。席を持たない
+- 共用施設は `facilities` 由来。**部屋であって席を持たない**
+- **zone id は kind で名前空間化**する（`dept:` / `facility:` / `zone:`）。
+  departments と facilities は upstream で同一の識別子空間を共有し、`unassigned` も
+  正当な department id なので、prefix が無いと1つの role bucket が2 zone に渡り
+  要素が alias される（実際に踏んだ）
+- org の `facilities` と、hook wire の runtime `activity.facility`（会議室・カフェ等の
+  **現在地**）は**別概念**。混ぜない
+
+### 決定論的 layout（§3.1 / §3.2）
+
+- 席座標は **`(区画の宣言順, 区画内のroster順)`** の2段だけで決まる
+- **grouped の列数は roster だけから決める。** actor 数にも viewport 幅にも依存させない
+  （どちらかに依存すると、roster外 actor の増減や resize で全 band が再flowする）
+- **viewport が変えるのは pixel の大きさだけ**で、論理配置（どの部屋の何行何列か）は
+  変えない。room が高くなれば scale は縮むので pixel は動く — 動いてはいけないのは配置
+- grouped の room は **viewport 高の2倍を scale の目標 budget** にする（全部屋を1画面に
+  押し込むと scale が潰れて読めなくなるため）。**これは上限ではない**: `snapScale` が
+  `MIN_SCALE` で止まるので、それ以上縮めないと収まらない大きさになると scale の縮小が
+  止まり、room は budget を超えて伸びる。読めない状態で収めるより、読める状態で
+  スクロールさせる方を採るという判断。実測で 240px 高・32区画では `MIN_SCALE` に達し、
+  room は viewport の4倍を超える。**どんな場合でも効く上限は backing store 側**
+
+### 描き切れないものの扱い
+
+- 席が溢れた場合も、**部屋が溢れた場合も**明示する。部屋だけが溢れて席が溢れていない
+  ケースも表示条件に含める（片方だけだと silent truncate になる）
+- 上限を超えた区画の**席も** total / hidden / 最悪状態の集計に入れる。
+  描けないことと無いことは別
+- 件数だけでなく、**描けなかった中で最も注意を要する状態**を出す。
+  区画の輪郭と overflow 行をその状態色で描く
 
 ---
 

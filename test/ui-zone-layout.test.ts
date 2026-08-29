@@ -37,7 +37,16 @@ import {
   selectPlayer,
   visualForState,
 } from '../src/ui/public/quest-view.js';
-import { ATTENTION_ORDER, MAX_ROWS, MAX_ZONES, buildWorld } from '../src/ui/public/quest-world.js';
+import {
+  ATTENTION_ORDER,
+  GROUPED_HEIGHT_RATIO,
+  MAX_DEVICE_PIXELS,
+  MAX_DEVICE_SIDE,
+  MAX_ROWS,
+  MAX_ZONES,
+  MIN_SCALE,
+  buildWorld,
+} from '../src/ui/public/quest-world.js';
 
 // ------------------------------------------------------------------ setup ---
 
@@ -513,6 +522,72 @@ test('the player in the 社長室 does not also get a strip below the office', (
     padding < Math.round(58 * built.scale),
     'and there is no leftover strip the height of a player under them',
   );
+});
+
+test('the grouped height budget is a target the room may exceed, not a cap', () => {
+  // `GROUPED_HEIGHT_RATIO` is what the scale aims for, and `snapScale` clamps at
+  // `MIN_SCALE`. Past that point the scale stops shrinking and the room grows
+  // instead - legible and scrollable beating fitted and unreadable. Documented
+  // as a cap it would be simply false, so it is pinned here as a target.
+  const zones: OfficeZone[] = Array.from({ length: 32 }, (_unused, z) => ({
+    id: `dept:z${z}`,
+    name: `部署${z}`,
+    kind: 'department' as const,
+    seats: true,
+    desks: Array.from({ length: 3 }, (_unused2, i) => ({
+      ...(selectOffice(client(['impl-1'])).desks as OfficeDesk[])[0]!,
+      actor_key: `a${z}-${i}`,
+      role_id: `r${z}-${i}`,
+      roster_seat: i + 1,
+      occupants: [`a${z}-${i}`],
+      occupied: true,
+    })),
+  }));
+  const viewport = { width: 320, height: 240, dpr: 1 };
+  const built = buildWorld({ desks: zones.flatMap((zone) => zone.desks), zones, viewport });
+
+  assert.equal(built.scale, MIN_SCALE, 'the scale has bottomed out');
+  assert.ok(
+    built.room.height > viewport.height * GROUPED_HEIGHT_RATIO,
+    'and the room is taller than the budget, which is the documented trade',
+  );
+  // What stays bounded regardless: the backing store.
+  assert.ok(built.canvas.device_width * built.canvas.device_height <= MAX_DEVICE_PIXELS);
+  assert.ok(built.canvas.device_width <= MAX_DEVICE_SIDE && built.canvas.device_height <= MAX_DEVICE_SIDE);
+});
+
+test('96 frames is a single-room ceiling, not a promise every office reaches', () => {
+  // `MAX_ROWS` is shared across zones and every seat-bearing zone takes at least
+  // one row, so a grouped office can overflow far below 6x16. Seventeen
+  // departments holding one desk each is seventeen desks in total, and the
+  // seventeenth still cannot be drawn.
+  const one = (key: string): OfficeDesk => ({
+    ...(selectOffice(client(['impl-1'])).desks as OfficeDesk[])[0]!,
+    actor_key: key,
+    role_id: key,
+    roster_seat: 1,
+    occupants: [key],
+    occupied: true,
+  });
+  const zones: OfficeZone[] = Array.from({ length: MAX_ROWS + 1 }, (_unused, z) => ({
+    id: `dept:z${z}`,
+    name: `部署${z}`,
+    kind: 'department' as const,
+    seats: true,
+    desks: [one(`a${z}`)],
+  }));
+  const built = buildWorld({
+    desks: zones.flatMap((zone) => zone.desks),
+    zones,
+    header: selectHeader(client(['impl-1'])),
+    viewport: VIEWPORT,
+  });
+
+  assert.equal(built.overflow.total, MAX_ROWS + 1, 'seventeen desks in total');
+  assert.ok(built.overflow.total < 96, 'far below the single-room ceiling');
+  assert.equal(built.overflow.hidden, 1, 'and one of them still cannot be drawn');
+  // Never silently: the notice says so.
+  assert.notEqual(built.overflow_label.text, '');
 });
 
 test('an ungrouped office is the single room it has always been', () => {
