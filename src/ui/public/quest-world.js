@@ -613,6 +613,16 @@ function normalizeDesk(desk, index) {
     // construction, so absence means occupied. Only the office projection marks
     // a seat as answered by nobody.
     occupied: source.occupied !== false,
+    /**
+     * How many colleagues this one desk stands for.
+     *
+     * A desk is not a person. A roster seat with nobody at it stands for none;
+     * a seat several actors of the same runtime type answer to stands for all
+     * of them; every other desk stands for exactly one. Counting desks instead
+     * would make the canvas disagree with the DOM about how many people are in
+     * the company, which is the one number they both claim to show.
+     */
+    occupant_count: Array.isArray(source.occupants) ? source.occupants.length : 1,
     // Present only on a desk the roster placed. Never filled in from `seat`:
     // one is a position in a dynamic ordering, the other belongs to the
     // organisation (`docs/org-snapshot-design.md` §4.4).
@@ -717,12 +727,17 @@ export function buildWorld(input) {
     zones: { total: allZones.length, drawn: zonesDrawn.length, hidden: allZones.length - zonesDrawn.length },
   };
 
-  // Occupied desks only. A `Desk` from `selectDesks` has no `occupied` field
-  // and is an actor by construction, so the default is true and the ungrouped
-  // office counts exactly as it always did.
+  // Colleagues, counted the way the DOM counts them: per actor, not per desk.
+  //
+  // A `Desk` from `selectDesks` carries no `occupants`, so it stands for one and
+  // the ungrouped office counts exactly as it always did. In a grouped office a
+  // vacant roster seat stands for nobody and an aggregated seat stands for
+  // everyone behind it - anything else puts a different number of colleagues on
+  // the canvas than in the header above it.
+  const countPresent = (rows) => rows.reduce((sum, desk) => sum + desk.occupant_count, 0);
   const present = grouped
-    ? allZones.reduce((sum, zone) => sum + zone.desks.filter((desk) => desk.occupied).length, 0)
-    : desks.length;
+    ? allZones.reduce((sum, zone) => sum + countPresent(zone.desks), 0)
+    : countPresent(desks);
   const hud = buildHud(source.header ?? null, overflow, player, present);
 
   // The player's strip is added to the room, never taken out of the grid: the

@@ -49,6 +49,9 @@ const RUNTIME: Record<string, string> = {
   'ver-1': 'verifier',
   'rev-1': 'reviewer',
   'stranger-1': 'nobody-declares-this',
+  'stranger-2': 'nor-this-one',
+  // A second actor answering to the same roster seat as `impl-1`.
+  'impl-2': 'implementer',
 };
 
 function client(agents: readonly string[], overrides: Partial<SanitizedEvent> = {}): ClientState {
@@ -455,6 +458,42 @@ test('在席 counts colleagues, never roster seats nobody answered to', () => {
   const busy = world(client(['impl-1', 'stranger-1']));
   assert.equal(busy.hud.desk_count, 2, 'only the actors count');
   assert.ok(busy.overflow.total > 2, 'while the layout still accounts for every seat');
+});
+
+test('an aggregated seat counts everyone behind it, not the desk it is', () => {
+  // A desk is not a person. Two actors of the same runtime type share one roster
+  // seat, so counting occupied *desks* put 「在席 1」 on the canvas while the DOM
+  // header, which counts actors, said 2 - the two halves of one screen
+  // disagreeing about how many colleagues the company has.
+  const twins = ['impl-1', 'impl-2'];
+  const state = client(twins);
+  const office = selectOffice(state);
+  const built = world(state);
+
+  // One seat, two people.
+  const seat = office.zones
+    .flatMap((zone) => zone.desks)
+    .find((desk) => desk.role_id === 'role-implementer');
+  assert.equal(seat?.occupants.length, 2, 'both actors answer to the one seat');
+  assert.equal(
+    office.zones.flatMap((zone) => zone.desks).filter((desk) => desk.role_id === 'role-implementer').length,
+    1,
+    'and the roster seat stays a single seat',
+  );
+
+  // The two counts of the same fact agree.
+  assert.equal(selectHeader(state).desk_count, 2, 'the DOM header counts actors');
+  assert.equal(built.hud.desk_count, 2, 'and the canvas says the same number');
+});
+
+test('presence counts nobody for an empty roster and one each for strangers', () => {
+  // The two ends of the same rule, so the fix above cannot be a special case.
+  assert.equal(world(client([])).hud.desk_count, 0, 'a full roster nobody answered to is nobody');
+  assert.equal(
+    world(client(['stranger-1', 'stranger-2'])).hud.desk_count,
+    2,
+    'colleagues the roster does not know still count once each',
+  );
 });
 
 test('the player in the 社長室 does not also get a strip below the office', () => {
