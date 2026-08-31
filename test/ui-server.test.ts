@@ -67,6 +67,7 @@ test('the office screen is served on loopback with the expected content types', 
       '/ui/quest-view.js': 'text/javascript; charset=utf-8',
       '/ui/quest-world.js': 'text/javascript; charset=utf-8',
       '/ui/quest-canvas.js': 'text/javascript; charset=utf-8',
+      '/ui/quest-value.js': 'text/javascript; charset=utf-8',
     };
     assert.deepEqual([...UI_ASSET_PATHS].sort(), Object.keys(expected).sort());
 
@@ -384,7 +385,25 @@ test('the shipped assets contain no path, secret or external destination', () =>
     assert.equal(/sk-ant-|AKIA[0-9A-Z]{16}|-----BEGIN /.test(text), false, `${pathname}: credential shape`);
     // No off-origin destination: the page only ever talks to 127.0.0.1.
     assert.equal(/https?:\/\//.test(text), false, `${pathname}: external URL`);
-    assert.equal(/\bfetch\(|XMLHttpRequest|navigator\.sendBeacon|WebSocket/.test(text), false, `${pathname}: transport`);
+    assert.equal(
+      /XMLHttpRequest|navigator\.sendBeacon|WebSocket/.test(text),
+      false,
+      `${pathname}: transport`,
+    );
+    // `fetch` is allowed for exactly one same-origin read-model path and
+    // nothing else. The literal must be the complete first argument, so a
+    // concatenated or interpolated target fails here, and no shipped asset may
+    // declare a request method - the one call stays a GET.
+    const fetched = [...text.matchAll(/fetch\(\s*'([^']*)'\s*[,)]/g)].map((match) => match[1] as string);
+    for (const target of fetched) {
+      assert.equal(target, '/value/summary', `${pathname}: unexpected fetch target`);
+    }
+    assert.equal(
+      (text.match(/\bfetch\(/g) ?? []).length,
+      fetched.length,
+      `${pathname}: every fetch call site is a complete literal same-origin path`,
+    );
+    assert.equal(/method\s*:/.test(text), false, `${pathname}: a request method is declared`);
   }
 });
 

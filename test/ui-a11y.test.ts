@@ -460,7 +460,15 @@ test('switching mode closes the stream and resets connection, state and banner',
 test('the accessibility layer needs no new asset, dependency or request', () => {
   assert.deepEqual(
     [...UI_ASSET_PATHS].sort(),
-    ['/', '/ui/quest-app.js', '/ui/quest-canvas.js', '/ui/quest-view.js', '/ui/quest-world.js', '/ui/quest.css'].sort(),
+    [
+      '/',
+      '/ui/quest-app.js',
+      '/ui/quest-canvas.js',
+      '/ui/quest-value.js',
+      '/ui/quest-view.js',
+      '/ui/quest-world.js',
+      '/ui/quest.css',
+    ].sort(),
   );
   for (const pathname of UI_ASSET_PATHS) {
     const text = assetText(pathname);
@@ -539,7 +547,20 @@ test('the detail panel opens no request and injects no markup', () => {
   // Selection stays a screen-local fact: it must not become a fetch, and stream
   // text must not become HTML.
   assert.equal(/innerHTML|insertAdjacentHTML|outerHTML/.test(APP), false, 'nothing becomes markup');
-  assert.equal(/fetch\(|XMLHttpRequest|\.src\s*=/.test(APP), false, 'the app opens no new request');
+  assert.equal(/XMLHttpRequest|\.src\s*=/.test(APP), false, 'the app opens no new request');
+
+  // One request was added deliberately, and exactly one: the value read model.
+  // The literal has to be the *whole* first argument - `'/value/summary' + x`
+  // would otherwise pass - and no call may declare a method, so the single
+  // request stays a GET.
+  const calls = [...APP.matchAll(/fetch\(\s*'([^']*)'\s*[,)]/g)].map((match) => match[1] as string);
+  assert.deepEqual(calls, ['/value/summary'], 'the only fetch is the value read model');
+  assert.equal(
+    (APP.match(/fetch\(/g) ?? []).length,
+    calls.length,
+    'every fetch call site is a complete literal same-origin path',
+  );
+  assert.equal(/method\s*:/.test(APP), false, 'no request declares a method: the one call is a GET');
 });
 
 test('the detail panel says what the contract cannot supply', () => {

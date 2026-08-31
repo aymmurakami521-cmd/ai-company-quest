@@ -187,6 +187,24 @@
       </div>
     </section>
 
+    <!--
+      The ROI panel. Fed by one same-origin GET of `/value/summary`, not by the
+      event stream: rates and amounts are operator configuration and never
+      travel over SSE. Static like the legend and the log - it is not a live
+      region, so a value update never interrupts a screen reader.
+    -->
+    <section class="panel value" id="value-panel" aria-labelledby="value-heading">
+      <h2 id="value-heading">ROI<span class="panel__note">（推定と実現を分けて表示）</span></h2>
+      <p class="value__headline" id="value-headline">読み込み中です。</p>
+      <p class="value__detail" id="value-detail"></p>
+      <p class="value__meta">
+        <span class="value__visibility" id="value-visibility"></span>
+        <span class="value__source" id="value-source"></span>
+      </p>
+      <ul class="value__rows" id="value-rows"></ul>
+      <ul class="value__notes" id="value-notes"></ul>
+    </section>
+
     <section class="panel">
       <h2 id="log-heading">アクティビティログ<span class="panel__note">（直近のみ・上限あり）</span></h2>
       <!--
@@ -296,6 +314,19 @@
         <span class="log__type"></span>
         <span class="log__detail"></span>
       </li>
+    </template>
+
+    <template id="value-row-template">
+      <li class="value__row">
+        <span class="value__label"></span>
+        <span class="value__status"></span>
+        <span class="value__value"></span>
+        <span class="value__note"></span>
+      </li>
+    </template>
+
+    <template id="value-note-template">
+      <li class="value__note-row"></li>
     </template>
 
     <template id="legend-template">

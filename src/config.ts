@@ -7,6 +7,7 @@
  */
 
 import { DEFAULT_MAX_LINE_BYTES } from './domain/validate.ts';
+import { VALUE_DISCLOSURES, type ValueDisclosure } from './domain/valueDashboard.ts';
 import { DEFAULT_DEDUPE_CAPACITY, DEFAULT_REPLAY_CAPACITY } from './collector/store.ts';
 import { DEFAULT_PORT } from './server/server.ts';
 
@@ -21,6 +22,25 @@ export type QuestConfig = {
    * mode, not an error (`docs/org-snapshot-design.md` §4.5).
    */
   orgSnapshotPath: string | null;
+  /**
+   * Path to the operator-supplied value ledger (hourly-rate policy plus
+   * business-value records), on exactly the same terms as `orgSnapshotPath`:
+   * configuration only, never derived from event content, and `null` - no
+   * ledger - is a supported mode rather than an error.
+   *
+   * A file rather than an endpoint is the deliberate boundary. Quest answers
+   * GET only and holds no identity, so an Owner/Admin editing surface would
+   * need an authenticated Control API this process does not have
+   * (`docs/value-rate-design.md` §6).
+   */
+  valueLedgerPath: string | null;
+  /**
+   * How much of the money the local screen may show. `restricted` is the
+   * default: it withholds every amount while still showing what exists, which
+   * scope won and in what currency. Raising it is an explicit operator act on
+   * a loopback-only surface, never something a request can ask for.
+   */
+  valueDisclosure: ValueDisclosure;
   port: number;
   replayCapacity: number;
   dedupeCapacity: number;
@@ -61,6 +81,18 @@ export function loadConfig(env: EnvLike): QuestConfig {
   const rawOrg = env['QUEST_ORG_SNAPSHOT_PATH'];
   const orgSnapshotPath = rawOrg === undefined || rawOrg.trim() === '' ? null : rawOrg.trim();
 
+  const rawLedger = env['QUEST_VALUE_LEDGER_PATH'];
+  const valueLedgerPath = rawLedger === undefined || rawLedger.trim() === '' ? null : rawLedger.trim();
+
+  // Fail closed on an unrecognised value rather than falling back to the
+  // permissive end: a typo in this variable must not silently publish money.
+  const rawDisclosure = env['QUEST_VALUE_DISCLOSURE'];
+  const disclosure =
+    rawDisclosure === undefined || rawDisclosure.trim() === '' ? 'restricted' : rawDisclosure.trim();
+  if (!(VALUE_DISCLOSURES as readonly string[]).includes(disclosure)) {
+    throw new Error(`QUEST_VALUE_DISCLOSURE must be one of ${VALUE_DISCLOSURES.join(' | ')}`);
+  }
+
   const rawStartFrom = env['QUEST_START_FROM'] ?? 'beginning';
   if (rawStartFrom !== 'beginning' && rawStartFrom !== 'end') {
     throw new Error("QUEST_START_FROM must be 'beginning' or 'end'");
@@ -72,6 +104,8 @@ export function loadConfig(env: EnvLike): QuestConfig {
   return {
     inputPath,
     orgSnapshotPath,
+    valueLedgerPath,
+    valueDisclosure: disclosure as ValueDisclosure,
     port: readInt(env, 'QUEST_PORT', DEFAULT_PORT, 1024, 65535),
     replayCapacity: readInt(env, 'QUEST_REPLAY_CAPACITY', DEFAULT_REPLAY_CAPACITY, 1, 100_000),
     dedupeCapacity: readInt(env, 'QUEST_DEDUPE_CAPACITY', DEFAULT_DEDUPE_CAPACITY, 1, 5_000_000),
