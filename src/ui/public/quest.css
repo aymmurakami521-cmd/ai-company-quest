@@ -1085,3 +1085,72 @@ h3 {
     animation: quest-blink 0.9s steps(2, end) infinite;
   }
 }
+
+/* ── ROI panel ──────────────────────────────────────────────────────────────
+   Rows are a plain grid of text. Nothing here is colour-only: 実現 / 推定 and
+   非表示 are words, so the separation survives a monochrome screen and a screen
+   reader alike. */
+.value__headline {
+  margin: 0 0 0.25rem;
+  font-weight: 700;
+}
+
+.value__detail,
+.value__meta {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.value__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.value__rows,
+.value__notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.value__row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 1.6fr) 5rem minmax(7rem, 1fr) minmax(0, 1.6fr);
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px dotted rgba(255, 255, 255, 0.15);
+  font-size: 0.9rem;
+}
+
+.value__row[data-group='rate'],
+.value__row[data-group='unavailable'] {
+  opacity: 0.9;
+}
+
+.value__value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.value__note {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.value__note-row {
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+@media (max-width: 640px) {
+  .value__row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .value__value {
+    text-align: left;
+  }
+}

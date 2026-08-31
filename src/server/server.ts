@@ -8,6 +8,10 @@
  * - GET only; there is no endpoint that mutates collector state
  * - no CORS headers, so a random web origin cannot read the stream
  * - every streamed field comes from the `toWireEvent` whitelist
+ * - money never enters the event stream. The value read model is served from
+ *   its own GET route, built once from operator configuration, and defaults to
+ *   withholding every amount. `QuestState` carries no rate and no value, so an
+ *   SSE `snapshot` frame cannot disclose one (`docs/value-rate-design.md` §6)
  * - the UI is a fixed table of static files (see `ui/assets.ts`); a request path
  *   is looked up in that table and never turned into a filesystem path
  *
@@ -27,6 +31,13 @@ import type { WireEvent } from '../domain/wire.ts';
 import type { HaltNotice, NamespaceStore } from '../collector/store.ts';
 import type { UiAsset } from '../ui/assets.ts';
 import { CONTENT_SECURITY_POLICY, uiAsset } from '../ui/assets.ts';
+import { VALUE_LEDGER_ABSENT, type ValueLedgerState } from '../domain/valueLedger.ts';
+import {
+  buildValueSummary,
+  type ValueDisclosure,
+  type ValueLedgerSource,
+  type ValueSummaryPayload,
+} from '../domain/valueDashboard.ts';
 
 export const LOOPBACK_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 4317;
@@ -36,12 +47,31 @@ export const DEFAULT_MAX_CLIENT_BUFFER_BYTES = 1024 * 1024;
 const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 const ALLOWED_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
+/**
+ * The value read model this server publishes.
+ *
+ * Both fields come from operator configuration and are fixed for the life of
+ * the process. Nothing a request carries can change either one: a viewer
+ * cannot ask to be shown amounts, because there is nobody here to ask.
+ */
+export type ValueSurfaceOptions = {
+  ledger: ValueLedgerState;
+  disclosure: ValueDisclosure;
+  /** Stated in the payload so demo money can never read as a company's own. */
+  source?: ValueLedgerSource;
+};
+
 export type QuestServerOptions = {
   stores: Record<Namespace, NamespaceStore>;
   heartbeatMs?: number;
   maxClientBufferBytes?: number;
   now?: () => number;
+  /** Omitted means no ledger and restricted amounts, which is the safe default. */
+  value?: ValueSurfaceOptions;
 };
+
+/** The one route the value read model is published on. Exported so tests can name it. */
+export const VALUE_SUMMARY_PATH = '/value/summary';
 
 /** The part of `ServerResponse` the SSE writer uses. Kept narrow for testing. */
 export type SseSink = {
@@ -122,6 +152,15 @@ export class QuestServer {
   readonly startedAt: number;
   readonly now: () => number;
   readonly droppedSubscribers: Record<Namespace, number>;
+  /**
+   * Built once, at construction.
+   *
+   * The ledger is read at startup and never changes, so rebuilding it per
+   * request would only make the response's `generated_at` wander while the
+   * content stayed identical. One payload also means one place where the
+   * disclosure level is applied, rather than one per request.
+   */
+  readonly valueSummary: ValueSummaryPayload;
 
   constructor(options: QuestServerOptions) {
     this.stores = options.stores;
@@ -131,6 +170,13 @@ export class QuestServer {
     this.startedAt = this.now();
     this.droppedSubscribers = {} as Record<Namespace, number>;
     for (const namespace of NAMESPACES) this.droppedSubscribers[namespace] = 0;
+    const value = options.value ?? { ledger: VALUE_LEDGER_ABSENT, disclosure: 'restricted' };
+    this.valueSummary = buildValueSummary(
+      value.ledger,
+      value.disclosure,
+      new Date(this.startedAt).toISOString(),
+      value.source ?? 'operator',
+    );
     this.http = createHttpServer((req, res) => {
       this.route(req, res);
     });
@@ -180,6 +226,15 @@ export class QuestServer {
     const url = new URL(req.url ?? '/', `http://${LOOPBACK_HOST}`);
     if (url.pathname === '/health') {
       sendJson(res, 200, this.health());
+      return;
+    }
+
+    // Read-only like everything else here: the payload was decided at startup,
+    // and no query parameter widens it. A rejected or absent ledger answers
+    // 200 with its status rather than 404, so a reader can tell "no ledger"
+    // from "wrong URL" without guessing.
+    if (url.pathname === VALUE_SUMMARY_PATH) {
+      sendJson(res, 200, this.valueSummary);
       return;
     }
 

@@ -29,3 +29,26 @@ test('demo seeding is opt-in', () => {
   assert.equal(loadConfig({ QUEST_DEMO: '1' }).seedDemo, true);
   assert.equal(loadConfig({ QUEST_DEMO: 'true' }).seedDemo, false);
 });
+
+test('the value ledger is a configured path, and no path is a supported mode', () => {
+  assert.equal(loadConfig({}).valueLedgerPath, null);
+  assert.equal(loadConfig({ QUEST_VALUE_LEDGER_PATH: '  ' }).valueLedgerPath, null);
+  assert.equal(
+    loadConfig({ QUEST_VALUE_LEDGER_PATH: ' company/value.json ' }).valueLedgerPath,
+    'company/value.json',
+  );
+});
+
+test('amounts are withheld by default, and widening them is explicit', () => {
+  // The safe end is the default: a rate policy is commercially sensitive and
+  // this process has no identity to check.
+  assert.equal(loadConfig({}).valueDisclosure, 'restricted');
+  assert.equal(loadConfig({ QUEST_VALUE_DISCLOSURE: 'restricted' }).valueDisclosure, 'restricted');
+  assert.equal(loadConfig({ QUEST_VALUE_DISCLOSURE: 'full' }).valueDisclosure, 'full');
+});
+
+test('an unrecognised disclosure level fails closed rather than defaulting open', () => {
+  assert.throws(() => loadConfig({ QUEST_VALUE_DISCLOSURE: 'Full' }), /QUEST_VALUE_DISCLOSURE/);
+  assert.throws(() => loadConfig({ QUEST_VALUE_DISCLOSURE: 'all' }), /QUEST_VALUE_DISCLOSURE/);
+  assert.throws(() => loadConfig({ QUEST_VALUE_DISCLOSURE: '1' }), /QUEST_VALUE_DISCLOSURE/);
+});

@@ -261,6 +261,8 @@ LIVEへは到達せず、networkからも到達しません。
 | `QUEST_DEMO_PLAY_INTERVAL_MS` | `1500` | ミッションの1手あたりの間隔（100〜60000） |
 | `QUEST_DEMO_PLAY_FIRST_DELAY_MS` | `1200` | 接続してから最初の1手までの間隔（0〜60000） |
 | `QUEST_PLAYER_NAME` | `Player` | human playerの表示名 |
+| `QUEST_VALUE_LEDGER_PATH` | なし | 時間単価と価値記録の台帳JSONのpath。未設定は `absent`（正常な運用形態） |
+| `QUEST_VALUE_DISCLOSURE` | `restricted` | `restricted` / `full`。金額の開示レベル。未知の値は起動時にfail closed |
 
 bind hostは **設定できません**。常に `127.0.0.1` です。
 
@@ -274,6 +276,8 @@ bind hostは **設定できません**。常に `127.0.0.1` です。
 | `GET /ui/quest.css` | 画面のstyle |
 | `GET /ui/quest-app.js` | DOM + SSE glue |
 | `GET /ui/quest-view.js` | 純粋なview model（状態mapping・席割り・client fold） |
+| `GET /ui/quest-value.js` | 純粋なROI panelのview model |
+| `GET /value/summary` | ROI read model（推定/実現を分離した小計・単価の解決根拠）。既定では金額を伏せる |
 | `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態、`dropped_slow_subscribers`、`state_limits` |
 | `GET /events/live` | LIVE namespaceのSSE stream |
 | `GET /events/demo` | DEMO namespaceのSSE stream |
@@ -593,6 +597,19 @@ reducerが保持する構造は、event内容で増えるものすべてに明�
   読まないclientがprocess memoryを無制限に増やすことはありません。
 - reduced stateも有界です。session・actor・`actor_keys`・`by_type` bucketには明示的な上限があり、
   超過時はsilent evictionではなくsanitized reasonでhaltします（「State保持上限」参照）。
+- **金額はevent streamに載りません。** 時間単価も価値記録も `QuestState` に入れていないため、
+  SSEの `snapshot` frameから金額を観測することはできません。金額は `GET /value/summary` だけが
+  返し、その内容は起動時に一度だけ組み立てられます。requestのqueryやheaderで開示レベルを
+  変えることはできません。
+- 金額の開示は既定で `restricted` です。この状態では金額keyそのものがpayloadから欠落し
+  （`amount_withheld: true` が付き）、**0を返しません**。0は「価値が無かった」という別の主張です。
+  件数・通貨・単価の出所・適用期間は残るため、「無い」と「見せていない」は区別できます。
+- ROI panelもLIVE/DEMOの分離に従います。運用者の台帳はLIVEタブ、デモ用固定データはDEMOタブに
+  だけ表示し、片方の数字がもう片方の画面に出ることはありません。台帳未設定はどちらの状態としても
+  真なので両方に出ます。
+- 単価の編集UIはこのrepositoryにはありません。Questは認証もidentityも持たないread modelなので、
+  Owner/Admin用の書込面は認証付きControl API側のfollow-upとして分離しています
+  （`docs/value-rate-design.md` §6）。台帳は設定由来のファイル入力のみです。
 
 ## 開発
 
@@ -612,6 +629,25 @@ npm run typecheck
 CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのpushとpull requestで
 `npm ci` → `npm test` → typecheck を実行します（`ci/quest-core-ci.yml.example` は
 それを有効化したときの元テンプレートで、今は参考用に残してあります）。
+
+## ROI（時間単価と創出時間価値）
+
+`QUEST_VALUE_LEDGER_PATH` に台帳JSONを設定すると、画面下部のROI panelに
+**推定と実現を分離した**小計が出ます。時間単価は `User > Department > Company > ARK default`
+の固定順で解決し、ARK default（日本向け）は **3,400 JPY/hour** です。
+これはfallbackであって、給与でも顧客単価でもありません。
+
+`time_value_proxy`（創出時間価値）は **常に estimated** で、`realized_cost_saving`（実現削減額）
+とは別のsectionに出ます。両者を足した合計はpayloadのどこにも存在しません。
+算出に使った単価・通貨・出所・適用期間は record に焼き込まれるため、
+後日の単価変更で過去の値が黙って書き換わることはありません。
+
+金額表示は既定で `restricted`（伏せる）です。伏せている状態でも削減時間（分）と単価の出所は
+残るため、**ARK既定（公開定数の3,400 JPY/hour）で算出された推定だけは再構成できます**。
+運用者が設定した単価は再構成できません。この一点は監査可能性のために意図的に残しています。
+
+台帳の書式・入力方式（direct / 会社負担人件費からの算出 / owner の time value）・
+安全境界・follow-upの範囲は **[docs/value-rate-design.md](docs/value-rate-design.md)** を参照してください。
 
 ## 既知の制限
 

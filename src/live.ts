@@ -16,6 +16,10 @@ import { APPROVAL_COMMAND, attachApprovalConsole } from './demo/approval.ts';
 import { DEMO_ORG } from './demo/orgFixture.ts';
 import { loadOrgState } from './collector/orgLoader.ts';
 import { orgStatusDetail } from './domain/org.ts';
+import { loadValueLedgerState } from './collector/valueLedgerLoader.ts';
+import { valueLedgerStatusDetail, VALUE_LEDGER_ABSENT } from './domain/valueLedger.ts';
+import type { ValueLedgerSource } from './domain/valueDashboard.ts';
+import { DEMO_VALUE_LEDGER } from './demo/valueFixture.ts';
 import { QuestServer } from './server/server.ts';
 
 export async function main(): Promise<number> {
@@ -34,6 +38,23 @@ export async function main(): Promise<number> {
   // Read once at startup. A missing or invalid organisation disables the org
   // feature only; ingestion starts either way (`docs/org-snapshot-design.md` §4.5).
   const org = await loadOrgState({ path: config.orgSnapshotPath });
+
+  // Read once at startup too, and on the same terms: a missing or invalid
+  // ledger disables the value read model only, never ingestion. The demo
+  // fixture is used *only* when nothing is configured and a demo was asked
+  // for, and it says so in the payload, so fabricated money can never be read
+  // as a company's own figures.
+  const useDemoLedger = config.valueLedgerPath === null && (config.seedDemo || config.demoPlay);
+  const valueLedger = useDemoLedger
+    ? DEMO_VALUE_LEDGER
+    : config.valueLedgerPath === null
+      ? VALUE_LEDGER_ABSENT
+      : await loadValueLedgerState({ path: config.valueLedgerPath });
+  const valueLedgerSource: ValueLedgerSource = useDemoLedger
+    ? 'demo_fixture'
+    : config.valueLedgerPath === null
+      ? 'none'
+      : 'operator';
 
   const live = new NamespaceStore({
     namespace: 'live',
@@ -108,6 +129,10 @@ export async function main(): Promise<number> {
   }
 
   process.stdout.write(`quest: org snapshot ${orgStatusDetail(org)}\n`);
+  process.stdout.write(
+    `quest: value ledger ${valueLedgerStatusDetail(valueLedger)}` +
+      ` (source=${valueLedgerSource}, amounts=${config.valueDisclosure})\n`,
+  );
 
   if (config.seedDemo) {
     const seeded = seedDemoStore(demo);
@@ -131,7 +156,14 @@ export async function main(): Promise<number> {
     },
   });
 
-  const server = new QuestServer({ stores: { live, demo } });
+  const server = new QuestServer({
+    stores: { live, demo },
+    value: {
+      ledger: valueLedger,
+      disclosure: config.valueDisclosure,
+      source: valueLedgerSource,
+    },
+  });
   const address = await server.listen(config.port);
   await collector.start();
 
@@ -150,6 +182,7 @@ export async function main(): Promise<number> {
       `quest:   health  GET /health\n` +
       `quest:   stream  GET /events/live     (SSE)\n` +
       `quest:   stream  GET /events/demo     (SSE)\n` +
+      `quest:   value   GET /value/summary   (ROI read model, amounts=${config.valueDisclosure})\n` +
       'quest: read-only, loopback only. Ctrl-C to stop.\n' +
       // Said only when there is a mission that can stop for a human. The HTTP
       // surface is unchanged by it: this is stdin of this process, not a route.

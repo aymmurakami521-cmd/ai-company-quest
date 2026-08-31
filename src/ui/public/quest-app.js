@@ -6,7 +6,10 @@
  * writes the result into cloned <template> nodes.
  *
  * Boundaries kept here:
- * - read-only: the only requests made are the two documented SSE GETs;
+ * - read-only: the only requests made are the two documented SSE GETs and one
+ *   same-origin GET of `/value/summary`, which is a read model built from
+ *   operator configuration at startup. Nothing here ever POSTs, and money never
+ *   arrives on the stream (`docs/value-rate-design.md` §6);
  * - one namespace at a time: switching closes the stream and starts a brand new
  *   client state, so LIVE and DEMO can never appear on the screen together;
  * - stream content reaches the DOM through `textContent` only, never through a
@@ -18,6 +21,7 @@
  * or its 2D context is missing, every part of the DOM screen still works.
  */
 
+import { selectValuePanel } from './quest-value.js';
 import { drawWorld } from './quest-canvas.js';
 import { buildWorld, measureCanvasViewport } from './quest-world.js';
 import {
@@ -74,6 +78,15 @@ const dom = {
   detailRecentTemplate: document.getElementById('detail-recent-template'),
   detailMain: document.getElementById('detail-main'),
   detailFrozen: document.getElementById('detail-frozen'),
+  valueHeadline: document.getElementById('value-headline'),
+  valueDetail: document.getElementById('value-detail'),
+  valueVisibility: document.getElementById('value-visibility'),
+  valueSource: document.getElementById('value-source'),
+  valueRows: document.getElementById('value-rows'),
+  valueNotes: document.getElementById('value-notes'),
+  valuePanel: document.getElementById('value-panel'),
+  valueRowTemplate: document.getElementById('value-row-template'),
+  valueNoteTemplate: document.getElementById('value-note-template'),
 };
 
 let source = null;
@@ -108,6 +121,11 @@ function connect(namespace) {
   closeStream();
   state = setConnectionPhase(createClientState(namespace), 'connecting', Date.now());
   render();
+
+  // The ledger belongs to one namespace, so the panel is rewritten here rather
+  // than in `render()`: switching tabs is the only thing that changes it, and a
+  // busy stream must not rebuild these rows on every frame.
+  repaintValuePanel();
 
   const stream = new EventSource(`/events/${namespace}`);
   source = stream;
@@ -235,6 +253,78 @@ function renderDetail(detail) {
     dom.detailRecent.append(row);
   }
   dom.detailRecentEmpty.hidden = detail.recent.length > 0;
+}
+
+/**
+ * The ROI panel.
+ *
+ * Written from a `ValuePanel`, which is a pure projection of the payload, so
+ * every decision about what may be shown was already made server-side and then
+ * once more in `selectValuePanel`. This function only writes text.
+ */
+function renderValuePanel(panel) {
+  dom.valuePanel.dataset.state = panel.code;
+  dom.valueHeadline.textContent = panel.headline;
+  dom.valueDetail.textContent = panel.detail;
+  dom.valueVisibility.textContent = panel.visibility_label;
+  dom.valueSource.textContent = panel.source_label;
+
+  dom.valueRows.replaceChildren();
+  for (const item of panel.rows) {
+    const row = dom.valueRowTemplate.content.cloneNode(true);
+    const element = row.querySelector('.value__row');
+    element.dataset.group = item.group;
+    element.dataset.code = item.code;
+    text(row, '.value__label', item.label);
+    text(row, '.value__status', item.status_label);
+    text(row, '.value__value', item.value_text);
+    text(row, '.value__note', item.note);
+    dom.valueRows.append(row);
+  }
+
+  dom.valueNotes.replaceChildren();
+  for (const note of panel.notes) {
+    const row = dom.valueNoteTemplate.content.cloneNode(true);
+    const element = row.querySelector('.value__note-row');
+    element.textContent = note;
+    dom.valueNotes.append(row);
+  }
+}
+
+/**
+ * The last `/value/summary` answer, and whether one has arrived at all.
+ *
+ * Held because the panel has to be rewritten when the viewer switches tabs -
+ * the ledger belongs to exactly one namespace - and the read model is fetched
+ * once, not per tab. `null` before the first answer, so a pending request is
+ * never rendered as a failed one.
+ */
+let valuePayload = null;
+let valueAnswered = false;
+
+function repaintValuePanel() {
+  if (!valueAnswered) return;
+  renderValuePanel(selectValuePanel(valuePayload, state.namespace));
+}
+
+/**
+ * Reads the value read model once.
+ *
+ * A failure is a state the panel renders, not a thrown error: the office screen
+ * must keep working when the ROI surface does not, and an empty panel would be
+ * indistinguishable from a company that created no value.
+ */
+async function loadValuePanel() {
+  let payload = null;
+  try {
+    const response = await fetch('/value/summary', { headers: { Accept: 'application/json' } });
+    if (response.ok) payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  valuePayload = payload;
+  valueAnswered = true;
+  repaintValuePanel();
 }
 
 function renderLegend() {
@@ -645,6 +735,9 @@ for (const button of dom.modeButtons) {
 
 dom.reconnect.addEventListener('click', () => {
   connect(state.namespace);
+  // The ledger is read once at server startup, so this only recovers from a
+  // request that failed - it is not a poll.
+  void loadValuePanel();
 });
 
 /**
@@ -683,4 +776,7 @@ window.setInterval(() => {
 }, 1000);
 
 renderLegend();
+// The markup already says 読み込み中; the panel is written once the read model
+// answers, so a pending request never renders as a failed one.
+void loadValuePanel();
 connect(state.namespace);
