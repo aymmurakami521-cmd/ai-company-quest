@@ -354,11 +354,13 @@ JSON number にすると答えが黙って丸まります）。
 | `blocked_methodology_mismatch` | 分子の `methodology_version` が揃っていない |
 | **`blocked_absent_value`**（追加） | その realization_status の金額記録が**そもそも無い**。0 ではなく不在 |
 | **`blocked_absent_cost`**（追加） | `ai_cost` bucket が**報告されていない**。`unpriced` とは別の事実（§3.6） |
+| **`withheld_by_disclosure`**（追加） | 開示レベルが `restricted`。**理由そのものが金額を述べてしまう**ため伏せている（§11.5） |
 
-下2つは §8.4 の表への**追加**です。既存 8 個は削除も意味変更もしていません。
+下3つは §8.4 の表への**追加**です。既存 8 個は削除も意味変更もしていません。
 §8.4 の表は分子の存在を前提に分母側の失敗だけを並べているため、
 「実現した金額の記録が無い」を表す語がありませんでした。無いまま実装すると
 0 倍と表示することになり、それは §8.4 が唯一禁じていることです。
+3つ目（`withheld_by_disclosure`）は §11.5 で説明します。
 
 ### 11.2 estimated と realized を混ぜない
 
@@ -390,18 +392,169 @@ JSON number にすると答えが黙って丸まります）。
 
 §8.1 の定義どおり `business_value / ai_cost` で、**ARK 利用料は分母に入れていません**。
 入れると同じ名前で別の比率を publish することになります。
+ARK 利用料まで含めた All-in / TCO 指標を将来足すときの形は §11.6 です。
 
-### 11.5 開示
+### 11.5 開示 — `restricted` では「理由」も金額になりうる
 
-`restricted` では **`ratio_status` は残し、比率と両オペランドを伏せます**
-（`amount_withheld: true`）。比率自体は無次元でどちらのオペランドも復元できませんが、
-金額から導いた数字であることに変わりはなく、この read model の既定は
-そういう数字をすべて伏せる側です。役割ごとに見せ方を変えるのは identity を要する
-follow-up（§6）の範囲です。
+`restricted` では **比率も両オペランドも伏せます**。ここまでは §6 の既定どおりです。
+加えて、**理由（`ratio_status`）のうち金額そのものを述べるものも伏せます**。
 
-**既知の限界**: `restricted` でも `undefined_zero_denominator` は出るので、
-「AI 関連コストが 0 である」ことは読み取れます。ここを伏せると
-§8.4 が要求する「理由を人間に提示する」が成立しないため、意図的に残しています。
+#### なぜ理由まで伏せるのか
+
+`resolveRow` が返しうる 10 個の理由（`ratio_status` の語彙は 11 個。`blocked_unresolved_cost` は
+この build では到達しません）のうち、**分母の「値」で決まるのは 2 つだけ**です。
+
+| 理由 | 何を述べているか |
+|------|------------------|
+| `computed` | AI 関連コストが **0 ではない** |
+| `undefined_zero_denominator` | AI 関連コストが **ちょうど 0** |
+
+残りはすべて**構造**（通貨・期間・`cost_status`・件数）で決まり、金額がいくつでも同じ答えになります。
+
+> **例外を1つ明記します（この変更以前からある挙動）。** mode B で AI 関連コストを
+> 報告通貨へ換算した結果が金額上限（`MAX_COST_AMOUNT_MINOR` = 10^12 minor unit）を超えると、
+> `blocked_currency_mismatch` と `fx.reason: amount_out_of_range` が `restricted` でも出ます。
+> これは「**0 ではない**」ことを示唆します（下限の開示）。**0 を示唆することはありません。**
+> 桁が約 10^12 minor unit 以上のときにだけ起こり、比率層の開示規則より前から存在します。
+> ここを塞ぐには `convertCostBucket` 側の変更が必要で、**この変更の範囲外**としています。
+
+`undefined_zero_denominator` だけを伏せても意味がありません。**消去法で 0 が読めます**
+（「伏せられた ＝ 0」）。逆に `computed` だけを残しても同じことです。
+そこで `restricted` では**この 2 つを 1 つの `withheld_by_disclosure` に畳みます**。
+
+畳む位置も重要です。`resolveRow` は `withhold_amounts` の分岐を
+**`amount_minor` と 0 を比較するより前**に置いています。つまり
+「金額を見て、その結果を隠す」のではなく、**金額を見る判断自体をしていません**。
+下流に金額由来の分岐が残らないので、後から別の key が生えても漏れません。
+
+#### 0 を値として出さない
+
+`withheld_by_disclosure` の行は **金額 key を1つも持ちません**。
+`benefit_cost_ratio` / `net_roi` / `value_minor` / `cost_minor` は
+**key ごと不在**で、`0` も `null` も `∞` も `NaN` も入りません。
+`restricted` を 0 に変換するのは #41 の「欠損を 0 円として扱わない」と同じ誤り
+（silent zero）なので、**データ / API 上でも変換しません**。
+
+#### 理由は人間に提示する
+
+伏せる代わりに、**なぜ見えないのか**は3か所で明示します。
+
+| どこ | 何を出すか |
+|------|-----------|
+| 行 | `ratio_status: "withheld_by_disclosure"` |
+| payload の `notes` | 「比率は権限により非表示です。算出できなかったという意味でも、0倍という意味でもありません。」 |
+| 画面 | 行の値が **「権限により非表示」**、註に「0倍という意味ではありません」。行 code も `ratio-withheld-*`（`ratio-blocked-*` とは別） |
+
+`realization_status` / `cost_status` / 通貨 / コスト期間 / 対象件数 / `cost_basis` は残るので、
+**「何が伏せられているか」は分かり、「それがいくつか」は分かりません。**
+
+比率行には **`amount_withheld` を付けません**。この key は payload の他の場所では
+「金額が存在していて、あなたには見せない」を意味しますが、比率行では
+**「比率が存在するかどうか」自体が分母 0 の開示**になるため、その主張ができません。
+`ratio_status` が声明のすべてです。
+
+#### 構造由来の理由は伏せない
+
+`blocked_unpriced_cost` / `blocked_scope_mismatch` / `blocked_absent_cost` 等は
+**そのまま出します**。金額ではなく台帳の状態を述べており、`cost_status` や `period` から
+すでに読めるうえ、**運用者が直すべき箇所を示す唯一の手掛かり**だからです。
+ここを伏せると、何も守らずに理由だけ失われます。
+
+#### `restricted` 以外は従来どおり
+
+`full` では `computed` / `undefined_zero_denominator` がこれまでどおり出ます。
+`withheld_by_disclosure` は `full` では**到達しません**。
+
+**テストで固定していること**（`test/value-ratio.test.ts` / `test/ui-value.test.ts` /
+`test/value-server.test.ts`）:
+
+- AI コスト **42,000 の台帳**と **確定 0 円の台帳**を `restricted` で読むと、
+  dashboard 全体が `deepEqual` かつ **JSON 文字列まで一致**する
+  （mode A と、コストを USD から換算する **mode B の両方**で）
+- `restricted` の payload に `computed` / `undefined_zero_denominator` が**現れない**
+  （HTTP の body でも確認）
+- `restricted` の行に金額 key が1つも無く、`Infinity` / `NaN` も現れない
+- `notes` と画面に **「権限により非表示」** が出る。
+  **全行が伏せられた台帳では**「0倍や∞は表示しません」（＝算出失敗の文言）は**出ない**
+  （構造的に blocked な行が混じる台帳では両方の文が出ます。それが正しい状態です）
+- `full` では 42,000 が `computed`、0 が `undefined_zero_denominator` と**従来どおり**分かれる
+- `unpriced` の理由は `restricted` でも `full` と同じ `blocked_unpriced_cost` のまま
+
+### 11.6 All-in ROI / TCO を将来足すときの形（構造だけ）
+
+**現時点で All-in 指標は作っていません。** 作ってあるのは「後から別の指標として足せる」構造です。
+
+#### やっていないこと
+
+- 分母を差し替えられるようにする（`ai_cost` を設定で `ai_cost + ark_fee` に変える等）
+- 既存の `benefit_cost_ratio` の定義・値・key を変える
+- `checkValueRecord` とは別の受理定義を作る（#41。**唯一の受理定義のまま**）
+
+分母を差し替え可能にすると、同じ `benefit_cost_ratio` という名前が
+台帳次第で別の割り算を指すことになります。これは「既存の比率の意味を変えない」に反します。
+
+#### やったこと — 用語名の registry
+
+`src/domain/ratio.ts` に 2 つの構造を置きました。
+
+**1. 分母の識別子を payload に載せる**
+
+```jsonc
+{ "realization_status": "realized", "cost_basis": "ai_cost", "ratio_status": "computed", ... }
+```
+
+`RATIO_COST_BASES` は今日 `['ai_cost']` の1語だけです。**全行が自分の分母を名乗る**ので、
+将来 All-in 行が同じ配列に並んでも、読み手はどちらの割り算かを key の有無から推測せずに済みます。
+
+**2. 用語名 registry（`RATIO_TERM_SETS`）**
+
+1つの分母に対して、publish する **key の名前**を宣言します。
+
+| field | 今日の値 |
+|-------|---------|
+| `cost_basis` | `ai_cost` |
+| `definition` | `business_value / ai_cost` |
+| `ratio_key` | `benefit_cost_ratio` |
+| `net_roi_key` | `net_roi` |
+| `cost_key` | `cost_minor` |
+
+`ratioTermConflicts()` が registry を検査し、**2つの規則**を課します。
+
+| 規則 | 何を防ぐか |
+|------|-----------|
+| **同じ payload key を2つの指標が使えない** | All-in が `benefit_cost_ratio` を名乗って既存の比率の意味を書き換えること |
+| **同じ表示名（`label_ja` / `term_en`）を2つの指標が使えない** | payload では別 key なのに、**画面では**両方が「費用対効果比」と名乗ること |
+| **同じ `cost_basis` を2つの指標が使えない** | 同じ割り算に2つの名前を付けること（#41 の重複 ROI モデル） |
+
+画面側（`src/ui/public/quest-value.js`）も、比率行のラベルを **`cost_basis` で引きます**。
+未知の分母は既存の名前を借りずに、その分母名のまま表示されます。
+
+違反した registry では **module が load できません**（import 時に throw）。
+「気をつける」ではなく、**壊れた registry を積んだ build が起動しない**という形にしています。
+
+#### 将来 All-in を足すときの手順
+
+1. `RATIO_COST_BASES` に `all_in_cost` を足す
+2. `RATIO_TERM_SETS` に **新しい名前**の term set を足す
+   （例: `all_in_benefit_cost_ratio` / `all_in_net_roi` / `all_in_cost_minor`）
+3. その分母の行を追加で publish する
+
+既存行は `cost_basis: "ai_cost"` のまま、値も key も変わりません。
+
+**テストで固定していること**（`test/value-ratio.test.ts`）:
+
+- `RATIO_COST_BASES` が `['ai_cost']` ちょうど、`RATIO_TERM_SETS` が **1件**
+  （＝ All-in 指標そのものは存在しない）
+- 全比率行が `cost_basis: "ai_cost"` を持つ
+- registry が宣言する key が、**実際に publish される key と一致**する
+  （registry が飾りに退化しない）
+- 台帳に **ARK 利用料を書き足しても `ratios` が1文字も変わらない**
+  （＝ 分母の意味が変わっていない）。ARK 利用料は `costs.ark_fee` に出る
+- 新しい名前・新しい分母の term set は `ratioTermConflicts` を**通る**
+- `benefit_cost_ratio` / `net_roi` を再利用する term set は**弾かれる**
+- 表示名（`費用対効果比` / `benefit-cost ratio`）を再利用する term set も**弾かれる**
+- `cost_basis: "ai_cost"` を再利用する term set も**弾かれる**
+- 実際に積んである registry が自分の規則を満たしている（import 時の throw と同じ検査）
 
 ---
 
@@ -411,5 +564,7 @@ follow-up（§6）の範囲です。
 - HR / 給与システム連携、個人給与の取得
 - Provider AI usage Cost の telemetry（`cost-governance-roi-design.md` §9.3 の後続）
 - 役割別の金額出し分け（identity / 認証基盤を要する。§6 の follow-up）
+- **All-in ROI / TCO 指標そのもの**（ARK 利用料を含む分母の比率）。
+  足せる構造だけを用意しています（§11.6）
 - 外部サービスからの FX レート取得（§10.1 のとおり**作りません**）
 - payback period の算出

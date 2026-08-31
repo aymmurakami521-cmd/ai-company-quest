@@ -20,6 +20,13 @@
  * lie of the exact kind §3.3 forbids, and a reader with no permission would see
  * a company that created no value rather than a figure they may not see.
  *
+ * That holds for what the *reasons* say too, not only for the figures. A ratio
+ * row's reason is withheld exactly when the reason is derived from an amount
+ * (`ratio.ts` rule 3), because `undefined_zero_denominator` states an amount -
+ * the AI cost is exactly 0 - as plainly as the number would. What is published
+ * instead is the restriction itself, so the screen can say why a figure is
+ * missing without saying what it was.
+ *
  * Pure module: no I/O, no clock, no environment. The `generated_at` instant is
  * passed in.
  */
@@ -291,6 +298,8 @@ const NOTE_RATIO_SEPARATE =
   '比率は realization_status ごとに別々に算出しています。推定と実現を1つの比率には混ぜません。';
 const NOTE_RATIO_BLOCKED =
   '算出できない比率は理由付きで別掲しています。0倍や∞は表示しません。';
+const NOTE_RATIO_WITHHELD =
+  '比率は権限により非表示です。算出できなかったという意味でも、0倍という意味でもありません。';
 
 type SubtotalAccumulator = { record_count: number; total: number };
 
@@ -735,7 +744,10 @@ export function buildValueDashboard(input: DashboardInput): ValueDashboard {
 
   // The ARK fee is deliberately not part of the denominator: §8.1 defines the
   // benefit-cost ratio as `business_value / ai_cost`, and folding a platform
-  // fee in would publish a different ratio under the same name.
+  // fee in would publish a different ratio under the same name. An All-in / TCO
+  // indicator is therefore a *second* term set in `RATIO_TERM_SETS` producing
+  // its own rows, not a wider `ai_cost` passed here - which is why `arkFee`
+  // reaches `costs` below and nothing else (`docs/value-rate-design.md` §11.6).
   const ratios = buildRatioRows({
     records: aggregated,
     ai_cost: aiCost.bucket,
@@ -754,7 +766,18 @@ export function buildValueDashboard(input: DashboardInput): ValueDashboard {
   if (disclosure === 'restricted') notes.push(NOTE_RESTRICTED);
   if (input.unavailable.length > 0) notes.push(NOTE_UNAVAILABLE);
   if (normalized.unconverted.length > 0) notes.push(NOTE_FX_UNCONVERTED);
-  if (ratios.some((row) => row.ratio_status !== 'computed')) notes.push(NOTE_RATIO_BLOCKED);
+  // Two different sentences, because they answer two different questions. A
+  // row the ledger could not support says so; a row this reader may not see
+  // says *that*, and saying "算出できません" instead would send an operator
+  // hunting for a fault in a ledger that is fine.
+  if (ratios.some((row) => row.ratio_status === 'withheld_by_disclosure')) {
+    notes.push(NOTE_RATIO_WITHHELD);
+  }
+  // Stated as the complement of the two publishable outcomes rather than as a
+  // list of refusals, so a reason added to §8.4 later cannot ship with no note.
+  if (ratios.some((row) => row.ratio_status !== 'computed' && row.ratio_status !== 'withheld_by_disclosure')) {
+    notes.push(NOTE_RATIO_BLOCKED);
+  }
 
   return {
     schema_version: DASHBOARD_SCHEMA_VERSION,

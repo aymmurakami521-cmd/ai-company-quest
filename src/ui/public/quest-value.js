@@ -31,6 +31,18 @@ export const NOT_PRICED = '金額未確定';
  * ("there is a total, you may not see it") and 0.
  */
 export const NOT_CONVERTIBLE = '換算できません';
+/**
+ * Rendered where a ratio would be for a viewer who may not see amounts.
+ *
+ * Deliberately different from 非表示 (an amount exists and is being withheld)
+ * and from 0倍: under restriction the panel does not know - and must not
+ * disclose - whether there is a ratio at all, because whether there is one is
+ * itself a statement about the AI cost. What it can say is why the reader is
+ * not seeing it, and that is what this says.
+ */
+export const RATIO_WITHHELD = '権限により非表示';
+/** Said beside it, because 非表示 and 0 are the two readings to keep apart. */
+export const RATIO_WITHHELD_NOTE = '0倍という意味ではありません';
 /** How many individual rate-trace lines the panel lists before summarising. */
 export const MAX_RATE_TRACE_ROWS = 8;
 /** The same cap for FX conversion lines. The full list stays on `/value/summary`. */
@@ -124,6 +136,25 @@ const RATIO_STATUS_LABELS = {
   blocked_methodology_mismatch: '算定方法が比較できません',
   blocked_absent_value: '対象期間の金額記録がありません',
   blocked_absent_cost: 'AI関連コストの記録がありません',
+  withheld_by_disclosure: RATIO_WITHHELD,
+};
+
+/**
+ * What a ratio row is called, by the denominator it divided by.
+ *
+ * Keyed on `cost_basis` rather than hardcoded, so that a row from a second
+ * indicator cannot appear under this one's name. An unrecognised denominator
+ * falls back to naming itself - deliberately unpolished, because the fix is to
+ * add the name here, not to let it borrow 費用対効果比
+ * (`docs/value-rate-design.md` §11.6).
+ *
+ * This is a second copy of the names in `RATIO_TERM_SETS`: the browser loads
+ * this file directly and cannot import a domain module. `test/ui-value.test.ts`
+ * asserts the rendered label against `AI_COST_TERMS`, so the two copies cannot
+ * drift apart silently.
+ */
+const RATIO_BASIS_LABELS = {
+  ai_cost: { ratio_ja: '費用対効果比', ratio_en: 'benefit-cost ratio', net_ja: '純ROI', net_en: 'net ROI' },
 };
 
 const COST_STATUS_LABELS = {
@@ -275,6 +306,21 @@ function costRow(code, section) {
   return row(code, 'cost', section.label, status, text, parts.join('・'));
 }
 
+/** The names this row publishes under. Never another denominator's names. */
+function ratioNames(entry) {
+  const known = lookup(RATIO_BASIS_LABELS, entry.cost_basis, null);
+  if (known !== null) return known;
+  const basis = typeof entry.cost_basis === 'string' && entry.cost_basis !== '' ? entry.cost_basis : '不明な分母';
+  return { ratio_ja: `比率（${basis}）`, ratio_en: '', net_ja: `純ROI（${basis}）`, net_en: '' };
+}
+
+/** `費用対効果比 benefit-cost ratio` - the term name, in both languages (§8.5). */
+function ratioTerm(names, key) {
+  const ja = key === 'net' ? names.net_ja : names.ratio_ja;
+  const en = key === 'net' ? names.net_en : names.ratio_en;
+  return en === '' ? ja : `${ja} ${en}`;
+}
+
 /** Shared context line for a ratio row: what it covers and what it left out. */
 function ratioNote(entry) {
   const parts = [`対象 ${entry.included_record_count}件`];
@@ -306,12 +352,29 @@ function ratioRows(dashboard) {
     const statusLabel = lookup(REALIZATION_LABELS, entry.realization_status, entry.realization_status);
     const key = `${entry.realization_status}-${entry.currency}`;
     const note = ratioNote(entry);
+    const names = ratioNames(entry);
+    // Its own row code, not a `ratio-blocked-` one: "we could not work this
+    // out" and "you are not allowed to see this" are different messages to a
+    // reader and different anchors to a test.
+    if (entry.ratio_status === 'withheld_by_disclosure') {
+      rows.push(
+        row(
+          `ratio-withheld-${key}`,
+          'ratio',
+          `${names.ratio_ja}（${entry.currency}）`,
+          statusLabel,
+          RATIO_WITHHELD,
+          `${note}・${RATIO_WITHHELD_NOTE}`,
+        ),
+      );
+      continue;
+    }
     if (entry.ratio_status !== 'computed') {
       rows.push(
         row(
           `ratio-blocked-${key}`,
           'ratio',
-          `費用対効果比（${entry.currency}）`,
+          `${names.ratio_ja}（${entry.currency}）`,
           statusLabel,
           lookup(RATIO_STATUS_LABELS, entry.ratio_status, entry.ratio_status),
           note,
@@ -319,14 +382,16 @@ function ratioRows(dashboard) {
       );
       continue;
     }
-    const withheld = entry.amount_withheld === true;
+    // No 非表示 branch here: a `computed` row is only ever built for a viewer
+    // who may see the figures. A withheld one took the branch above, under its
+    // own text, because 非表示 would say a ratio exists and is being hidden.
     rows.push(
       row(
         `ratio-bcr-${key}`,
         'ratio',
-        `費用対効果比 benefit-cost ratio（${entry.currency}）`,
+        `${ratioTerm(names, 'ratio')}（${entry.currency}）`,
         statusLabel,
-        withheld ? AMOUNT_WITHHELD : `${entry.benefit_cost_ratio}倍`,
+        `${entry.benefit_cost_ratio}倍`,
         note,
       ),
     );
@@ -334,9 +399,9 @@ function ratioRows(dashboard) {
       row(
         `ratio-net-${key}`,
         'ratio',
-        `純ROI net ROI（${entry.currency}）`,
+        `${ratioTerm(names, 'net')}（${entry.currency}）`,
         statusLabel,
-        withheld ? AMOUNT_WITHHELD : `${entry.net_roi}倍`,
+        `${entry.net_roi}倍`,
         note,
       ),
     );

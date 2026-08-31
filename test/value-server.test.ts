@@ -351,6 +351,15 @@ test('a converted, ratio-bearing payload discloses no figure under restriction e
     assert.ok(keys.has('ratio_status'), 'the reason survives');
     assert.ok(keys.has('fx_rate'), 'and so does the rate that was applied');
 
+    // ...but a reason that *is* a figure does not. `undefined_zero_denominator`
+    // states that the AI cost is exactly 0, and `computed` states that it is
+    // not, so publishing either of them to this reader discloses the amount by
+    // elimination. Over the wire, the served body must contain neither name.
+    assert.ok(response.body.includes('withheld_by_disclosure'), 'the restriction is named');
+    for (const leak of ['undefined_zero_denominator', '"computed"']) {
+      assert.equal(response.body.includes(leak), false, leak);
+    }
+
     // 250,000 USD-minor and its 370,625 JPY conversion; the 37,000 JPY cost.
     for (const amount of ['250000', '370625', '37000']) {
       assert.equal(response.body.includes(amount), false, amount);
