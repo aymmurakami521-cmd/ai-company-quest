@@ -5,7 +5,18 @@
  * so its contract is declared here and exercised by `test/ui-value.test.ts`.
  */
 
-export type ValueRowGroup = 'value' | 'cost' | 'rate' | 'unavailable';
+export type ValueRowGroup =
+  | 'value'
+  | 'cost'
+  /** benefit-cost ratio / net ROI, or the reason there is none. */
+  | 'ratio'
+  | 'rate'
+  /** One line per converted amount: which FX rate, from whom, as of when. */
+  | 'fx'
+  /** A time saving with no resolvable hourly rate. Never rendered as 0. */
+  | 'unavailable'
+  /** Money with no path to the reporting currency. Never rendered as 0. */
+  | 'unconverted';
 
 export type ValueRow = {
   /** Stable machine-readable key, also usable as a CSS hook and a test anchor. */
@@ -45,7 +56,9 @@ export type ValuePanel = {
 export declare const AMOUNT_WITHHELD: string;
 export declare const NO_RECORDS: string;
 export declare const NOT_PRICED: string;
+export declare const NOT_CONVERTIBLE: string;
 export declare const MAX_RATE_TRACE_ROWS: number;
+export declare const MAX_FX_TRACE_ROWS: number;
 export declare const MINOR_UNIT_EXPONENTS: Readonly<Record<string, number>>;
 
 export declare function formatMinor(amountMinor: unknown, currency: unknown): string | null;

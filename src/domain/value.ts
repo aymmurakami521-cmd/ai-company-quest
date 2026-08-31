@@ -150,6 +150,49 @@ export type ValueRecord = {
   rate_evidence: RateEvidence | null;
 };
 
+/**
+ * A record as it enters aggregation.
+ *
+ * Deliberately a *different* type from `ValueRecord` rather than a copy of one.
+ * Under aggregation mode B (`docs/cost-governance-roi-design.md` §7.3.1) a
+ * monetary record is restated into the reporting currency before it is added to
+ * a subtotal, and the restated figure is not a `ValueRecord`: the original
+ * currency and amount are the record (§4.2 - the original is never
+ * overwritten), and a `time_value_proxy` restated into another currency would
+ * no longer satisfy `checkValueRecord`, whose contract ties its `unit` to the
+ * currency of the rate that produced it.
+ *
+ * So the restated figure is carried in a type that holds only what aggregation
+ * needs, and there is no way to mistake it for an admissible record or to feed
+ * it back into a ledger. Mode A produces one of these per record with every
+ * field unchanged.
+ */
+export type AggregatedRecord = {
+  record_id: string;
+  value_metric_type: ValueMetricType;
+  value_kind: ValueKind;
+  realization_status: RealizationStatus;
+  /** The currency or unit the `quantity` below is stated in. */
+  unit: string;
+  quantity: number;
+  measurement_window: MeasurementWindow;
+  methodology_version: string;
+};
+
+/** The identity projection: what mode A aggregates, unchanged. */
+export function aggregatedRecord(record: ValueRecord): AggregatedRecord {
+  return {
+    record_id: record.record_id,
+    value_metric_type: record.value_metric_type,
+    value_kind: record.value_kind,
+    realization_status: record.realization_status,
+    unit: record.unit,
+    quantity: record.quantity,
+    measurement_window: { ...record.measurement_window },
+    methodology_version: record.methodology_version,
+  };
+}
+
 /** Why a record is not admissible. Closed vocabulary; carries no record content. */
 export const VALUE_RULE_VIOLATIONS = [
   'unknown_metric_type',

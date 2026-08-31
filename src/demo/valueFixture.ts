@@ -26,7 +26,14 @@
  *   would resolve today, and it is carried forward untouched;
  * - `realized_cost_saving`, `revenue_contribution` and
  *   `gross_profit_contribution` are present so the screen has a realized column
- *   that the estimated proxy is visibly *not* part of.
+ *   that the estimated proxy is visibly *not* part of;
+ * - the ledger reports in JPY but holds one USD figure, and declares the
+ *   operator-supplied rate that converts it, so `npm run demo` shows aggregation
+ *   mode B (§7.3.1) with its conversion evidence rather than only the partition;
+ * - `ai_cost` states the period it covers, which is what makes a benefit-cost
+ *   ratio admissible at all (§8.2). Two ratios appear, one realized and one
+ *   estimated, and they are visibly different numbers - which is the point of
+ *   never summing the two.
  */
 
 import { validateValueLedger, valueLedgerStateFrom, type ValueLedgerState } from '../domain/valueLedger.ts';
@@ -39,6 +46,20 @@ export const DEMO_VALUE_LEDGER_DOCUMENT: unknown = {
   policy_version: '2026-08',
   company_id: COMPANY,
   reporting_currency: 'JPY',
+  aggregation_mode: 'reporting_currency_normalized',
+  // Operator-supplied, like every other figure in this document. $100.00 is
+  // ¥14,825 from the start of 2026; nothing fetches this and nothing updates it.
+  fx_rates: [
+    {
+      from_currency: 'USD',
+      to_currency: 'JPY',
+      effective_from: '2026-01-01T00:00:00Z',
+      from_amount_minor: 10000,
+      to_amount_minor: 14825,
+      fx_source: 'published_reference',
+      fx_rate_version: '2026-08',
+    },
+  ],
   hourly_rates: [
     {
       scope: 'company',
@@ -255,6 +276,25 @@ export const DEMO_VALUE_LEDGER_DOCUMENT: unknown = {
       derived_from: null,
       rate_evidence: null,
     },
+    {
+      // Stated in USD. The reporting currency is JPY, so this one is converted
+      // - visibly, with the rate above named in the FX trace.
+      record_id: 'rev-usd-aug',
+      value_metric_type: 'revenue_contribution',
+      value_kind: 'monetary',
+      realization_status: 'realized',
+      unit: 'USD',
+      quantity: 200000,
+      baseline: { kind: 'prior_period', quantity: 0 },
+      measurement_window: { start: '2026-08-01T00:00:00Z', end: '2026-08-31T23:59:59Z' },
+      attribution_scope: { company_id: COMPANY, department_id: null, user_id: null },
+      attribution_method: 'operator_declared',
+      confidence: 'medium',
+      methodology_version: 'v1',
+      evidence_ref: 'demo-evidence-06',
+      derived_from: null,
+      rate_evidence: null,
+    },
   ],
   ai_cost: {
     cost_status: 'finalized',
@@ -262,6 +302,9 @@ export const DEMO_VALUE_LEDGER_DOCUMENT: unknown = {
     currency: 'JPY',
     pricing_source: 'provider_invoice',
     pricing_version: '2026-08',
+    // The period the invoice covers. Without it no ratio is admissible (§8.2),
+    // and the screen says `blocked_scope_mismatch` rather than guessing.
+    period: { start: '2026-08-01T00:00:00Z', end: '2026-08-31T23:59:59Z' },
   },
   ark_fee: {
     cost_status: 'estimated',

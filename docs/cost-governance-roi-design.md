@@ -643,6 +643,13 @@ benefit-cost ratio / net ROI を**計算してよいのは、次を全て満た�
 いずれの `blocked_*` / `undefined_*` でも、**比率の代わりに 0 や ∞ を表示しません。**
 status と理由をそのまま人間へ提示します。
 
+> 実装（`src/domain/ratio.ts`）は、この表に **2つの語を追加**しています。
+> `blocked_absent_value`（その realization_status の金額小計がそもそも無い）と
+> `blocked_absent_cost`（`ai_cost` bucket が報告されていない）です。
+> この表は分子の存在を前提に分母側と commensurability の失敗だけを並べているため、
+> 「記録が無い」を表す語が無く、そのままでは 0 倍と表示することになります。
+> **既存の8語は削除も意味変更もしていません**（→ `docs/value-rate-design.md` §11.1）。
+
 ### 8.5 報告規則
 
 - 報告時は **用語名を必ず併記**します（「benefit-cost ratio 13.3倍」）。

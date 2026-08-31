@@ -24,6 +24,7 @@
  */
 
 import { isCurrencyCode } from './rate.ts';
+import type { MeasurementWindow } from './value.ts';
 
 export const COST_STATUSES = ['estimated', 'finalized', 'unpriced'] as const;
 export type CostStatus = (typeof COST_STATUSES)[number];
@@ -44,6 +45,22 @@ export type CostBucket = {
   pricing_source: PricingSource | null;
   /** The version of the price list or contract the amount came from. */
   pricing_version: string | null;
+  /**
+   * The period the amount covers, when the operator stated one.
+   *
+   * Optional in the document and null when absent, because an ROI screen that
+   * only *displays* a cost total does not need it - and every ledger written
+   * before this field existed must keep validating.
+   *
+   * It is required for a *ratio*, though. `docs/cost-governance-roi-design.md`
+   * §8.2 admits a benefit-cost ratio only when the value's `measurement_window`
+   * and the cost's period are the same, and a bucket with no period offers no
+   * way to establish that. Rather than assume the bucket covers whatever window
+   * the value records happen to span - a silent assumption of exactly the kind
+   * §4.2 and §7.3.1 forbid about conversion - the ratio layer reports
+   * `blocked_scope_mismatch` and says so.
+   */
+  period: MeasurementWindow | null;
 };
 
 export const COST_RULE_VIOLATIONS = [
@@ -57,6 +74,7 @@ export const COST_RULE_VIOLATIONS = [
   'currency_invalid',
   'currency_not_allowed',
   'pricing_source_required',
+  'period_invalid',
 ] as const;
 export type CostRuleViolation = (typeof COST_RULE_VIOLATIONS)[number];
 
@@ -66,6 +84,16 @@ export function checkCostBucket(bucket: CostBucket): CostRuleViolation[] {
     return ['unknown_cost_status'];
   }
   const violations: CostRuleViolation[] = [];
+
+  // The period is orthogonal to the amount: an `unpriced` bucket may still know
+  // which period it will eventually price, so this is checked on every branch.
+  if (bucket.period !== null) {
+    const startMs = Date.parse(bucket.period.start);
+    const endMs = Date.parse(bucket.period.end);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) {
+      violations.push('period_invalid');
+    }
+  }
 
   if (bucket.cost_status === 'unpriced') {
     if (bucket.amount_minor !== null) violations.push('amount_not_allowed');

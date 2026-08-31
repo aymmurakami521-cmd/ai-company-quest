@@ -14,6 +14,7 @@ import {
   AMOUNT_WITHHELD,
   MAX_RATE_TRACE_ROWS,
   MINOR_UNIT_EXPONENTS,
+  NOT_CONVERTIBLE,
   NOT_PRICED,
   NO_RECORDS,
   formatMinor,
@@ -26,8 +27,10 @@ import {
   minorUnitExponent,
 } from '../src/domain/rate.ts';
 import { buildValueSummary } from '../src/domain/valueDashboard.ts';
+import { validateValueLedger, valueLedgerStateFrom } from '../src/domain/valueLedger.ts';
 import { DEMO_VALUE_LEDGER } from '../src/demo/valueFixture.ts';
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
+import { COMPANY, makeLedgerDocument } from './valueHelpers.ts';
 
 const AT = '2026-09-01T00:00:00Z';
 
@@ -424,4 +427,132 @@ test('a label table indexed by payload content cannot resolve to a prototype mem
   }
   assert.equal(typeof panel.source_label, 'string');
   assert.equal(panel.source_label, '', 'an unknown ledger source has no label, not a prototype member');
+});
+
+
+// ------------------------------------------------------ ratios and FX ---
+
+/** A panel built from a document, so no hand-written payload shape can drift. */
+function panelForDocument(
+  overrides: Record<string, unknown>,
+  disclosure: 'restricted' | 'full' = 'full',
+): ValuePanel {
+  const state = valueLedgerStateFrom(validateValueLedger(makeLedgerDocument(overrides)));
+  assert.equal(state.status, 'accepted', JSON.stringify(state));
+  return selectValuePanel(buildValueSummary(state, disclosure, AT, 'operator'), 'live');
+}
+
+const AUGUST = { start: '2026-08-01T00:00:00Z', end: '2026-08-31T23:59:59Z' };
+
+test('a computed ratio is shown as two named terms, never as one bare multiple', () => {
+  const panel = panelFor('full');
+  const rows = panel.rows.filter((row) => row.group === 'ratio');
+  assert.ok(rows.length >= 4, 'realized and estimated, each with both terms');
+
+  const bcr = rowFor(panel, 'ratio-bcr-realized');
+  assert.ok(bcr.label.includes('benefit-cost ratio'), bcr.label);
+  assert.ok(bcr.value_text.endsWith('倍'), bcr.value_text);
+  const net = rowFor(panel, 'ratio-net-realized');
+  assert.ok(net.label.includes('net ROI'), net.label);
+  assert.notEqual(bcr.value_text, net.value_text, 'the two terms are different numbers');
+
+  // The estimated ratio is its own pair of rows, and no row mixes the two.
+  assert.notEqual(rowFor(panel, 'ratio-bcr-estimated').value_text, bcr.value_text);
+  for (const row of rows) {
+    assert.equal(row.value_text.includes('∞'), false, row.value_text);
+    assert.equal(row.value_text, row.value_text.trim());
+    assert.notEqual(row.value_text, '0倍');
+    assert.ok(row.note.includes('対象'), row.note);
+  }
+});
+
+test('a ratio that cannot be computed shows the reason, not a zero or a dash', () => {
+  const panel = panelForDocument({
+    value_records: [],
+    ai_cost: { cost_status: 'unpriced', amount_minor: null, currency: null, pricing_source: null },
+  });
+  const rows = panel.rows.filter((row) => row.group === 'ratio');
+  assert.ok(rows.length > 0);
+  for (const row of rows) {
+    assert.equal(row.value_text, 'AI関連コストが金額未確定');
+    assert.equal(row.value_text.includes('0'), false);
+    assert.equal(row.code.startsWith('ratio-blocked-'), true, row.code);
+  }
+});
+
+test('money that could not be converted reads 換算できません, not 非表示 and not 0', () => {
+  const document = {
+    aggregation_mode: 'reporting_currency_normalized',
+    value_records: [
+      {
+        record_id: 'rev-eur',
+        value_metric_type: 'revenue_contribution',
+        value_kind: 'monetary',
+        realization_status: 'realized',
+        unit: 'EUR',
+        quantity: 50000,
+        baseline: { kind: 'prior_period', quantity: 0 },
+        measurement_window: { ...AUGUST },
+        attribution_scope: { company_id: COMPANY, department_id: null, user_id: null },
+        attribution_method: 'operator_declared',
+        confidence: 'high',
+        methodology_version: 'v1',
+        evidence_ref: null,
+        derived_from: null,
+        rate_evidence: null,
+      },
+    ],
+  };
+
+  for (const disclosure of ['full', 'restricted'] as const) {
+    const panel = panelForDocument(document, disclosure);
+    const subtotal = rowFor(panel, 'value-revenue_contribution');
+    assert.equal(subtotal.value_text, NOT_CONVERTIBLE, disclosure);
+    assert.notEqual(subtotal.value_text, AMOUNT_WITHHELD, disclosure);
+    assert.ok(subtotal.note.includes('0円ではありません'), subtotal.note);
+
+    const unconverted = rowFor(panel, 'unconverted-rev-eur');
+    assert.equal(unconverted.group, 'unconverted');
+    assert.equal(unconverted.value_text, '0円ではありません');
+    assert.ok(unconverted.note.includes('EUR → JPY'), unconverted.note);
+    assert.ok(unconverted.note.includes('適用できる換算率がありません'), unconverted.note);
+    assert.equal(unconverted.note.includes('no_applicable_rate'), false, 'not a raw rule code');
+  }
+});
+
+test('the FX trace names the rate, who it came from, and when it applied', () => {
+  const panel = panelFor('full');
+  const row = rowFor(panel, 'fx-rev-usd-aug');
+  assert.equal(row.group, 'fx');
+  assert.equal(row.status_label, 'USD → JPY');
+  assert.equal(row.value_text, '1.482500');
+  assert.ok(row.note.includes('公表レートの転記'), row.note);
+  assert.ok(row.note.includes('版 2026-08'), row.note);
+  assert.ok(row.note.includes('適用時点 2026-08-31'), row.note);
+
+  // The mode is stated beside the figures, as §8.5 requires.
+  assert.ok(panel.detail.includes('JPY へ換算して小計'), panel.detail);
+});
+
+test('a converted cost says so, and an unconvertible one keeps its own currency', () => {
+  const panel = panelFor('full');
+  assert.equal(rowFor(panel, 'cost-ai').value_text, '42,000 JPY');
+
+  const blocked = panelForDocument({
+    aggregation_mode: 'reporting_currency_normalized',
+    ai_cost: {
+      cost_status: 'finalized',
+      amount_minor: 20000,
+      currency: 'USD',
+      pricing_source: 'provider_invoice',
+      pricing_version: '2026-08',
+    },
+  });
+  const row = rowFor(blocked, 'cost-ai');
+  assert.equal(row.value_text, '200.00 USD', 'the billed figure stands');
+  assert.ok(row.note.includes('USD のまま'), row.note);
+  // The reason is in the same language as the rest of the panel, and it names
+  // what is missing rather than echoing a rule code at the reader.
+  assert.ok(row.note.includes('換算の基準時点が定まりません'), row.note);
+  assert.equal(row.note.includes('invalid_request'), false, 'not a raw rule code');
 });

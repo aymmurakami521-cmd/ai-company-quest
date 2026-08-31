@@ -277,7 +277,7 @@ bind hostは **設定できません**。常に `127.0.0.1` です。
 | `GET /ui/quest-app.js` | DOM + SSE glue |
 | `GET /ui/quest-view.js` | 純粋なview model（状態mapping・席割り・client fold） |
 | `GET /ui/quest-value.js` | 純粋なROI panelのview model |
-| `GET /value/summary` | ROI read model（推定/実現を分離した小計・単価の解決根拠）。既定では金額を伏せる |
+| `GET /value/summary` | ROI read model（推定/実現を分離した小計・単価と換算率の解決根拠・比率）。既定では金額を伏せる |
 | `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態、`dropped_slow_subscribers`、`state_limits` |
 | `GET /events/live` | LIVE namespaceのSSE stream |
 | `GET /events/demo` | DEMO namespaceのSSE stream |
@@ -646,8 +646,28 @@ CIは **`.github/workflows/ci.yml` として既に有効**です。全branchのp
 残るため、**ARK既定（公開定数の3,400 JPY/hour）で算出された推定だけは再構成できます**。
 運用者が設定した単価は再構成できません。この一点は監査可能性のために意図的に残しています。
 
+### 複数通貨（FX換算 / mode B）
+
+台帳に `"aggregation_mode": "reporting_currency_normalized"` と `fx_rates` を書くと、
+複数通貨の金額を報告通貨へ揃えて小計します。既定は `currency_partition`（通貨別に並べ、換算しない）で、
+省略した台帳の挙動は追加前と変わりません。
+
+**換算率は台帳に書かれたものだけを使います。外部サービスへは取りに行きません。**
+レートは `USD 100.00 = JPY 14,825` のように **minor unit 同士の厳密な有理数**で書きます
+（小数レートにすると通貨のexponent推測が計算に入り、桁が黙ってずれるため）。
+逆数の自動生成・第三通貨経由の三角換算・record期間より後のレートの適用は、いずれも行いません。
+換算できない金額は **0円にせず**、未換算として別掲し、**その小計は合計自体を出しません**。
+
+### 比率（benefit-cost ratio / net ROI）
+
+`ai_cost` に `period` を書くと、その期間の **費用対効果比** と **純ROI** を算出します。
+**推定と実現は別々の比率**で、両者を足した分子は存在しません。
+算出できない場合は 0倍でも∞でもなく、`ratio_status`（AI関連コストが0／金額未確定／
+通貨が揃わない／期間が噛み合わない 等）を理由として返します。
+
 台帳の書式・入力方式（direct / 会社負担人件費からの算出 / owner の time value）・
-安全境界・follow-upの範囲は **[docs/value-rate-design.md](docs/value-rate-design.md)** を参照してください。
+FX換算と比率層の規則・安全境界・follow-upの範囲は
+**[docs/value-rate-design.md](docs/value-rate-design.md)** を参照してください。
 
 ## 既知の制限
 
