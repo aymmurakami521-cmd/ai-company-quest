@@ -202,6 +202,7 @@ test('AI cost and the ARK fee are separate sections that keep their cost_status'
       currency: 'JPY',
       pricing_source: 'provider_invoice',
       pricing_version: '2026-08',
+      period: null,
     },
     ark_fee: {
       cost_status: 'estimated',
@@ -209,6 +210,7 @@ test('AI cost and the ARK fee are separate sections that keep their cost_status'
       currency: 'JPY',
       pricing_source: 'contract_rate',
       pricing_version: 'v1',
+      period: null,
     },
   });
   assert.equal(dashboard.costs.ai_cost.label, AI_COST_LABEL_JA);
@@ -225,6 +227,7 @@ test('AI cost and the ARK fee are separate sections that keep their cost_status'
       currency: 'JPY',
       pricing_source: 'provider_invoice',
       pricing_version: '2026-08',
+      period: null,
     },
   });
   assert.equal(restricted.costs.ai_cost.amount_withheld, true);
@@ -234,7 +237,14 @@ test('AI cost and the ARK fee are separate sections that keep their cost_status'
 
 test('unpriced is reported as unpriced, not as an amount and not as withheld', () => {
   const dashboard = build([], 'full', {
-    ai_cost: { cost_status: 'unpriced', amount_minor: null, currency: null, pricing_source: null, pricing_version: null },
+    ai_cost: {
+      cost_status: 'unpriced',
+      amount_minor: null,
+      currency: null,
+      pricing_source: null,
+      pricing_version: null,
+      period: null,
+    },
   });
   assert.equal(dashboard.costs.ai_cost.cost_status, 'unpriced');
   assert.equal(Object.prototype.hasOwnProperty.call(dashboard.costs.ai_cost, 'amount_minor'), false);

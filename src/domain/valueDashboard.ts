@@ -24,7 +24,7 @@
  * passed in.
  */
 
-import type { CostBucket, CostStatus, PricingSource } from './costBucket.ts';
+import { MAX_COST_AMOUNT_MINOR, type CostBucket, type CostStatus, type PricingSource } from './costBucket.ts';
 import type {
   RateBasis,
   RateEntrySource,
@@ -34,10 +34,13 @@ import type {
   RateScope,
 } from './rate.ts';
 import {
+  aggregatedRecord,
   deriveTimeValueProxies,
+  MAX_VALUE_QUANTITY_MINOR,
   REALIZATION_STATUSES,
   VALUE_METRIC_RULES,
   VALUE_METRIC_TYPES,
+  type AggregatedRecord,
   type MeasurementWindow,
   type RealizationStatus,
   type TimeValueUnavailable,
@@ -45,6 +48,15 @@ import {
   type ValueMetricType,
   type ValueRecord,
 } from './value.ts';
+import {
+  convertMinor,
+  resolveFxRate,
+  type FxEvidence,
+  type FxPolicy,
+  type FxSource,
+  type ValueAggregationMode,
+} from './fx.ts';
+import { buildRatioRows, type RatioRow } from './ratio.ts';
 import type { ValueLedger, ValueLedgerState, ValueRejectRule } from './valueLedger.ts';
 
 /**
@@ -99,6 +111,20 @@ export type ValueSubtotal = {
   record_count: number;
   total?: number;
   amount_withheld?: true;
+  /**
+   * Mode B: some of this row's money has no conversion into the reporting
+   * currency, so **no total is published for the row at all**.
+   *
+   * §7.3.1 requires the *subtotal* to fail rather than the record to vanish
+   * from it. Publishing the converted part alone would be a total that silently
+   * understates itself, which is the same failure as publishing a mixed one -
+   * the reader has no way to see that something is missing. The records are
+   * still counted here, and each one is named in `fx_unconverted`.
+   *
+   * Distinct from `amount_withheld`: that one means "there is a total, you may
+   * not see it". This one means "there is no total".
+   */
+  total_blocked?: true;
 };
 
 export type ValueSection = {
@@ -115,12 +141,91 @@ export type CostSection = {
   /** False when the ledger reported no such bucket at all. Not the same as 0. */
   reported: boolean;
   cost_status: CostStatus | null;
+  /** The currency the published amount is in: the reporting one once converted. */
   currency: string | null;
   pricing_source: PricingSource | null;
   pricing_version: string | null;
+  /** The period the operator says the amount covers. Required for a ratio (§8.2). */
+  period: MeasurementWindow | null;
+  /** Mode B only; null under currency partition, where nothing is converted. */
+  fx: CostFx | null;
   amount_minor?: number;
   amount_withheld?: true;
 };
+
+/**
+ * Why a monetary record could not be brought into the reporting currency.
+ * Closed vocabulary. A record listed here is in **no** subtotal - it is not
+ * counted as zero, and it is not left in its own currency inside a
+ * reporting-currency total (§7.3.1).
+ */
+export const FX_UNCONVERTED_REASONS = [
+  'no_applicable_rate',
+  'invalid_request',
+  'amount_out_of_range',
+] as const;
+export type FxUnconvertedReason = (typeof FX_UNCONVERTED_REASONS)[number];
+
+export type FxUnconverted = {
+  record_id: string;
+  from_currency: string;
+  to_currency: string;
+  reason: FxUnconvertedReason;
+};
+
+/**
+ * One line of "which conversion produced this figure": everything §7.3.1 makes
+ * mandatory for mode B, per converted record.
+ *
+ * The rate, its source, its version, its effective period and the direction of
+ * the conversion stay readable under every disclosure level, exactly as the
+ * hourly rate's provenance does: none of them is this company's money. Only the
+ * two amounts - the original and the converted - are withheld.
+ */
+export type FxTraceRow = {
+  record_id: string;
+  from_currency: string;
+  to_currency: string;
+  /**
+   * The rate, twice: as the exact rational the operator wrote, and as a
+   * fixed-point decimal for reading. The decimal is rounded to six places and a
+   * rate like 1/3 is not exact in it, so the pair is what a reader recomputes
+   * from.
+   *
+   * These are legs of a *rate*, not amounts of anybody's money - the `fx_`
+   * prefix is there so neither a reader nor a grep confuses them with one - and
+   * they stay visible under every disclosure level, like the hourly rate's
+   * scope and period do.
+   */
+  fx_from_amount_minor: number;
+  fx_to_amount_minor: number;
+  fx_rate: string;
+  fx_source: FxSource;
+  fx_rate_version: string;
+  fx_effective_from: string;
+  fx_effective_to: string | null;
+  fx_effective_at: string;
+  original_amount_minor?: number;
+  converted_amount_minor?: number;
+  amount_withheld?: true;
+};
+
+/**
+ * What happened to a cost bucket under mode B. Null in mode A, where nothing is
+ * converted at all.
+ */
+export type CostFx =
+  /** Already in the reporting currency; there was nothing to convert. */
+  | { status: 'not_required' }
+  | {
+      status: 'converted';
+      evidence: FxEvidence;
+      original_currency: string;
+      original_amount_minor?: number;
+      amount_withheld?: true;
+    }
+  /** The original amount stands (§4.2); it is simply not commensurate. */
+  | { status: 'unconverted'; reason: FxUnconvertedReason; original_currency: string };
 
 /** One line of "which rate produced this estimate, and when was it in force". */
 export type RateTraceRow = {
@@ -150,12 +255,21 @@ export type ValueDashboard = {
   company_id: string;
   reporting_currency: string;
   amount_visibility: ValueDisclosure;
-  /** Mode A of §7.3.1. No FX conversion happens anywhere in this build. */
-  aggregation_mode: 'currency_partition';
+  /**
+   * Which of §7.3.1's two subtotal modes produced the figures below, stated in
+   * the payload because §8.5 requires the mode to be reported beside them.
+   */
+  aggregation_mode: ValueAggregationMode;
   measurement_window: MeasurementWindow | null;
   sections: ValueSection[];
   costs: { ai_cost: CostSection; ark_fee: CostSection };
   rate_trace: RateTraceRow[];
+  /** One line per converted record. Always empty under currency partition. */
+  fx_trace: FxTraceRow[];
+  /** Money that has no path to the reporting currency. Never valued at zero. */
+  fx_unconverted: FxUnconverted[];
+  /** benefit-cost ratio / net ROI, or the reason there is none (§8.4). */
+  ratios: RatioRow[];
   /** Time savings that produced no estimate. Counted, never valued at zero. */
   unavailable: TimeValueUnavailable[];
   derivation: { derived: number; carried_forward: number };
@@ -169,8 +283,19 @@ const NOTE_CURRENCY_PARTITION =
 const NOTE_RESTRICTED = '金額は表示制限中です。0円という意味ではありません。';
 const NOTE_UNAVAILABLE =
   '時間単価を解決できなかった削減時間があります。0円として集計せず、未算出として別掲しています。';
+const NOTE_FX_NORMALIZED =
+  '金額小計は報告通貨へ換算しています。換算した記録ごとに、換算率・出所・版・適用時点・換算方向を保持しています。';
+const NOTE_FX_UNCONVERTED =
+  '換算率が無い金額があります。0円として集計せず、未換算として別掲しています。';
+const NOTE_RATIO_SEPARATE =
+  '比率は realization_status ごとに別々に算出しています。推定と実現を1つの比率には混ぜません。';
+const NOTE_RATIO_BLOCKED =
+  '算出できない比率は理由付きで別掲しています。0倍や∞は表示しません。';
 
 type SubtotalAccumulator = { record_count: number; total: number };
+
+/** Shared empty map for the common case: nothing was blocked. */
+const EMPTY_BLOCKED: ReadonlyMap<RealizationStatus, number> = new Map();
 
 /** Buckets keyed by status first, then by unit. No composite string key, so a
  * unit containing the separator could never merge two different buckets. */
@@ -183,7 +308,7 @@ type SubtotalBuckets = Map<RealizationStatus, Map<string, SubtotalAccumulator>>;
  * legitimately hold minutes and counts under the same type family, and adding
  * them would produce a number in no unit at all.
  */
-function accumulate(records: readonly ValueRecord[]): SubtotalBuckets {
+function accumulate(records: readonly AggregatedRecord[]): SubtotalBuckets {
   const buckets: SubtotalBuckets = new Map();
   for (const record of records) {
     let byUnit = buckets.get(record.realization_status);
@@ -201,15 +326,45 @@ function accumulate(records: readonly ValueRecord[]): SubtotalBuckets {
   return buckets;
 }
 
-/** Deterministic order: realized before estimated, then unit ascending. */
+/**
+ * Deterministic order: realized before estimated, then unit ascending.
+ *
+ * `blocked` names the statuses of this metric that hold money with no path into
+ * the reporting currency, together with how many such records there are. Those
+ * statuses get exactly one row - in the reporting currency, counting every
+ * record, and carrying no total - so a partial figure is never published beside
+ * a complete one under the same heading.
+ */
 function orderedSubtotals(
   buckets: SubtotalBuckets,
   monetary: boolean,
   disclosure: ValueDisclosure,
+  blocked: ReadonlyMap<RealizationStatus, number>,
+  reportingCurrency: string,
 ): ValueSubtotal[] {
   const rows: ValueSubtotal[] = [];
   for (const status of REALIZATION_STATUSES) {
     const byUnit = buckets.get(status);
+    const blockedCount = blocked.get(status);
+
+    if (blockedCount !== undefined) {
+      let counted = blockedCount;
+      if (byUnit !== undefined) {
+        for (const bucket of byUnit.values()) counted += bucket.record_count;
+      }
+      const row: ValueSubtotal = {
+        realization_status: status,
+        unit: reportingCurrency,
+        record_count: counted,
+        total_blocked: true,
+      };
+      // Both flags can be true at once, and they say different things: the
+      // reader may not see amounts, *and* there is no amount to see.
+      if (monetary && disclosure === 'restricted') row.amount_withheld = true;
+      rows.push(row);
+      continue;
+    }
+
     if (byUnit === undefined) continue;
     for (const unit of [...byUnit.keys()].sort()) {
       const bucket = byUnit.get(unit);
@@ -227,7 +382,12 @@ function orderedSubtotals(
   return rows;
 }
 
-function costSection(label: string, bucket: CostBucket | null, disclosure: ValueDisclosure): CostSection {
+function costSection(
+  label: string,
+  bucket: CostBucket | null,
+  disclosure: ValueDisclosure,
+  fx: CostFx | null,
+): CostSection {
   if (bucket === null) {
     return {
       label,
@@ -236,6 +396,8 @@ function costSection(label: string, bucket: CostBucket | null, disclosure: Value
       currency: null,
       pricing_source: null,
       pricing_version: null,
+      period: null,
+      fx: null,
     };
   }
   const section: CostSection = {
@@ -245,6 +407,8 @@ function costSection(label: string, bucket: CostBucket | null, disclosure: Value
     currency: bucket.currency,
     pricing_source: bucket.pricing_source,
     pricing_version: bucket.pricing_version,
+    period: bucket.period === null ? null : { ...bucket.period },
+    fx,
   };
   // `unpriced` has no amount by contract (§3.6), so there is nothing to
   // withhold and nothing to show - the status is the whole statement.
@@ -252,6 +416,180 @@ function costSection(label: string, bucket: CostBucket | null, disclosure: Value
   if (disclosure === 'restricted') section.amount_withheld = true;
   else section.amount_minor = bucket.amount_minor;
   return section;
+}
+
+/**
+ * Restates every monetary record into the reporting currency (mode B).
+ *
+ * Four outcomes per record, and only the first two put anything into a subtotal:
+ *
+ * 1. non-monetary - untouched. Minutes and counts are not converted, and they
+ *    never enter a money subtotal in either mode (§7.1.2).
+ * 2. already in the reporting currency - untouched, and *no* trace row: no
+ *    conversion happened, so claiming one in the audit trail would be a lie.
+ * 3. converted - a trace row records the rate, its source, its version, its
+ *    effective period and the direction, and both amounts (§7.3.1).
+ * 4. no rate, or a result outside the admissible range - the record is kept out
+ *    of every total and listed in `unconverted`. It is *not* added at its
+ *    original figure (that is the currency mixing the mode exists to prevent)
+ *    and it is *not* added as zero. It is also not simply forgotten: the
+ *    subtotal it belonged to publishes no total at all (`total_blocked`),
+ *    because §7.3.1 requires the failing subtotal to fail rather than to quietly
+ *    shrink.
+ *
+ * The rate is resolved at each record's own `measurement_window.end`, never at
+ * "now". A rate published next quarter has a later `effective_from` and cannot
+ * reach back into a figure somebody already read - the same guarantee
+ * `rate.ts` gives for the hourly rate.
+ */
+function normalizeRecords(
+  records: readonly ValueRecord[],
+  policy: FxPolicy,
+  reportingCurrency: string,
+  disclosure: ValueDisclosure,
+): {
+  records: AggregatedRecord[];
+  trace: FxTraceRow[];
+  unconverted: FxUnconverted[];
+  /** The same records as `unconverted`, kept so their subtotals can be blocked. */
+  unconverted_records: AggregatedRecord[];
+} {
+  const out: AggregatedRecord[] = [];
+  const trace: FxTraceRow[] = [];
+  const unconverted: FxUnconverted[] = [];
+  const unconvertedRecords: AggregatedRecord[] = [];
+
+  for (const record of records) {
+    const base = aggregatedRecord(record);
+    if (record.value_kind !== 'monetary' || record.unit === reportingCurrency) {
+      out.push(base);
+      continue;
+    }
+
+    const resolution = resolveFxRate(policy, {
+      from_currency: record.unit,
+      to_currency: reportingCurrency,
+      at: record.measurement_window.end,
+    });
+    if (resolution.status !== 'resolved') {
+      unconverted.push({
+        record_id: record.record_id,
+        from_currency: record.unit,
+        to_currency: reportingCurrency,
+        reason: resolution.reason,
+      });
+      unconvertedRecords.push(base);
+      continue;
+    }
+
+    const converted = convertMinor(record.quantity, resolution.evidence, MAX_VALUE_QUANTITY_MINOR);
+    if (converted === null) {
+      unconverted.push({
+        record_id: record.record_id,
+        from_currency: record.unit,
+        to_currency: reportingCurrency,
+        reason: 'amount_out_of_range',
+      });
+      unconvertedRecords.push(base);
+      continue;
+    }
+
+    const evidence = resolution.evidence;
+    const row: FxTraceRow = {
+      record_id: record.record_id,
+      from_currency: evidence.from_currency,
+      to_currency: evidence.to_currency,
+      fx_from_amount_minor: evidence.from_amount_minor,
+      fx_to_amount_minor: evidence.to_amount_minor,
+      fx_rate: evidence.fx_rate,
+      fx_source: evidence.fx_source,
+      fx_rate_version: evidence.fx_rate_version,
+      fx_effective_from: evidence.fx_effective_from,
+      fx_effective_to: evidence.fx_effective_to,
+      fx_effective_at: evidence.fx_effective_at,
+    };
+    if (disclosure === 'restricted') row.amount_withheld = true;
+    else {
+      row.original_amount_minor = record.quantity;
+      row.converted_amount_minor = converted;
+    }
+    trace.push(row);
+
+    out.push({ ...base, unit: reportingCurrency, quantity: converted });
+  }
+
+  return { records: out, trace, unconverted, unconverted_records: unconvertedRecords };
+}
+
+/**
+ * Restates one cost bucket into the reporting currency (mode B).
+ *
+ * The bucket is only ever replaced by a converted copy for *display and ratio*
+ * purposes; the original currency and amount travel with it in `CostFx` so the
+ * figure the provider actually billed is never lost (§4.2).
+ *
+ * A bucket with no stated period cannot be converted at all: a conversion needs
+ * an instant to be dated at, and inventing one - "now", or the span the value
+ * records happen to cover - would make the rate applied depend on when the
+ * screen was opened.
+ */
+function convertCostBucket(
+  bucket: CostBucket | null,
+  policy: FxPolicy,
+  reportingCurrency: string,
+  disclosure: ValueDisclosure,
+): { bucket: CostBucket | null; fx: CostFx | null } {
+  if (bucket === null) return { bucket: null, fx: null };
+  // `unpriced` carries no amount and no currency by contract (§3.6). There is
+  // nothing to convert, and the ratio layer reports it as unpriced regardless.
+  if (bucket.amount_minor === null || bucket.currency === null) {
+    return { bucket, fx: { status: 'not_required' } };
+  }
+  if (bucket.currency === reportingCurrency) return { bucket, fx: { status: 'not_required' } };
+
+  if (bucket.period === null) {
+    return {
+      bucket,
+      fx: { status: 'unconverted', reason: 'invalid_request', original_currency: bucket.currency },
+    };
+  }
+
+  const resolution = resolveFxRate(policy, {
+    from_currency: bucket.currency,
+    to_currency: reportingCurrency,
+    at: bucket.period.end,
+  });
+  if (resolution.status !== 'resolved') {
+    return {
+      bucket,
+      fx: { status: 'unconverted', reason: resolution.reason, original_currency: bucket.currency },
+    };
+  }
+
+  const converted = convertMinor(bucket.amount_minor, resolution.evidence, MAX_COST_AMOUNT_MINOR);
+  if (converted === null) {
+    return {
+      bucket,
+      fx: {
+        status: 'unconverted',
+        reason: 'amount_out_of_range',
+        original_currency: bucket.currency,
+      },
+    };
+  }
+
+  const fx: CostFx = {
+    status: 'converted',
+    evidence: resolution.evidence,
+    original_currency: bucket.currency,
+  };
+  if (disclosure === 'restricted') fx.amount_withheld = true;
+  else fx.original_amount_minor = bucket.amount_minor;
+
+  return {
+    bucket: { ...bucket, amount_minor: converted, currency: reportingCurrency },
+    fx,
+  };
 }
 
 function traceRow(
@@ -284,7 +622,7 @@ function traceRow(
 }
 
 /** The union of every record's window, or null when there are no records. */
-function unionWindow(records: readonly ValueRecord[]): MeasurementWindow | null {
+function unionWindow(records: readonly { measurement_window: MeasurementWindow }[]): MeasurementWindow | null {
   let start: string | null = null;
   let end: string | null = null;
   for (const record of records) {
@@ -318,21 +656,63 @@ export type DashboardInput = {
  */
 export function buildValueDashboard(input: DashboardInput): ValueDashboard {
   const { ledger, records, disclosure } = input;
+  const mode = ledger.aggregation_mode;
+  const normalize = mode === 'reporting_currency_normalized';
 
-  const byType = new Map<ValueMetricType, ValueRecord[]>();
+  // Mode A is the identity projection: the same records, in their own
+  // currencies, with an empty FX trace. Nothing below can tell the difference,
+  // which is what keeps the partition path behaving exactly as it did.
+  const normalized = normalize
+    ? normalizeRecords(records, ledger.fx_policy, ledger.reporting_currency, disclosure)
+    : {
+        records: records.map(aggregatedRecord),
+        trace: [] as FxTraceRow[],
+        unconverted: [] as FxUnconverted[],
+        unconverted_records: [] as AggregatedRecord[],
+      };
+  const aggregated = normalized.records;
+
+  const byType = new Map<ValueMetricType, AggregatedRecord[]>();
   for (const type of VALUE_METRIC_TYPES) byType.set(type, []);
-  for (const record of records) byType.get(record.value_metric_type)?.push(record);
+  for (const record of aggregated) byType.get(record.value_metric_type)?.push(record);
+
+  // Which `(metric type, realization status)` subtotals hold money that never
+  // reached the reporting currency, and which statuses that makes unusable as a
+  // ratio numerator. Empty in mode A, where nothing is converted.
+  const blockedByType = new Map<ValueMetricType, Map<RealizationStatus, number>>();
+  const blockedStatuses = new Set<RealizationStatus>();
+  for (const record of normalized.unconverted_records) {
+    let byStatus = blockedByType.get(record.value_metric_type);
+    if (byStatus === undefined) {
+      byStatus = new Map<RealizationStatus, number>();
+      blockedByType.set(record.value_metric_type, byStatus);
+    }
+    byStatus.set(record.realization_status, (byStatus.get(record.realization_status) ?? 0) + 1);
+    blockedStatuses.add(record.realization_status);
+  }
 
   const sections: ValueSection[] = [];
   for (const type of VALUE_METRIC_TYPES) {
     const rule = VALUE_METRIC_RULES[type];
     const forType = byType.get(type) ?? [];
+    const blocked = blockedByType.get(type) ?? EMPTY_BLOCKED;
+    let blockedCount = 0;
+    for (const count of blocked.values()) blockedCount += count;
     sections.push({
       value_metric_type: type,
       label: METRIC_LABELS_JA[type],
       value_kind: rule.value_kind,
-      record_count: forType.length,
-      subtotals: orderedSubtotals(accumulate(forType), rule.value_kind === 'monetary', disclosure),
+      // Unconverted records are still this metric's records. Counting only the
+      // converted ones would make the section read 記録なし for money that is
+      // sitting right there in `fx_unconverted`.
+      record_count: forType.length + blockedCount,
+      subtotals: orderedSubtotals(
+        accumulate(forType),
+        rule.value_kind === 'monetary',
+        disclosure,
+        blocked,
+        ledger.reporting_currency,
+      ),
     });
   }
 
@@ -346,9 +726,35 @@ export function buildValueDashboard(input: DashboardInput): ValueDashboard {
   }
   rateTrace.sort((a, b) => (a.record_id < b.record_id ? -1 : a.record_id > b.record_id ? 1 : 0));
 
-  const notes = [NOTE_ESTIMATED_SEPARATE, NOTE_CURRENCY_PARTITION];
+  const aiCost = normalize
+    ? convertCostBucket(ledger.ai_cost, ledger.fx_policy, ledger.reporting_currency, disclosure)
+    : { bucket: ledger.ai_cost, fx: null };
+  const arkFee = normalize
+    ? convertCostBucket(ledger.ark_fee, ledger.fx_policy, ledger.reporting_currency, disclosure)
+    : { bucket: ledger.ark_fee, fx: null };
+
+  // The ARK fee is deliberately not part of the denominator: §8.1 defines the
+  // benefit-cost ratio as `business_value / ai_cost`, and folding a platform
+  // fee in would publish a different ratio under the same name.
+  const ratios = buildRatioRows({
+    records: aggregated,
+    ai_cost: aiCost.bucket,
+    reporting_currency: ledger.reporting_currency,
+    mode,
+    cost_conversion_failed: aiCost.fx !== null && aiCost.fx.status === 'unconverted',
+    blocked_statuses: [...blockedStatuses],
+    withhold_amounts: disclosure === 'restricted',
+  });
+
+  const notes = [
+    NOTE_ESTIMATED_SEPARATE,
+    normalize ? NOTE_FX_NORMALIZED : NOTE_CURRENCY_PARTITION,
+    NOTE_RATIO_SEPARATE,
+  ];
   if (disclosure === 'restricted') notes.push(NOTE_RESTRICTED);
   if (input.unavailable.length > 0) notes.push(NOTE_UNAVAILABLE);
+  if (normalized.unconverted.length > 0) notes.push(NOTE_FX_UNCONVERTED);
+  if (ratios.some((row) => row.ratio_status !== 'computed')) notes.push(NOTE_RATIO_BLOCKED);
 
   return {
     schema_version: DASHBOARD_SCHEMA_VERSION,
@@ -357,14 +763,20 @@ export function buildValueDashboard(input: DashboardInput): ValueDashboard {
     company_id: ledger.company_id,
     reporting_currency: ledger.reporting_currency,
     amount_visibility: disclosure,
-    aggregation_mode: 'currency_partition',
+    aggregation_mode: mode,
+    // Over every record the ledger holds, including any that could not be
+    // converted: the period the document covers is not narrowed by a missing
+    // rate, or a reader would see a shorter window than the data spans.
     measurement_window: unionWindow(records),
     sections,
     costs: {
-      ai_cost: costSection(AI_COST_LABEL_JA, ledger.ai_cost, disclosure),
-      ark_fee: costSection(ARK_FEE_LABEL_JA, ledger.ark_fee, disclosure),
+      ai_cost: costSection(AI_COST_LABEL_JA, aiCost.bucket, disclosure, aiCost.fx),
+      ark_fee: costSection(ARK_FEE_LABEL_JA, arkFee.bucket, disclosure, arkFee.fx),
     },
     rate_trace: rateTrace,
+    fx_trace: normalized.trace,
+    fx_unconverted: normalized.unconverted,
+    ratios,
     unavailable: [...input.unavailable],
     derivation: { ...input.derivation },
     notes,
@@ -446,8 +858,16 @@ export function buildValueSummary(
   // fail-closed path reachable in the shipped process, so a USD-reporting
   // ledger with no applicable rate reports `unavailable` rather than a JPY
   // figure from the ARK fallback.
+  //
+  // Under mode B the constraint moves rather than disappearing: the rate may
+  // resolve in its own currency, and the FX layer is what brings the resulting
+  // estimate into the reporting currency - with a rate the operator supplied,
+  // dated, and recorded as evidence. An estimate with no conversion path is
+  // still never published in a currency the operator did not choose; it is
+  // listed in `fx_unconverted` instead.
   const derivation = deriveTimeValueProxies(ledger.records, ledger.rate_policy, {
-    expected_currency: ledger.reporting_currency,
+    expected_currency:
+      ledger.aggregation_mode === 'currency_partition' ? ledger.reporting_currency : null,
   });
   return {
     schema_version: DASHBOARD_SCHEMA_VERSION,

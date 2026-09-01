@@ -242,6 +242,19 @@ test('two entries starting at the same instant for one scope are ambiguous, so r
     field: 'hourly_rates[1].effective_from',
     rule: 'duplicate_id',
   });
+
+  // The same instant written with a different offset is the same instant.
+  // Comparing the text would admit both and leave `matchScope` deciding by
+  // array position, so the pair is refused in either order.
+  const shifted = { ...entry, effective_from: '2026-01-01T09:00:00+09:00', hourly_rate_minor: 9000 };
+  assert.deepEqual(refuse(makeLedgerDocument({ hourly_rates: [entry, shifted] })), {
+    field: 'hourly_rates[1].effective_from',
+    rule: 'duplicate_id',
+  });
+  assert.deepEqual(refuse(makeLedgerDocument({ hourly_rates: [shifted, entry] })), {
+    field: 'hourly_rates[1].effective_from',
+    rule: 'duplicate_id',
+  });
 });
 
 test('a company-scoped rate for a different company is refused', () => {

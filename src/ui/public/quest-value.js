@@ -25,8 +25,16 @@ export const AMOUNT_WITHHELD = '非表示';
 export const NO_RECORDS = '記録なし';
 /** Rendered where a cost has no amount because it is not priced yet. */
 export const NOT_PRICED = '金額未確定';
+/**
+ * Rendered where a subtotal exists but has no total, because some of its money
+ * never reached the reporting currency. Deliberately different from both 非表示
+ * ("there is a total, you may not see it") and 0.
+ */
+export const NOT_CONVERTIBLE = '換算できません';
 /** How many individual rate-trace lines the panel lists before summarising. */
 export const MAX_RATE_TRACE_ROWS = 8;
+/** The same cap for FX conversion lines. The full list stays on `/value/summary`. */
+export const MAX_FX_TRACE_ROWS = 8;
 
 /**
  * Minor-unit exponents, mirroring `src/domain/rate.ts`.
@@ -80,6 +88,42 @@ const RATE_BASIS_LABELS = {
 const RATE_ENTRY_SOURCE_LABELS = {
   operator: '運用者入力',
   company_brain: 'Company Brain',
+};
+
+const FX_SOURCE_LABELS = {
+  operator_declared: '運用者が宣言',
+  contract_rate: '契約レート',
+  published_reference: '公表レートの転記',
+};
+
+/**
+ * Why an amount stayed in its own currency. Read by a person, so it is written
+ * in the language the rest of the panel is written in - and it says what the
+ * operator would have to *do*, since every one of these is fixed by adding a
+ * rate to the ledger.
+ */
+const FX_UNCONVERTED_REASON_LABELS = {
+  no_applicable_rate: 'この期間に適用できる換算率がありません',
+  invalid_request: '換算の基準時点が定まりません',
+  amount_out_of_range: '換算結果が扱える金額の範囲を超えます',
+};
+
+/**
+ * Why a figure has no ratio. Every one of these is a *reason*, never a number:
+ * §8.4 forbids showing 0 or ∞ where a ratio could not be computed, because both
+ * read as an answer.
+ */
+const RATIO_STATUS_LABELS = {
+  computed: '算出済み',
+  undefined_zero_denominator: 'AI関連コストが0のため未定義',
+  blocked_unpriced_cost: 'AI関連コストが金額未確定',
+  blocked_unresolved_cost: 'AI関連コストが未解決',
+  blocked_non_monetary_operand: '分子が金額ではありません',
+  blocked_currency_mismatch: '通貨が揃っていません',
+  blocked_scope_mismatch: '期間・範囲が一致しません',
+  blocked_methodology_mismatch: '算定方法が比較できません',
+  blocked_absent_value: '対象期間の金額記録がありません',
+  blocked_absent_cost: 'AI関連コストの記録がありません',
 };
 
 const COST_STATUS_LABELS = {
@@ -152,6 +196,9 @@ function row(code, groupName, label, statusLabel, valueText, note) {
 }
 
 function subtotalText(subtotal, valueKind) {
+  // Checked before withholding: under restriction both flags can be set, and
+  // 非表示 would tell the reader a total exists when none was computed.
+  if (subtotal.total_blocked === true) return NOT_CONVERTIBLE;
   if (subtotal.amount_withheld === true) return AMOUNT_WITHHELD;
   if (valueKind === 'monetary') return formatMinor(subtotal.total, subtotal.unit) ?? AMOUNT_WITHHELD;
   if (subtotal.unit === 'minute') return formatMinutes(subtotal.total) ?? `${subtotal.total}`;
@@ -166,6 +213,10 @@ function valueRows(dashboard) {
       continue;
     }
     for (const subtotal of section.subtotals) {
+      const note =
+        subtotal.total_blocked === true
+          ? `${subtotal.record_count}件・0円ではありません`
+          : `${subtotal.record_count}件`;
       rows.push(
         row(
           `value-${section.value_metric_type}-${subtotal.realization_status}-${subtotal.unit}`,
@@ -173,12 +224,36 @@ function valueRows(dashboard) {
           section.label,
           lookup(REALIZATION_LABELS, subtotal.realization_status, subtotal.realization_status),
           subtotalText(subtotal, section.value_kind),
-          `${subtotal.record_count}件`,
+          note,
         ),
       );
     }
   }
   return rows;
+}
+
+/** The conversion note for a cost bucket, or '' when none applies (mode A). */
+function costFxNote(section) {
+  const fx = section.fx;
+  if (fx === null || fx === undefined || typeof fx !== 'object') return '';
+  if (fx.status === 'converted') {
+    // A converted bucket always carries its evidence, but this is payload from
+    // the network like everything else here: a missing one renders as a plain
+    // statement rather than throwing and blanking the whole panel.
+    const evidence = fx.evidence;
+    if (evidence === null || evidence === undefined || typeof evidence !== 'object') {
+      return `${fx.original_currency} から換算`;
+    }
+    const source = lookup(FX_SOURCE_LABELS, evidence.fx_source, evidence.fx_source);
+    return `${fx.original_currency} から換算（${evidence.fx_rate}・${source}・版 ${evidence.fx_rate_version}）`;
+  }
+  if (fx.status === 'unconverted') {
+    // The original amount still stands - it is simply not comparable with the
+    // rest of the screen, and saying so is the whole point.
+    const reason = lookup(FX_UNCONVERTED_REASON_LABELS, fx.reason, fx.reason);
+    return `${fx.original_currency} のまま・${reason}`;
+  }
+  return '';
 }
 
 function costRow(code, section) {
@@ -191,8 +266,126 @@ function costRow(code, section) {
   else if (typeof section.amount_minor === 'number') {
     text = formatMinor(section.amount_minor, section.currency) ?? AMOUNT_WITHHELD;
   } else text = NOT_PRICED;
-  const note = section.pricing_version === null ? '' : `価格版 ${section.pricing_version}`;
-  return row(code, 'cost', section.label, status, text, note);
+  const parts = [];
+  if (section.pricing_version !== null && section.pricing_version !== undefined) {
+    parts.push(`価格版 ${section.pricing_version}`);
+  }
+  const fxNote = costFxNote(section);
+  if (fxNote !== '') parts.push(fxNote);
+  return row(code, 'cost', section.label, status, text, parts.join('・'));
+}
+
+/** Shared context line for a ratio row: what it covers and what it left out. */
+function ratioNote(entry) {
+  const parts = [`対象 ${entry.included_record_count}件`];
+  if (entry.excluded_record_count > 0) parts.push(`期間外 ${entry.excluded_record_count}件`);
+  if (entry.period !== null && entry.period !== undefined) {
+    parts.push(`コスト期間 ${entry.period.start} 〜 ${entry.period.end}`);
+  }
+  if (entry.cost_status !== null && entry.cost_status !== undefined) {
+    parts.push(`AI関連コスト ${lookup(COST_STATUS_LABELS, entry.cost_status, entry.cost_status)}`);
+  }
+  if (entry.methodology_version !== null && entry.methodology_version !== undefined) {
+    parts.push(`算定方法 ${entry.methodology_version}`);
+  }
+  return parts.join('・');
+}
+
+/**
+ * The ratio rows.
+ *
+ * A computed ratio becomes *two* rows, each naming its term: §8.5 forbids
+ * writing "13倍" without saying which of the two figures it is, and the two are
+ * different numbers for the same situation. A ratio that could not be computed
+ * becomes one row carrying the reason - never a 0, a dash or an ∞.
+ */
+function ratioRows(dashboard) {
+  const rows = [];
+  const ratios = Array.isArray(dashboard.ratios) ? dashboard.ratios : [];
+  for (const entry of ratios) {
+    const statusLabel = lookup(REALIZATION_LABELS, entry.realization_status, entry.realization_status);
+    const key = `${entry.realization_status}-${entry.currency}`;
+    const note = ratioNote(entry);
+    if (entry.ratio_status !== 'computed') {
+      rows.push(
+        row(
+          `ratio-blocked-${key}`,
+          'ratio',
+          `費用対効果比（${entry.currency}）`,
+          statusLabel,
+          lookup(RATIO_STATUS_LABELS, entry.ratio_status, entry.ratio_status),
+          note,
+        ),
+      );
+      continue;
+    }
+    const withheld = entry.amount_withheld === true;
+    rows.push(
+      row(
+        `ratio-bcr-${key}`,
+        'ratio',
+        `費用対効果比 benefit-cost ratio（${entry.currency}）`,
+        statusLabel,
+        withheld ? AMOUNT_WITHHELD : `${entry.benefit_cost_ratio}倍`,
+        note,
+      ),
+    );
+    rows.push(
+      row(
+        `ratio-net-${key}`,
+        'ratio',
+        `純ROI net ROI（${entry.currency}）`,
+        statusLabel,
+        withheld ? AMOUNT_WITHHELD : `${entry.net_roi}倍`,
+        note,
+      ),
+    );
+  }
+  return rows;
+}
+
+/** One line per converted amount: which rate, from whom, and as of when. */
+function fxRows(dashboard) {
+  const rows = [];
+  const trace = Array.isArray(dashboard.fx_trace) ? dashboard.fx_trace : [];
+  const shown = trace.slice(0, MAX_FX_TRACE_ROWS);
+  for (const entry of shown) {
+    rows.push(
+      row(
+        `fx-${entry.record_id}`,
+        'fx',
+        entry.record_id,
+        `${entry.from_currency} → ${entry.to_currency}`,
+        entry.fx_rate,
+        `${lookup(FX_SOURCE_LABELS, entry.fx_source, entry.fx_source)}・版 ${
+          entry.fx_rate_version
+        }・適用時点 ${entry.fx_effective_at}`,
+      ),
+    );
+  }
+  const remainder = trace.length - shown.length;
+  if (remainder > 0) {
+    rows.push(row('fx-remainder', 'fx', '他の換算', '', `他 ${remainder} 件`, ''));
+  }
+  return rows;
+}
+
+function unconvertedRows(dashboard) {
+  const list = Array.isArray(dashboard.fx_unconverted) ? dashboard.fx_unconverted : [];
+  return list.map((entry) =>
+    row(
+      `unconverted-${entry.record_id}`,
+      'unconverted',
+      entry.record_id,
+      '未換算',
+      '0円ではありません',
+      `${entry.from_currency} → ${entry.to_currency}・${lookup(
+        FX_UNCONVERTED_REASON_LABELS,
+        entry.reason,
+        entry.reason,
+      )}`,
+    ),
+  );
 }
 
 /**
@@ -326,6 +519,13 @@ export function selectValuePanel(payload, namespace) {
   }
 
   const dashboard = payload.dashboard;
+  // §8.5: the aggregation mode is reported beside the figures, always. A reader
+  // who cannot tell a currency partition from a converted total cannot tell
+  // what a subtotal means.
+  const aggregation =
+    dashboard.aggregation_mode === 'reporting_currency_normalized'
+      ? `${dashboard.reporting_currency} へ換算して小計`
+      : '通貨別に小計';
   const window =
     dashboard.measurement_window === null
       ? '測定期間の記録がありません'
@@ -334,15 +534,18 @@ export function selectValuePanel(payload, namespace) {
   return {
     code: 'accepted',
     headline: `台帳を読み込みました（推定の内訳 ${dashboard.rate_trace.length} 件・未算出 ${dashboard.unavailable.length} 件）`,
-    detail: `${window}・方針版 ${dashboard.policy_version}・通貨別に小計`,
+    detail: `${window}・方針版 ${dashboard.policy_version}・${aggregation}`,
     visibility_label: visibility,
     source_label: sourceLabel,
     rows: [
       ...valueRows(dashboard),
       costRow('cost-ai', dashboard.costs.ai_cost),
       costRow('cost-ark', dashboard.costs.ark_fee),
+      ...ratioRows(dashboard),
       ...rateRows(dashboard),
+      ...fxRows(dashboard),
       ...unavailableRows(dashboard),
+      ...unconvertedRows(dashboard),
     ],
     notes: [...dashboard.notes],
   };

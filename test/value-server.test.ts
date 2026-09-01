@@ -16,7 +16,7 @@ import { validateValueLedger, valueLedgerStateFrom } from '../src/domain/valueLe
 import type { ValueLedgerState } from '../src/domain/valueLedger.ts';
 import type { ValueDisclosure } from '../src/domain/valueDashboard.ts';
 import { httpGet, makeLine, openSse } from './helpers.ts';
-import { makeLedgerDocument } from './valueHelpers.ts';
+import { COMPANY, makeLedgerDocument } from './valueHelpers.ts';
 
 type Harness = {
   server: QuestServer;
@@ -271,6 +271,115 @@ test('health is unchanged by the value surface', async () => {
     const payload = JSON.parse(response.body) as Record<string, unknown>;
     assert.deepEqual(Object.keys(payload).sort(), ['bind', 'namespaces', 'status', 'ui', 'uptime_ms']);
     assert.equal(response.body.includes('4000'), false, 'and it discloses no rate');
+  } finally {
+    await h.close();
+  }
+});
+
+/**
+ * A ledger that exercises everything the ratio and FX layers can publish: a
+ * conversion, a converted subtotal, and two computed ratios.
+ */
+const AUGUST = { start: '2026-08-01T00:00:00Z', end: '2026-08-31T23:59:59Z' };
+
+const CONVERTED_LEDGER = makeLedgerDocument({
+  aggregation_mode: 'reporting_currency_normalized',
+  fx_rates: [
+    {
+      from_currency: 'USD',
+      to_currency: 'JPY',
+      effective_from: '2026-01-01T00:00:00Z',
+      from_amount_minor: 10000,
+      to_amount_minor: 14825,
+      fx_source: 'contract_rate',
+      fx_rate_version: '2026-08',
+    },
+  ],
+  value_records: [
+    {
+      record_id: 'rev-usd',
+      value_metric_type: 'revenue_contribution',
+      value_kind: 'monetary',
+      realization_status: 'realized',
+      unit: 'USD',
+      quantity: 250000,
+      baseline: { kind: 'prior_period', quantity: 0 },
+      measurement_window: { ...AUGUST },
+      attribution_scope: { company_id: COMPANY, department_id: null, user_id: null },
+      attribution_method: 'operator_declared',
+      confidence: 'high',
+      methodology_version: 'v1',
+      evidence_ref: null,
+      derived_from: null,
+      rate_evidence: null,
+    },
+  ],
+  ai_cost: {
+    cost_status: 'finalized',
+    amount_minor: 37000,
+    currency: 'JPY',
+    pricing_source: 'provider_invoice',
+    pricing_version: '2026-08',
+    period: { ...AUGUST },
+  },
+});
+
+test('a converted, ratio-bearing payload discloses no figure under restriction either', async () => {
+  const h = await startServer({ ledger: ledgerState(CONVERTED_LEDGER), disclosure: 'restricted' });
+  try {
+    const response = await httpGet(h.port, VALUE_SUMMARY_PATH);
+    const payload = JSON.parse(response.body) as Record<string, unknown>;
+    const keys = keyNames(payload);
+
+    // Structural, like the check above: a figure added to the ratio or FX layer
+    // later must be named here before it can be published.
+    for (const key of [
+      'amount_minor',
+      'hourly_rate_minor',
+      'value_minor',
+      'cost_minor',
+      'benefit_cost_ratio',
+      'net_roi',
+      'original_amount_minor',
+      'converted_amount_minor',
+    ]) {
+      assert.equal(keys.has(key), false, `${key} must not be published under restriction`);
+    }
+
+    // The reasons and the provenance stay: without them the panel could not say
+    // *why* a ratio is missing, which is the whole of §8.4.
+    assert.ok(keys.has('ratio_status'), 'the reason survives');
+    assert.ok(keys.has('fx_rate'), 'and so does the rate that was applied');
+
+    // 250,000 USD-minor and its 370,625 JPY conversion; the 37,000 JPY cost.
+    for (const amount of ['250000', '370625', '37000']) {
+      assert.equal(response.body.includes(amount), false, amount);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test('the converted payload still computes both ratios, separately, when disclosed', async () => {
+  const h = await startServer({ ledger: ledgerState(CONVERTED_LEDGER), disclosure: 'full' });
+  try {
+    const response = await httpGet(h.port, VALUE_SUMMARY_PATH);
+    const payload = JSON.parse(response.body) as {
+      dashboard: {
+        aggregation_mode: string;
+        ratios: { realization_status: string; ratio_status: string; value_minor?: number }[];
+      };
+    };
+    assert.equal(payload.dashboard.aggregation_mode, 'reporting_currency_normalized');
+    const realized = payload.dashboard.ratios.find((row) => row.realization_status === 'realized');
+    assert.ok(realized !== undefined);
+    assert.equal(realized.ratio_status, 'computed');
+    assert.equal(realized.value_minor, 370625, 'the converted figure, not the USD one');
+
+    const estimated = payload.dashboard.ratios.find((row) => row.realization_status === 'estimated');
+    assert.ok(estimated !== undefined);
+    // The ledger's own `time_saved` sits in May, outside the August cost period.
+    assert.equal(estimated.ratio_status, 'blocked_absent_value');
   } finally {
     await h.close();
   }

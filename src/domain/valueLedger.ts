@@ -35,6 +35,7 @@ import { hasControlChars, scanUnsafe } from './validate.ts';
 import { emptyRecord, ownProperty } from './record.ts';
 import {
   hourlyRateFromMonthlyCost,
+  instantKey,
   isCurrencyCode,
   isIsoInstant,
   MAX_HOURLY_RATE_MINOR,
@@ -69,6 +70,7 @@ import {
   type AttributionMethod,
   type BaselineKind,
   type ConfidenceLevel,
+  type MeasurementWindow,
   type RealizationStatus,
   type ValueKind,
   type ValueMetricType,
@@ -83,6 +85,17 @@ import {
   type CostStatus,
   type PricingSource,
 } from './costBucket.ts';
+import {
+  DEFAULT_VALUE_AGGREGATION_MODE,
+  EMPTY_FX_POLICY,
+  FX_SOURCES,
+  MAX_FX_LEG_MINOR,
+  VALUE_AGGREGATION_MODES,
+  type FxPolicy,
+  type FxRateEntry,
+  type FxSource,
+  type ValueAggregationMode,
+} from './fx.ts';
 
 /** The only ledger contract this build understands. */
 export const SUPPORTED_VALUE_LEDGER_SCHEMA_VERSION = 1;
@@ -95,11 +108,13 @@ export const SUPPORTED_VALUE_LEDGER_SCHEMA_VERSION = 1;
 export type ValueLedgerLimits = {
   max_rate_entries: number;
   max_value_records: number;
+  max_fx_rate_entries: number;
 };
 
 export const DEFAULT_VALUE_LEDGER_LIMITS: ValueLedgerLimits = {
   max_rate_entries: 512,
   max_value_records: 4096,
+  max_fx_rate_entries: 512,
 };
 
 /** Identifier grammar for ids the operator writes (company, department, user, records). */
@@ -136,7 +151,19 @@ export type ValueLedger = {
   policy_version: string;
   company_id: string;
   reporting_currency: string;
+  /**
+   * How money subtotals are built (§7.3.1). Absent in the document means
+   * `currency_partition` - mode A, no conversion - so every ledger written
+   * before mode B existed keeps behaving exactly as it did.
+   */
+  aggregation_mode: ValueAggregationMode;
   rate_policy: HourlyRatePolicy;
+  /**
+   * Operator-supplied conversion rates. Empty unless the document lists them,
+   * and consulted only under `reporting_currency_normalized`. No rate in this
+   * process ever came from a network call (`fx.ts` module header).
+   */
+  fx_policy: FxPolicy;
   records: ValueRecord[];
   ai_cost: CostBucket | null;
   ark_fee: CostBucket | null;
@@ -326,6 +353,75 @@ function validateRateEntry(item: unknown, at: string): EntryResult {
       input_method: inputMethod,
       hourly_rate_minor: hourlyRateMinor,
       source,
+    },
+  };
+}
+
+// ── FX rate entries ────────────────────────────────────────────────────────
+
+type FxEntryResult =
+  | { ok: true; entry: FxRateEntry }
+  | { ok: false; field: string; rule: ValueRejectRule };
+
+/**
+ * One dated conversion rate.
+ *
+ * Written as two minor-unit amounts rather than a decimal quote, so applying it
+ * never consults a minor-unit exponent table (`fx.ts` module header). Both legs
+ * are strictly positive: a zero leg is either an undefined rate or a silent
+ * zeroing of every converted amount, and neither is a rate anybody meant.
+ */
+function validateFxRateEntry(item: unknown, at: string): FxEntryResult {
+  if (!isPlainObject(item)) return { ok: false, field: at, rule: 'type_error' };
+
+  const from = get(item, 'from_currency');
+  if (typeof from !== 'string') return { ok: false, field: `${at}.from_currency`, rule: 'type_error' };
+  if (!isCurrencyCode(from)) return { ok: false, field: `${at}.from_currency`, rule: 'invalid_format' };
+
+  const to = get(item, 'to_currency');
+  if (typeof to !== 'string') return { ok: false, field: `${at}.to_currency`, rule: 'type_error' };
+  if (!isCurrencyCode(to)) return { ok: false, field: `${at}.to_currency`, rule: 'invalid_format' };
+
+  // An identity "rate" is not a conversion. Accepting one would put a
+  // conversion into the audit trail for an amount that was never converted,
+  // and a non-1:1 self-rate would be a silent restatement of a currency.
+  if (from === to) return { ok: false, field: `${at}.to_currency`, rule: 'contract_violation' };
+
+  const fromRule = checkInstant(get(item, 'effective_from'));
+  if (fromRule !== null) return { ok: false, field: `${at}.effective_from`, rule: fromRule };
+
+  const fromAmount = get(item, 'from_amount_minor');
+  if (typeof fromAmount !== 'number') {
+    return { ok: false, field: `${at}.from_amount_minor`, rule: 'type_error' };
+  }
+  if (!Number.isInteger(fromAmount) || fromAmount <= 0 || fromAmount > MAX_FX_LEG_MINOR) {
+    return { ok: false, field: `${at}.from_amount_minor`, rule: 'invalid_format' };
+  }
+
+  const toAmount = get(item, 'to_amount_minor');
+  if (typeof toAmount !== 'number') {
+    return { ok: false, field: `${at}.to_amount_minor`, rule: 'type_error' };
+  }
+  if (!Number.isInteger(toAmount) || toAmount <= 0 || toAmount > MAX_FX_LEG_MINOR) {
+    return { ok: false, field: `${at}.to_amount_minor`, rule: 'invalid_format' };
+  }
+
+  const sourceRule = checkEnum(get(item, 'fx_source'), FX_SOURCES);
+  if (sourceRule !== null) return { ok: false, field: `${at}.fx_source`, rule: sourceRule };
+
+  const versionRule = checkText(get(item, 'fx_rate_version'), VERSION_LABEL);
+  if (versionRule !== null) return { ok: false, field: `${at}.fx_rate_version`, rule: versionRule };
+
+  return {
+    ok: true,
+    entry: {
+      from_currency: from,
+      to_currency: to,
+      effective_from: get(item, 'effective_from') as string,
+      from_amount_minor: fromAmount,
+      to_amount_minor: toAmount,
+      fx_source: get(item, 'fx_source') as FxSource,
+      fx_rate_version: get(item, 'fx_rate_version') as string,
     },
   };
 }
@@ -630,12 +726,28 @@ function validateCostBucket(raw: unknown, at: string): BucketResult {
     pricingVersion = rawPricingVersion as string;
   }
 
+  // Optional, so a ledger written before the ratio layer existed still
+  // validates. Stating it is what makes a benefit-cost ratio admissible
+  // (§8.2); leaving it out means the ratio reports `blocked_scope_mismatch`
+  // rather than assuming the bucket covers the value records' own window.
+  const rawPeriod = get(raw, 'period');
+  let period: MeasurementWindow | null = null;
+  if (rawPeriod !== null && rawPeriod !== undefined) {
+    if (!isPlainObject(rawPeriod)) return { ok: false, field: `${at}.period`, rule: 'type_error' };
+    const startRule = checkInstant(get(rawPeriod, 'start'));
+    if (startRule !== null) return { ok: false, field: `${at}.period.start`, rule: startRule };
+    const endRule = checkInstant(get(rawPeriod, 'end'));
+    if (endRule !== null) return { ok: false, field: `${at}.period.end`, rule: endRule };
+    period = { start: get(rawPeriod, 'start') as string, end: get(rawPeriod, 'end') as string };
+  }
+
   const bucket: CostBucket = {
     cost_status: get(raw, 'cost_status') as CostStatus,
     amount_minor: amount,
     currency,
     pricing_source: pricingSource,
     pricing_version: pricingVersion,
+    period,
   };
   const violations = checkCostBucket(bucket);
   if (violations.length > 0) {
@@ -651,7 +763,9 @@ const KNOWN_KEYS = new Set([
   'policy_version',
   'company_id',
   'reporting_currency',
+  'aggregation_mode',
   'hourly_rates',
+  'fx_rates',
   'value_records',
   'ai_cost',
   'ark_fee',
@@ -685,6 +799,18 @@ export function validateValueLedger(
   if (typeof reportingCurrency !== 'string') return reject('reporting_currency', 'type_error');
   if (!isCurrencyCode(reportingCurrency)) return reject('reporting_currency', 'invalid_format');
 
+  // Absent means mode A. The default is stated here rather than inferred from
+  // whether `fx_rates` happens to be present: a document that carries rates it
+  // does not yet want applied is a legitimate thing to write, and switching
+  // modes must be one deliberate key rather than a side effect.
+  const rawMode = get(raw, 'aggregation_mode');
+  let aggregationMode: ValueAggregationMode = DEFAULT_VALUE_AGGREGATION_MODE;
+  if (rawMode !== null && rawMode !== undefined) {
+    const rule = checkEnum(rawMode, VALUE_AGGREGATION_MODES);
+    if (rule !== null) return reject('aggregation_mode', rule);
+    aggregationMode = rawMode as ValueAggregationMode;
+  }
+
   const ratesRaw = requireArray(raw, 'hourly_rates', limits.max_rate_entries);
   if (!ratesRaw.ok) return reject(ratesRaw.field, ratesRaw.rule);
   const entries: HourlyRateEntry[] = [];
@@ -700,12 +826,43 @@ export function validateValueLedger(
     // Two entries starting at the same instant for the same scope would make
     // "the rate in force" ambiguous, and the resolver would then depend on
     // document order. Refused rather than tie-broken.
+    // The instant is keyed by `instantKey`, not by its text: `00:00:00Z` and
+    // `09:00:00+09:00` are one instant written two ways, and comparing the
+    // spellings would let both through and hand the tie to array position.
     // `|` is outside `LEDGER_ID`, outside the scope vocabulary and outside an
     // ISO-8601 instant, so no pair of different entries can collide on it.
-    const key = `${entry.scope}|${entry.scope_id}|${entry.effective_from}`;
+    const key = `${entry.scope}|${entry.scope_id}|${instantKey(entry.effective_from)}`;
     if (ownProperty(seenEntries, key) !== undefined) return reject(`${at}.effective_from`, 'duplicate_id');
     seenEntries[key] = true;
     entries.push(entry);
+  }
+
+  // Optional: mode A never reads it, and a single-currency ledger in mode B
+  // needs no rate at all. An absent list is an empty policy, not an error - the
+  // failure surfaces per record, at the moment a conversion is actually needed.
+  const fxEntries: FxRateEntry[] = [];
+  const rawFxRates = get(raw, 'fx_rates');
+  if (rawFxRates !== null && rawFxRates !== undefined) {
+    if (!Array.isArray(rawFxRates)) return reject('fx_rates', 'type_error');
+    if (rawFxRates.length > limits.max_fx_rate_entries) return reject('fx_rates', 'limit_exceeded');
+    const seenFx = emptyRecord<true>();
+    for (let index = 0; index < rawFxRates.length; index += 1) {
+      const at = `fx_rates[${index}]`;
+      const result = validateFxRateEntry(rawFxRates[index], at);
+      if (!result.ok) return reject(result.field, result.rule);
+      const entry = result.entry;
+      // Two rates starting at the same instant for the same ordered pair would
+      // make "the rate in force" depend on document order. Refused, not
+      // tie-broken - the same posture the hourly-rate entries take, down to
+      // keying the instant through `instantKey` so that the same moment written
+      // with a different offset or a fractional second is still one instant.
+      // `|` is outside ISO 4217 and outside an ISO-8601 instant, so no two
+      // different entries can collide on this key.
+      const key = `${entry.from_currency}|${entry.to_currency}|${instantKey(entry.effective_from)}`;
+      if (ownProperty(seenFx, key) !== undefined) return reject(`${at}.effective_from`, 'duplicate_id');
+      seenFx[key] = true;
+      fxEntries.push(entry);
+    }
   }
 
   const recordsRaw = requireArray(raw, 'value_records', limits.max_value_records);
@@ -801,7 +958,9 @@ export function validateValueLedger(
       policy_version: policyVersion,
       company_id: companyId,
       reporting_currency: reportingCurrency,
+      aggregation_mode: aggregationMode,
       rate_policy: { policy_version: policyVersion, entries },
+      fx_policy: fxEntries.length === 0 ? EMPTY_FX_POLICY : { entries: fxEntries },
       records,
       ai_cost: aiCost,
       ark_fee: arkFee,

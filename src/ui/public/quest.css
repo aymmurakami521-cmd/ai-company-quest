@@ -1125,7 +1125,9 @@ h3 {
 }
 
 .value__row[data-group='rate'],
-.value__row[data-group='unavailable'] {
+.value__row[data-group='fx'],
+.value__row[data-group='unavailable'],
+.value__row[data-group='unconverted'] {
   opacity: 0.9;
 }
 
