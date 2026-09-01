@@ -196,7 +196,9 @@ function matchPair(
     if (!Number.isFinite(startMs)) continue;
     if (startMs <= atMs) {
       // Later start wins. Equal starts cannot occur: the ledger validator
-      // refuses two entries with the same pair and `effective_from`.
+      // refuses two entries whose pair and *parsed* `effective_from` agree, so
+      // two spellings of one instant are rejected there rather than tie-broken
+      // by position here.
       if (startMs > winnerMs) {
         winner = entry;
         winnerMs = startMs;

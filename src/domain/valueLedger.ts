@@ -35,6 +35,7 @@ import { hasControlChars, scanUnsafe } from './validate.ts';
 import { emptyRecord, ownProperty } from './record.ts';
 import {
   hourlyRateFromMonthlyCost,
+  instantKey,
   isCurrencyCode,
   isIsoInstant,
   MAX_HOURLY_RATE_MINOR,
@@ -825,9 +826,12 @@ export function validateValueLedger(
     // Two entries starting at the same instant for the same scope would make
     // "the rate in force" ambiguous, and the resolver would then depend on
     // document order. Refused rather than tie-broken.
+    // The instant is keyed by `instantKey`, not by its text: `00:00:00Z` and
+    // `09:00:00+09:00` are one instant written two ways, and comparing the
+    // spellings would let both through and hand the tie to array position.
     // `|` is outside `LEDGER_ID`, outside the scope vocabulary and outside an
     // ISO-8601 instant, so no pair of different entries can collide on it.
-    const key = `${entry.scope}|${entry.scope_id}|${entry.effective_from}`;
+    const key = `${entry.scope}|${entry.scope_id}|${instantKey(entry.effective_from)}`;
     if (ownProperty(seenEntries, key) !== undefined) return reject(`${at}.effective_from`, 'duplicate_id');
     seenEntries[key] = true;
     entries.push(entry);
@@ -849,10 +853,12 @@ export function validateValueLedger(
       const entry = result.entry;
       // Two rates starting at the same instant for the same ordered pair would
       // make "the rate in force" depend on document order. Refused, not
-      // tie-broken - the same posture the hourly-rate entries take.
+      // tie-broken - the same posture the hourly-rate entries take, down to
+      // keying the instant through `instantKey` so that the same moment written
+      // with a different offset or a fractional second is still one instant.
       // `|` is outside ISO 4217 and outside an ISO-8601 instant, so no two
       // different entries can collide on this key.
-      const key = `${entry.from_currency}|${entry.to_currency}|${entry.effective_from}`;
+      const key = `${entry.from_currency}|${entry.to_currency}|${instantKey(entry.effective_from)}`;
       if (ownProperty(seenFx, key) !== undefined) return reject(`${at}.effective_from`, 'duplicate_id');
       seenFx[key] = true;
       fxEntries.push(entry);

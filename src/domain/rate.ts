@@ -234,6 +234,31 @@ export function isIsoInstant(value: unknown): value is string {
 }
 
 /**
+ * A canonical key for one *instant*, for duplicate detection.
+ *
+ * `ISO_INSTANT` admits several spellings of the same moment -
+ * `2026-08-01T00:00:00Z`, `2026-08-01T00:00:00.000Z` and
+ * `2026-08-01T09:00:00+09:00` are one instant written three ways. Keying a
+ * duplicate check on the raw text would let two of them coexist for one scope,
+ * and "the rate in force" would then be decided by array position rather than
+ * refused. Every caller that asks "is this instant already taken?" must compare
+ * on this value, never on the text.
+ *
+ * Resolution is the millisecond, which is what `Date.parse` yields and what the
+ * resolvers compare. Two entries that differ only below a millisecond are
+ * therefore the same key and are refused - fail-closed, and the ordering
+ * between them would not have been observable anyway.
+ *
+ * The two prefixes keep the mapping injective: an unparseable string can only
+ * arrive from a caller that skipped `isIsoInstant`, and it is then keyed by its
+ * own text rather than collapsing onto one shared key.
+ */
+export function instantKey(value: string): string {
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? `@${ms}` : `#${value}`;
+}
+
+/**
  * Half-up rounding for non-negative values.
  *
  * `Math.round` is already half-up for positives, but saying so here is the
@@ -332,7 +357,9 @@ function matchScope(
     if (!Number.isFinite(startMs)) continue;
     if (startMs <= atMs) {
       // Later start wins. Equal starts cannot occur: the ledger validator
-      // refuses two entries with the same scope, id and `effective_from`.
+      // refuses two entries whose scope, id and *parsed* `effective_from`
+      // agree, so two spellings of one instant are rejected there rather than
+      // tie-broken by position here (see `instantKey`).
       if (startMs > winnerMs) {
         winner = entry;
         winnerMs = startMs;

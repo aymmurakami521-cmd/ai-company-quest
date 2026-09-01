@@ -38,6 +38,11 @@ User > Department > Company > ARK default
 ```
 
 - 各 scope は `effective_from` 付きで履歴を持ちます。ある時点で**在効な最新の1件**が勝ちます。
+- 同一 scope・**同一 instant** の entry が2件あると「その時点で在効な1件」が定まらないため、
+  validator が `duplicate_id` で**拒否**します。同一性はテキストではなく**解決した時刻**で見ます
+  （`2026-08-01T00:00:00Z` と `2026-08-01T09:00:00+09:00` は同じ instant です）。
+  テキストで比べると両方が通り、どちらが勝つかが **JSON 配列の並び順**で決まってしまいます。
+  これは FX レート（§10.3）でも同じです。
 - 同一 scope に entry が無い（またはその時点でまだ発効していない）場合のみ、次の scope へ落ちます。
 - どの scope にも無ければ **ARK default = 3,400 JPY/hour**。
   これは **fallback proxy** であって、給与でも顧客単価でもありません。
@@ -277,6 +282,7 @@ network call から来た数字は、§7.3.1 が mode B に義務づける
 | record の期間より後にしか発効していないレート | 適用しません（§10.4） |
 | 換算結果が金額上限を超える | 同上。clamp しません |
 | `from === to` の entry | validator が**拒否**。換算していないものを換算したと記録しないため |
+| 同一 pair・**同一 instant** の entry が2件 | validator が `duplicate_id` で**拒否**。同一性は解決した時刻で見るので、offset 違い（`…T00:00:00Z` と `…T09:00:00+09:00`）や小数秒違いも1つの instant です。並び順で勝敗を決めません |
 
 **換算できなかった金額があると、その小計は「converted 分だけの合計」を publish しません。**
 `total_blocked` を立てて **total 自体を出しません**。converted 分だけを出すと、

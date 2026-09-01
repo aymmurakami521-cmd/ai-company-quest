@@ -244,6 +244,48 @@ test('two rates for one pair starting at the same instant are refused, not tie-b
   );
 });
 
+test('one instant written two ways is still one instant, in either document order', () => {
+  // `2026-08-01T00:00:00Z` and `2026-08-01T09:00:00+09:00` are the same moment.
+  // Keyed by their text they would both validate, and `matchPair` would then
+  // hand the tie to whichever came first in the array: the same ledger, with
+  // the two entries swapped, would convert at a different rate. Both spellings
+  // must be refused, and refused the same way whichever order they arrive in.
+  const spellings = [
+    ['2026-08-01T00:00:00Z', '2026-08-01T09:00:00+09:00'],
+    ['2026-08-01T00:00:00Z', '2026-08-01T00:00:00.000Z'],
+    ['2026-08-01T00:00:00.000000Z', '2026-07-31T19:00:00-05:00'],
+  ];
+  for (const [first, second] of spellings) {
+    const a = usdRate({ effective_from: first, to_amount_minor: 14825 });
+    const b = usdRate({ effective_from: second, to_amount_minor: 20000 });
+    // The second entry is named in both directions, so neither ordering can be
+    // the one that quietly wins.
+    assert.deepEqual(
+      rejectionFor(makeLedgerDocument({ fx_rates: [a, b] })),
+      { field: 'fx_rates[1].effective_from', rule: 'duplicate_id' },
+      `${first} then ${second}`,
+    );
+    assert.deepEqual(
+      rejectionFor(makeLedgerDocument({ fx_rates: [b, a] })),
+      { field: 'fx_rates[1].effective_from', rule: 'duplicate_id' },
+      `${second} then ${first}`,
+    );
+  }
+
+  // The tightening is about one instant, not about offsets: two genuinely
+  // different moments still coexist however they are written, and a summary
+  // built from them is a real one.
+  const accepted = validateValueLedger(
+    makeLedgerDocument({
+      fx_rates: [
+        usdRate({ effective_from: '2026-08-01T09:00:00+09:00' }),
+        usdRate({ effective_from: '2026-08-01T00:00:00.001Z', to_amount_minor: 20000 }),
+      ],
+    }),
+  );
+  assert.ok(accepted.ok, 'a millisecond apart is two instants, not one');
+});
+
 test('a cost period is validated, and it is optional', () => {
   const withPeriod = validateValueLedger(
     makeLedgerDocument({

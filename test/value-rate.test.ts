@@ -16,6 +16,7 @@ import {
   MAX_HOURLY_RATE_MINOR,
   RATE_RESOLUTION_ORDER,
   hourlyRateFromMonthlyCost,
+  instantKey,
   isCurrencyCode,
   isIsoInstant,
   minorUnitExponent,
@@ -263,4 +264,24 @@ test('an instant must both look like ISO-8601 and parse', () => {
   assert.equal(isIsoInstant('2026-13-01T00:00:00Z'), false, 'and it has to parse');
   assert.equal(isIsoInstant('2026-01-01T25:00:00Z'), false);
   assert.equal(isIsoInstant(0), false);
+});
+
+test('an instant is keyed by the moment it names, not by how it was written', () => {
+  // Every spelling `isIsoInstant` admits for one moment has to collapse onto a
+  // single key: this is what stops two entries for one scope coexisting and
+  // leaving "the rate in force" to array position.
+  const midnightUtc = instantKey('2026-08-01T00:00:00Z');
+  assert.equal(instantKey('2026-08-01T00:00:00.000Z'), midnightUtc);
+  assert.equal(instantKey('2026-08-01T09:00:00+09:00'), midnightUtc);
+  assert.equal(instantKey('2026-07-31T19:00:00-05:00'), midnightUtc);
+
+  // Different moments stay different, including one millisecond apart.
+  assert.notEqual(instantKey('2026-08-01T00:00:00.001Z'), midnightUtc);
+  assert.notEqual(instantKey('2026-08-01T00:00:01Z'), midnightUtc);
+
+  // A string that never parsed cannot borrow another value's key, and cannot
+  // collide with the numeric form either.
+  assert.equal(instantKey('not-an-instant'), instantKey('not-an-instant'));
+  assert.notEqual(instantKey('not-an-instant'), instantKey('also-not'));
+  assert.notEqual(instantKey(String(Date.parse('2026-08-01T00:00:00Z'))), midnightUtc);
 });
