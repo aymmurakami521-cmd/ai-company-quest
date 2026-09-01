@@ -57,6 +57,8 @@ export declare const AMOUNT_WITHHELD: string;
 export declare const NO_RECORDS: string;
 export declare const NOT_PRICED: string;
 export declare const NOT_CONVERTIBLE: string;
+export declare const RATIO_WITHHELD: string;
+export declare const RATIO_WITHHELD_NOTE: string;
 export declare const MAX_RATE_TRACE_ROWS: number;
 export declare const MAX_FX_TRACE_ROWS: number;
 export declare const MINOR_UNIT_EXPONENTS: Readonly<Record<string, number>>;

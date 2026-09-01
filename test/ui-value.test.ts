@@ -17,6 +17,8 @@ import {
   NOT_CONVERTIBLE,
   NOT_PRICED,
   NO_RECORDS,
+  RATIO_WITHHELD,
+  RATIO_WITHHELD_NOTE,
   formatMinor,
   formatMinutes,
   selectValuePanel,
@@ -26,6 +28,7 @@ import {
   MINOR_UNIT_EXPONENTS as DOMAIN_MINOR_UNIT_EXPONENTS,
   minorUnitExponent,
 } from '../src/domain/rate.ts';
+import { AI_COST_TERMS } from '../src/domain/ratio.ts';
 import { buildValueSummary } from '../src/domain/valueDashboard.ts';
 import { validateValueLedger, valueLedgerStateFrom } from '../src/domain/valueLedger.ts';
 import { DEMO_VALUE_LEDGER } from '../src/demo/valueFixture.ts';
@@ -454,6 +457,17 @@ test('a computed ratio is shown as two named terms, never as one bare multiple',
   assert.ok(bcr.value_text.endsWith('倍'), bcr.value_text);
   const net = rowFor(panel, 'ratio-net-realized');
   assert.ok(net.label.includes('net ROI'), net.label);
+
+  // The browser file cannot import a domain module, so it holds its own copy of
+  // these names. Pinning the rendered label to the registry is what stops the
+  // copy the collision rules protect from drifting away from the copy a person
+  // actually reads (`docs/value-rate-design.md` §11.6).
+  for (const name of [AI_COST_TERMS.label_ja, AI_COST_TERMS.term_en]) {
+    assert.ok(bcr.label.includes(name), `${bcr.label} names ${name}`);
+  }
+  for (const name of [AI_COST_TERMS.net_label_ja, AI_COST_TERMS.net_term_en]) {
+    assert.ok(net.label.includes(name), `${net.label} names ${name}`);
+  }
   assert.notEqual(bcr.value_text, net.value_text, 'the two terms are different numbers');
 
   // The estimated ratio is its own pair of rows, and no row mixes the two.
@@ -464,6 +478,42 @@ test('a computed ratio is shown as two named terms, never as one bare multiple',
     assert.notEqual(row.value_text, '0倍');
     assert.ok(row.note.includes('対象'), row.note);
   }
+});
+
+test('a ratio a viewer may not see says so, and does not say the cost was zero', () => {
+  const panel = panelFor('restricted');
+  const rows = panel.rows.filter((row) => row.group === 'ratio');
+  // No figure row survives, and at least one row says why. Asserted this way
+  // rather than "every ratio row is withheld", which would also be asserting
+  // that the demo fixture happens to have nothing structurally blocked.
+  assert.equal(rows.some((row) => row.code.startsWith('ratio-withheld-')), true);
+  for (const row of rows) {
+    assert.equal(row.code.startsWith('ratio-bcr-'), false, row.code);
+    assert.equal(row.code.startsWith('ratio-net-'), false, row.code);
+    if (!row.code.startsWith('ratio-withheld-')) continue;
+    // Its own anchor: 「見せていない」 is not 「算出できなかった」, and an
+    // operator must not read one as the other.
+    assert.equal(row.value_text, RATIO_WITHHELD);
+    assert.equal(row.value_text, '権限により非表示', 'the reason is in words, in the panel language');
+    assert.ok(row.note.includes(RATIO_WITHHELD_NOTE), row.note);
+    assert.equal(row.value_text.includes('0'), false);
+    assert.equal(row.value_text.includes('∞'), false);
+    assert.equal(row.status_label.length > 0, true, '実現／推定 is still legible');
+  }
+
+  // Nothing rendered anywhere on the panel lets a reader conclude the AI cost
+  // is 0 - neither the machine name for that fact nor its Japanese label.
+  const text = JSON.stringify(panel);
+  for (const leak of ['undefined_zero_denominator', 'AI関連コストが0のため未定義']) {
+    assert.equal(text.includes(leak), false, leak);
+  }
+  // 0倍 appears only inside 「0倍という意味ではありません」, never as a value.
+  for (const row of panel.rows) assert.notEqual(row.value_text, '0倍');
+  // 非表示 still labels an actual amount, and it is a different sentence from
+  // the ratio's. Asserted on a named row, because `RATIO_WITHHELD` contains
+  // `AMOUNT_WITHHELD` as a substring and a whole-panel search cannot fail.
+  assert.equal(rowFor(panel, 'cost-ai').value_text, AMOUNT_WITHHELD);
+  assert.notEqual(rowFor(panel, 'cost-ai').value_text, RATIO_WITHHELD);
 });
 
 test('a ratio that cannot be computed shows the reason, not a zero or a dash', () => {
