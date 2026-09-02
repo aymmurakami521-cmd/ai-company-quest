@@ -219,6 +219,8 @@ export declare const ARK_SUMMARY_ROWS: number;
 export declare const ARK_UNCONFIRMED_BANNER_CODES: readonly BannerCode[];
 /** The control frames that re-establish what is current after a socket opens. */
 export declare const ARK_RECOVERY_FRAMES: readonly string[];
+/** The subset of those that also carry the namespace's halt state themselves. */
+export declare const ARK_SETTLING_RECOVERY_FRAMES: readonly string[];
 export declare const ARK_EXTERNAL_WAIT_NOTE: string;
 export declare const ARK_NEXT_FIELDS: readonly ArkNextField[];
 export declare const ARK_NEXT_NOTE: string;
@@ -244,6 +246,11 @@ export declare function arkRecovered(
   after: ClientState,
   frameKind: string,
 ): boolean;
+/**
+ * Whether that recovery frame settles the namespace's health as well as its
+ * office. False for `replay_end`, which a queued `fail_closed` can still follow.
+ */
+export declare function arkRecoverySettles(frameKind: string): boolean;
 
 export declare function runtimeLabel(code: string): string;
 export declare function outcomeLabel(result: string): string;

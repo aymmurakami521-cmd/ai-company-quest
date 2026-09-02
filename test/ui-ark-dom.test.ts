@@ -103,6 +103,15 @@ function reconnect(): void {
   stream.emit('open', {});
 }
 
+/**
+ * Lets whatever the server queued behind the frame just delivered arrive first,
+ * the way a browser does: both frames leave the server in one write, and the
+ * page is handed them as two events with the console's own hold in between.
+ */
+function drain(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function rowsIn(id: string): FakeElement[] {
   return fakeDocument.element(id).children;
 }
@@ -249,7 +258,7 @@ test('a reconnected socket is not a live office until a recovery frame says so',
   for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'true');
 });
 
-test('a replay served over a reconnect confirms the office at its end, not its start', () => {
+test('a replay served over a reconnect confirms the office at its end, not its start', async () => {
   show({ ann: 'running' });
   reconnect();
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
@@ -258,9 +267,50 @@ test('a replay served over a reconnect confirms the office at its end, not its s
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'a replay beginning establishes nothing');
   assert.deepEqual(tags('ark-now-list'), ['UNKNOWN']);
 
+  // Nor does its end, in the frame it arrives: the server can still have a
+  // `fail_closed` queued behind it, and the browser has not delivered it yet.
   currentStream().emit('replay_end', { count: 0 });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'not while the burst may continue');
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'RECONNECTING');
+
+  await drain();
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '1', 'the served replay is the recovery');
   assert.equal(fakeDocument.element('ark-banner').dataset.code, 'CONNECTED');
+});
+
+test('a halt queued behind a replay is never one frame of confirmed work', async () => {
+  show({ ann: 'running', bob: 'running' });
+  reconnect();
+
+  // Exactly what `server.ts:326-337` writes when a valid `Last-Event-ID` replay
+  // meets a namespace that halted while this client was away: `replay_start`,
+  // the replayed events, `replay_end`, and only then the halt notice - the whole
+  // burst in one write, delivered to the page as separate events.
+  const stream = currentStream();
+  stream.emit('replay_start', { count: 0 });
+  stream.emit('replay_end', { count: 0 });
+  // The frame the console used to render as 実行中・確認済み, on a namespace that
+  // had already stopped ingesting.
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  assert.equal(countFor('ark-now-counts', 'UNKNOWN'), '2');
+  for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'false');
+
+  stream.emit('fail_closed', {
+    namespace: 'live',
+    halted: true,
+    reason: 'collector_stopped',
+    detail: null,
+  });
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'FAIL_CLOSED');
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+
+  // The held lift runs after the halt has been applied, and a halt is sticky and
+  // outranks every phase - so it cannot hand the office back either.
+  await drain();
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'FAIL_CLOSED');
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  assert.deepEqual(tags('ark-now-list'), ['UNKNOWN', 'UNKNOWN']);
+  assert.ok(rowsIn('ark-need-list').some((item) => item.dataset.reason === 'INGEST_HALTED'));
 });
 
 test('a disconnection is one Need You item, and does not hide the approval wait', () => {

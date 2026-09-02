@@ -13,7 +13,10 @@
  *
  * Everything that decides *what* is shown lives in `quest-view.js` and
  * `quest-ark.js` and is unit tested. This file places the result into cloned
- * <template> nodes and does nothing else.
+ * <template> nodes, and the only thing it decides for itself is when a recovery
+ * the server has not finished describing may lift the reconnect freeze - see
+ * `holdRecovery`, the one clock in this file, which decides nothing about any
+ * desk.
  *
  * Rows are reused by key rather than rebuilt per frame, for the same reason the
  * office screen reuses desk nodes: a node that leaves the document takes the
@@ -33,6 +36,7 @@ import {
   ARK_SUMMARY_ROWS,
   arkPhaseOnOpen,
   arkRecovered,
+  arkRecoverySettles,
   buildCommandDraft,
   outcomeLabel,
   runtimeLabel,
@@ -106,6 +110,9 @@ let state = createClientState(readNamespaceFromHash());
 /** The banner last written to the live region, so it is not re-announced. */
 let announced = null;
 
+/** A recovery held back until the rest of the server's burst has been applied. */
+let held = null;
+
 function readNamespaceFromHash() {
   const requested = window.location.hash.replace('#', '');
   return NAMESPACES.includes(requested) ? requested : 'live';
@@ -117,6 +124,10 @@ function setState(next) {
 }
 
 function closeStream() {
+  if (held !== null) {
+    clearTimeout(held);
+    held = null;
+  }
   if (source !== null) {
     source.close();
     source = null;
@@ -169,12 +180,50 @@ function handleFrame(kind, raw) {
     return;
   }
   const at = Date.now();
+  const stream = source;
   const applied = applyFrame(state, { kind, payload, at_ms: at });
   // The one place the reconnect freeze is lifted, and only by the frame that
   // re-established the office - after it has been applied, never before.
-  setState(
-    arkRecovered(state, applied, kind) ? setConnectionPhase(applied, 'open', at) : applied,
-  );
+  if (!arkRecovered(state, applied, kind)) {
+    setState(applied);
+    return;
+  }
+  if (arkRecoverySettles(kind)) {
+    setState(setConnectionPhase(applied, 'open', at));
+    return;
+  }
+  setState(applied);
+  holdRecovery(stream);
+}
+
+/**
+ * Lifts a recovery the frame itself could not settle, once the server has
+ * finished saying what it had to say.
+ *
+ * Only `replay_end` reaches here, and only because a halt that happened while
+ * this client was offline is written *behind* it in the same burst
+ * (`server.ts:332-337`). Lifting the freeze on the `replay_end` event itself
+ * rendered the retained desks as confirmed 実行中 for exactly one frame, until
+ * the `fail_closed` arrived and froze them again. Yielding first lets anything
+ * already queued behind the replay be applied before the console claims the
+ * office is being confirmed - and a halt, once applied, is sticky and outranks
+ * every phase, so the lift below cannot undo it.
+ *
+ * Fail-safe in both directions. The timer is the only clock in this file and it
+ * decides nothing about any desk: if it never runs the console stays 状態不明,
+ * which is the safe half, and if the halt is split across two network reads and
+ * arrives after it, the result is no worse than lifting immediately. It is
+ * dropped when the stream is replaced, and refuses to act on a stream that is no
+ * longer the current one or on a console that has since moved on by itself.
+ */
+function holdRecovery(stream) {
+  if (held !== null) return;
+  held = setTimeout(() => {
+    held = null;
+    if (source !== stream) return;
+    if (state.connection.phase !== 'reconnecting') return;
+    setState(setConnectionPhase(state, 'open', Date.now()));
+  }, 0);
 }
 
 function text(node, selector, value) {

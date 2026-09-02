@@ -44,12 +44,15 @@ import {
   ARK_COMMAND_MAX,
   ARK_COMMAND_REJECTS,
   ARK_OUTCOME_RESULTS,
+  ARK_RECOVERY_FRAMES,
   ARK_RUNTIME_CODES,
+  ARK_SETTLING_RECOVERY_FRAMES,
   ARK_SUBMISSION,
   ARK_UNCONFIRMED_BANNER_CODES,
   NOT_IN_CONTRACT,
   arkPhaseOnOpen,
   arkRecovered,
+  arkRecoverySettles,
   buildCommandDraft,
   outcomeLabel,
   runtimeLabel,
@@ -436,6 +439,28 @@ test('the office comes back the moment the recovery snapshot re-states it', () =
   assert.equal(now.rows[0]?.runtime, 'EXECUTING');
 });
 
+test('only a recovery frame that carries the halt state may declare the stream healthy', () => {
+  // `arkRecovered` says the office has been re-established; this says whether
+  // the same frame also settled whether ingestion is still running. A `snapshot`
+  // carries `halted` in its own payload, so it settles both. A `replay_end` does
+  // not: `server.ts:332-337` writes a queued `fail_closed` *behind* it, because a
+  // halt that happened while this client was offline reaches nobody through the
+  // replay itself - so declaring the recovery healthy on the `replay_end` alone
+  // rendered every retained desk as confirmed 実行中 for the frame in between.
+  assert.equal(arkRecoverySettles('snapshot'), true);
+  assert.equal(arkRecoverySettles('replay_end'), false);
+  // Neither is a recovery at all, and neither settles anything either.
+  assert.equal(arkRecoverySettles('replay_start'), false);
+  assert.equal(arkRecoverySettles('stream_gap'), false);
+  assert.equal(arkRecoverySettles('fail_closed'), false);
+  // A subset of the recovery vocabulary, so it can never name a frame that is
+  // not one - which would be a second connection rule rather than a reading of
+  // this one.
+  for (const kind of ARK_SETTLING_RECOVERY_FRAMES) {
+    assert.ok(ARK_RECOVERY_FRAMES.includes(kind), `${kind} is a recovery frame`);
+  }
+});
+
 test('a first connection is not a recovery, and is not frozen as one', () => {
   // `open` over an empty office has no earlier observation to misreport, so it
   // is taken as it comes - the same reason `LOADING` is not a frozen state.
@@ -759,6 +784,50 @@ test('a stop the window cannot place in the desk own order proves nothing', () =
   assert.ok((row.follow_up ?? '').length > 0);
 });
 
+test('a mark the recovery moved past is not the mark the fold was comparing against', () => {
+  // The hole the two rules above still left between them. `trustedLog` refuses
+  // the entries from before the recovery as *evidence*, but the ordering floor
+  // was still being reconstructed from them - and between the newest of them and
+  // the window there is exactly the stretch this client missed, which the fold
+  // walked through. So the floor was ann's mark as it stood at t1 while the fold
+  // had already carried it to t5, and the late stop at t3 - which the reducer
+  // refused against the snapshot-era mark - cleared a floor that was never real
+  // and was read back as ann reporting its own finish.
+  const at = (second: number): string => `2026-01-01T00:00:0${second}.000Z`;
+  const state = afterRecovery(
+    [{ event_type: 'agent_start', agent_id: 'ann', status: 'running', ts: at(1) }],
+    [{ event_type: 'agent_start', agent_id: 'ann', status: 'running', ts: at(5) }],
+    [
+      { event_type: 'agent_stop', agent_id: 'ann', status: 'completed', ts: at(3) },
+      { event_type: 'session_end', agent_id: 'ann', status: 'running', ts: at(6) },
+    ],
+  );
+  const row = selectOutcome(state).rows[0];
+
+  assert.ok(row !== undefined);
+  // The defect's preconditions, pinned so the case cannot stop reproducing it:
+  // the fold refused the stop, the log kept it anyway, and the log *also* still
+  // holds the pre-recovery entry the floor was being built out of.
+  assert.equal(state.counters.out_of_order, 1, 'the fold declined the late stop');
+  assert.equal(
+    state.log.filter((entry) => entry.event_type === 'agent_stop').length,
+    1,
+    'and it is in the client log regardless',
+  );
+  assert.equal(
+    state.log.filter((entry) => entry.ts === at(1)).length,
+    1,
+    'while the superseded observation the floor came from is still there too',
+  );
+  assert.equal(
+    state.actors[row.actor_key ?? '']?.last_event_type,
+    'session_end',
+    'and the authoritative state says only that the session ended around ann',
+  );
+  assert.equal(row.result, 'STOPPED', 'so no completion may be built out of the refused stop');
+  assert.ok((row.follow_up ?? '').length > 0, 'and the open loop is named');
+});
+
 test('a desk whose history begins before this client may not be read out of the log', () => {
   // The cost of the rule above, stated rather than left to be discovered. A
   // browser that opens mid-run holds a snapshot and no observation before it, so
@@ -795,7 +864,7 @@ test('a desk whose history begins before this client may not be read out of the 
 test('no ordering of a run, across any recovery point, makes 完了 out of a session end', () => {
   // The rule as a property rather than as cases, because the ways to reach it
   // outnumber the ones anybody would think to write down: every sequence of
-  // three lifecycle-or-session events, every arrival order including late ones,
+  // four lifecycle-or-session events, every arrival order including late ones,
   // and a recovery snapshot inserted at every point in each - checked against an
   // oracle that recomputes, independently of the console, which of a desk's
   // events the fold actually acted on.
@@ -820,8 +889,13 @@ test('no ordering of a run, across any recovery point, makes 完了 out of a ses
   };
 
   let checked = 0;
+  // Four, not three. Three is one event short of the shape where a recovery can
+  // sit *between* two of a desk's own events and still leave an older one behind
+  // it in the log - which is exactly the run the reconstructed ordering floor
+  // read the wrong mark out of.
+  const LENGTH = 4;
   const walk = (prefix: { event_type: string; ts: string }[]): void => {
-    if (prefix.length === 3) {
+    if (prefix.length === LENGTH) {
       const truth = appliedLifecycle(prefix);
       const latest = truth.length === 0 ? null : truth[truth.length - 1];
       const events = prefix.map((step) => ({ ...step, agent_id: 'ann', status: 'running' }));
@@ -851,7 +925,7 @@ test('no ordering of a run, across any recovery point, makes 完了 out of a ses
   };
   walk([]);
 
-  assert.ok(checked > 5000, `the search actually ran: ${checked} cases`);
+  assert.ok(checked > 90000, `the search actually ran: ${checked} cases`);
 });
 
 test('a finished-sounding status on a non-terminal event is not a completion either', () => {

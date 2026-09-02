@@ -16,19 +16,21 @@
  * That rule is stricter here than on the office floor in three places, and every
  * one of them is about refusing to claim more than the stream supports rather
  * than classifying anything anew: `ARK_UNCONFIRMED_BANNER_CODES` freezes the
- * console through a recovery as well as a disconnection, `arkPhaseOnOpen` keeps
- * that freeze standing until a recovery frame has actually re-established what is
- * current, and `reportedOwnStop` refuses to read a generic `session_end` as
- * somebody having finished - out of the stretch of the log `trustedLog` can
+ * console through a recovery as well as a disconnection, `arkPhaseOnOpen` and
+ * `arkRecoverySettles` keep that freeze standing until a recovery frame has
+ * actually re-established what is current *and* the server has finished saying
+ * whether ingestion is still running, and `reportedOwnStop` refuses to read a
+ * generic `session_end` as somebody having finished - out of the stretch of the
+ * log `trustedLog` can
  * still vouch for, and only the entries in it the fold actually acted on and can
  * be shown to have acted on, so neither an observation a recovery superseded nor
  * one the reducer declined nor one this client cannot place in the desk's own
  * order can be cited as proof about the run that stands now.
  *
- * `arkPhaseOnOpen` / `arkRecovered` are the only two functions here that are not
- * selectors, and they still hold the boundary: both are pure, both speak only the
- * connection vocabulary `quest-view.js` already defines, and neither is reachable
- * from anything that could write.
+ * `arkPhaseOnOpen` / `arkRecovered` / `arkRecoverySettles` are the only three
+ * functions here that are not selectors, and they still hold the boundary: all
+ * are pure, all speak only the connection vocabulary `quest-view.js` already
+ * defines, and none is reachable from anything that could write.
  *
  * The command surface is a draft builder and nothing else. It structures what an
  * owner typed into a typed Task/Delegation payload and reports that there is no
@@ -166,6 +168,28 @@ export function arkRecovered(before, after, frameKind) {
   if (before.connection.phase !== 'reconnecting') return false;
   if (!ARK_RECOVERY_FRAMES.includes(frameKind)) return false;
   return after.counters.foreign === before.counters.foreign;
+}
+
+/**
+ * The recovery frames that state the namespace's health in their own payload.
+ *
+ * A `snapshot` carries `halted` and `halt_reason`, so applying it settles both
+ * questions the console has to answer after a drop - what the office looks like
+ * *and* whether ingestion is still running - in the same frame.
+ *
+ * A `replay_end` settles only the first. `server.ts:332-337` writes a queued
+ * `fail_closed` immediately *after* it, because a halt that happened while this
+ * client was offline reaches nobody through the replay itself. Both frames leave
+ * the server in one write, but the browser dispatches them as two events, so
+ * declaring the recovery healthy on the first one renders every retained desk as
+ * confirmed 実行中 for the frame before the halt lands. `arkRecoverySettles`
+ * says which of the two a frame is, so `quest-ark-app.js` can hold the freeze
+ * over the rest of the burst rather than claiming health it does not yet have.
+ */
+export const ARK_SETTLING_RECOVERY_FRAMES = Object.freeze(['snapshot']);
+
+export function arkRecoverySettles(frameKind) {
+  return ARK_SETTLING_RECOVERY_FRAMES.includes(frameKind);
 }
 
 const RUNTIME_BY_STATE = Object.freeze({
@@ -675,37 +699,49 @@ function trustedLog(state) {
  *
  * The rule below needs to know what the fold was comparing against when the
  * window's first entry for a desk arrived, and that comparison happened before
- * the window. The entries the window no longer covers still answer it: an entry
- * the fold ignored is by definition older than the applied high-water mark of
- * its moment, so the newest ts among *all* of a desk's older entries is exactly
- * the newest ts among its applied ones.
+ * the window. The entries the window no longer covers can answer it, and the
+ * applied ones need not be told apart from the rest to do so: an entry the fold
+ * ignored is by definition older than the applied high-water mark of its moment,
+ * so the newest ts among *all* of a desk's older entries is exactly the newest
+ * among its applied ones.
  *
- * Finding nothing is two different situations, and they may not be conflated.
- * Either the desk has no history before the window - it was born inside it,
- * which is the ordinary case for a colleague who starts while somebody is
- * watching - or it has one the log cannot show, because a snapshot folded that
- * stretch in on this client's behalf or the log has moved past it. The first is
- * a mark of "nothing yet"; the second is no mark at all, and reading it as
- * "nothing yet" is what let a late `agent_stop` be accepted as the first thing
- * the fold ever heard from a desk it had in fact already ended.
+ * They can answer it only when they are the whole of that history, though, and
+ * that is the one thing they may not be assumed to be. The entries
+ * older than the window are on the far side of a recovery: `applySnapshot`
+ * replaced the actors with the server's fold and left them standing, so between
+ * the newest of them and the window there can be a stretch this client never
+ * saw - and the fold's mark moved through it. Taking the newest surviving entry
+ * as the mark then puts the floor *below* where the fold actually stood, and a
+ * late `agent_stop` that the reducer refused against the snapshot-era mark is
+ * accepted by the replay below and read back as a completion report.
  *
- * The read model tells them apart: the fold counts every event it takes for a
- * desk, applied or not, in the same `event_count` the window's own entries can
- * be counted against. Equal means the window is the desk's whole history.
+ * So the entries are usable only when they can be shown to be the desk's entire
+ * pre-window history, and the read model says whether they are: the fold counts
+ * every event it takes for a desk, applied or not, in `event_count`. When the
+ * window's entries and the older ones together account for that count, nothing
+ * was folded on this client's behalf and the newest of them *is* the mark the
+ * fold was comparing against. When they fall short - a snapshot filled the
+ * difference in, or `MAX_LOG_ENTRIES` has moved past it - the mark is unknown,
+ * and unknown is not "nothing yet": it fails closed.
+ *
+ * Zero older entries is the same rule, not a special case. It means either a
+ * desk born inside the window, which the count confirms, or a desk whose whole
+ * history a snapshot brought, which the count refuses.
  */
 function orderFloor(log, trusted, actorKey, actor) {
+  let seen = 0;
   let floor = null;
+  for (const entry of trusted) if (entry.actor_key === actorKey) seen += 1;
   for (let index = trusted.length; index < log.length; index += 1) {
     const entry = log[index];
     if (entry.actor_key !== actorKey) continue;
+    seen += 1;
     const ms = Date.parse(entry.ts);
     if (floor === null || ms > floor) floor = ms;
   }
-  if (floor !== null) return { known: true, ms: floor };
-  let inWindow = 0;
-  for (const entry of trusted) if (entry.actor_key === actorKey) inWindow += 1;
   const counted = actor === null ? null : actor.event_count;
-  return { known: typeof counted === 'number' && counted === inWindow, ms: null };
+  if (typeof counted !== 'number' || counted !== seen) return { known: false, ms: null };
+  return { known: true, ms: floor };
 }
 
 /**
