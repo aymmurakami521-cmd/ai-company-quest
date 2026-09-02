@@ -1,0 +1,640 @@
+/*
+ * Owner ARK — compact management console.
+ *
+ * Rules that are load-bearing, not decoration:
+ * - the whole console fits one laptop screen: the page itself never scrolls,
+ *   each panel scrolls inside its own box, and the overflow of every list sits
+ *   in a drawer rather than below the fold;
+ * - Need You is first in the document and first in the layout at every width;
+ * - state is never colour-only: every level, runtime class and outcome is also
+ *   a word and a symbol in the DOM;
+ * - at mobile width the grid collapses to one column with Need You on top;
+ * - there is no motion here at all, so `prefers-reduced-motion` is a non-issue.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --ink: #0d1018;
+  --panel: #161c2b;
+  --panel-edge: #2b3550;
+  --text: #e8ecf6;
+  --text-dim: #a3adc4;
+  --accent: #f7d51d;
+
+  --state-working: #56d97e;
+  --state-planning: #c79bff;
+  --state-awaiting_approval: #ffb347;
+  --state-error: #ff6b6b;
+  --state-ended: #99a2b8;
+  --state-idle: #6ec5ff;
+  --state-unknown: #8b8fa3;
+
+  --tone-error: #ff6b6b;
+  --tone-warn: #ffb347;
+  --tone-info: #6ec5ff;
+  --tone-ok: #56d97e;
+
+  --font: ui-monospace, "SFMono-Regular", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body.ark {
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  padding: 10px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 8px;
+  /* The console owns the viewport; the panels inside it do the scrolling. */
+  height: 100vh;
+  overflow: hidden;
+}
+
+h2 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.04em;
+}
+
+dl,
+dd,
+dt,
+p,
+ul,
+ol,
+pre {
+  margin: 0;
+}
+
+ul {
+  list-style: none;
+  padding: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+}
+
+.skip-link:focus {
+  left: 8px;
+  top: 8px;
+  z-index: 10;
+  background: var(--accent);
+  color: #12151f;
+  padding: 6px 10px;
+}
+
+a {
+  color: var(--tone-info);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------- top bar --- */
+
+.ark-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 6px 10px;
+  border: 2px solid var(--panel-edge);
+  background: var(--panel);
+}
+
+.ark-bar__title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.ark-bar__logo {
+  color: var(--accent);
+}
+
+.ark-bar__mode {
+  color: var(--accent);
+}
+
+.ark-bar__modes {
+  display: flex;
+  gap: 6px;
+}
+
+.ark-button {
+  font: inherit;
+  color: var(--text);
+  background: #1e2740;
+  border: 2px solid var(--panel-edge);
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.ark-button[aria-pressed='true'] {
+  background: var(--accent);
+  color: #12151f;
+  font-weight: 700;
+}
+
+.ark-button--ghost {
+  background: transparent;
+}
+
+.ark-button--blocked,
+.ark-button[disabled] {
+  color: var(--text-dim);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.ark-bar__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-left: auto;
+}
+
+.ark-stat {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.ark-stat dt {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ark-bar__links {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.ark-bar__readonly {
+  color: var(--text-dim);
+}
+
+/* ------------------------------------------------------------- banner --- */
+
+.ark-banner {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 10px;
+  border: 2px solid var(--panel-edge);
+  background: var(--panel);
+}
+
+.ark-banner__code {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.ark-banner[data-tone='error'] {
+  border-color: var(--tone-error);
+}
+
+.ark-banner[data-tone='warn'] {
+  border-color: var(--tone-warn);
+}
+
+.ark-banner[data-tone='info'] {
+  border-color: var(--tone-info);
+}
+
+.ark-banner[data-tone='ok'] {
+  border-color: var(--tone-ok);
+}
+
+/* --------------------------------------------------------------- grid --- */
+
+.ark-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-areas:
+    'need need'
+    'now next'
+    'outcome command';
+  gap: 8px;
+  min-height: 0;
+}
+
+.ark-panel {
+  grid-area: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  padding: 8px 10px;
+  border: 2px solid var(--panel-edge);
+  background: var(--panel);
+  /* Each panel scrolls inside itself, so the console keeps its shape. */
+  overflow-y: auto;
+}
+
+#ark-need {
+  grid-area: need;
+}
+
+#ark-now {
+  grid-area: now;
+}
+
+#ark-next {
+  grid-area: next;
+}
+
+#ark-outcome {
+  grid-area: outcome;
+}
+
+#ark-command {
+  grid-area: command;
+}
+
+.ark-panel--need {
+  border-color: var(--accent);
+}
+
+.ark-panel__heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border-bottom: 1px solid var(--panel-edge);
+  padding-bottom: 4px;
+}
+
+.ark-panel__label {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.ark-panel__note {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.ark-panel__count {
+  margin-left: auto;
+  border: 1px solid var(--panel-edge);
+  padding: 0 8px;
+}
+
+/* A count that includes an explicit request is marked, and also says 要対応
+   inside the list itself - the border is never the only carrier. */
+.ark-panel__count[data-required='true'] {
+  border-color: var(--tone-error);
+  color: var(--tone-error);
+  font-weight: 700;
+}
+
+.ark-empty,
+.ark-note {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ark-unconfirmed {
+  color: var(--tone-warn);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------ Need You --- */
+
+.ark-need-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ark-need-item {
+  border: 1px solid var(--panel-edge);
+  border-left-width: 4px;
+  padding: 6px 8px;
+}
+
+.ark-need-item[data-level='required'] {
+  border-left-color: var(--tone-error);
+}
+
+.ark-need-item[data-level='advised'] {
+  border-left-color: var(--tone-warn);
+}
+
+.ark-need-item__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.ark-need-item__level {
+  border: 1px solid currentColor;
+  padding: 0 6px;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.ark-need-item[data-level='required'] .ark-need-item__level {
+  color: var(--tone-error);
+}
+
+.ark-need-item[data-level='advised'] .ark-need-item__level {
+  color: var(--tone-warn);
+}
+
+.ark-need-item__title {
+  font-weight: 700;
+}
+
+.ark-need-item__state {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ark-need-item__unconfirmed {
+  color: var(--tone-warn);
+  font-size: 12px;
+}
+
+.ark-need-item__reason {
+  margin-top: 2px;
+}
+
+.ark-need-item__grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 1px 10px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.ark-need-item__grid > div {
+  display: contents;
+}
+
+.ark-need-item__grid dt {
+  color: var(--text-dim);
+}
+
+.ark-need-item__artifacts {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------- rows --- */
+
+.ark-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+
+.ark-count {
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.ark-count dt {
+  color: var(--text-dim);
+}
+
+.ark-count dd {
+  font-weight: 700;
+}
+
+.ark-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ark-row {
+  border: 1px solid var(--panel-edge);
+  border-left-width: 4px;
+  padding: 4px 8px;
+}
+
+.ark-row[data-state='error'] {
+  border-left-color: var(--state-error);
+}
+
+.ark-row[data-state='awaiting_approval'] {
+  border-left-color: var(--state-awaiting_approval);
+}
+
+.ark-row[data-state='planning'] {
+  border-left-color: var(--state-planning);
+}
+
+.ark-row[data-state='working'] {
+  border-left-color: var(--state-working);
+}
+
+.ark-row[data-state='ended'] {
+  border-left-color: var(--state-ended);
+}
+
+.ark-row[data-state='idle'] {
+  border-left-color: var(--state-idle);
+}
+
+.ark-row[data-state='unknown'] {
+  border-left-color: var(--state-unknown);
+  border-left-style: dashed;
+}
+
+.ark-row__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.ark-row__tag {
+  border: 1px solid var(--panel-edge);
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ark-row__name {
+  font-weight: 700;
+}
+
+.ark-row__updated {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ark-row__work,
+.ark-row__note {
+  color: var(--text-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.ark-row__frozen {
+  color: var(--tone-warn);
+  font-size: 12px;
+}
+
+.ark-row__artifacts {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------ drawers --- */
+
+.ark-drawer {
+  border-top: 1px dashed var(--panel-edge);
+  padding-top: 4px;
+  font-size: 12px;
+}
+
+.ark-drawer__summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.ark-drawer--inline {
+  border-top: none;
+}
+
+.ark-evidence,
+.ark-fields {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 1px 10px;
+  padding: 4px 0;
+}
+
+.ark-evidence__row,
+.ark-field {
+  display: contents;
+}
+
+.ark-evidence__label,
+.ark-field__label {
+  color: var(--text-dim);
+}
+
+.ark-evidence__value,
+.ark-field__value {
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------ command --- */
+
+.ark-command__notice {
+  border: 1px dashed var(--tone-warn);
+  color: var(--tone-warn);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.ark-command__label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ark-command__input {
+  font: inherit;
+  color: var(--text);
+  background: #101626;
+  border: 2px solid var(--panel-edge);
+  padding: 6px;
+  width: 100%;
+  resize: vertical;
+}
+
+.ark-command__meta {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ark-command__meta [data-status='rejected'] {
+  color: var(--tone-error);
+}
+
+.ark-command__buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ark-command__preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  color: var(--text-dim);
+  max-height: 30vh;
+  overflow: auto;
+}
+
+.ark-footer {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* ------------------------------------------------------------- narrow --- */
+
+/*
+ * One column, Need You first. The page is allowed to scroll here: a phone
+ * cannot show four panels at once, and a cramped panel that scrolls inside
+ * itself is worse than a page that does.
+ */
+@media (max-width: 900px) {
+  body.ark {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .ark-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-template-areas:
+      'need'
+      'now'
+      'next'
+      'outcome'
+      'command';
+  }
+
+  .ark-panel {
+    overflow-y: visible;
+  }
+
+  .ark-bar__stats {
+    margin-left: 0;
+  }
+}
