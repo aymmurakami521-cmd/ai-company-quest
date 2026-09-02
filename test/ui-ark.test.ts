@@ -26,7 +26,7 @@ import type { SanitizedEvent } from '../src/domain/event.ts';
 import type { WireEvent } from '../src/domain/wire.ts';
 import { makeEvent } from './helpers.ts';
 
-import type { ClientState } from '../src/ui/public/quest-view.js';
+import type { ClientState, Frame } from '../src/ui/public/quest-view.js';
 import {
   ACTOR_VISUAL_STATES,
   applyEvent,
@@ -43,6 +43,7 @@ import {
   ARK_OUTCOME_RESULTS,
   ARK_RUNTIME_CODES,
   ARK_SUBMISSION,
+  ARK_UNCONFIRMED_BANNER_CODES,
   NOT_IN_CONTRACT,
   buildCommandDraft,
   outcomeLabel,
@@ -73,6 +74,45 @@ function stateOf(events: readonly Partial<SanitizedEvent>[]): ClientState {
 /** The same office, with the stream no longer confirming anything. */
 function disconnected(state: ClientState): ClientState {
   return setConnectionPhase(state, 'error', 2000);
+}
+
+/**
+ * The same office mid-recovery: the socket is open, and frames are known to be
+ * missing until the `snapshot` that repairs the gap lands.
+ */
+function gapped(state: ClientState): ClientState {
+  return applyFrame(state, { kind: 'stream_gap', payload: { reason: 'evicted' }, at_ms: 2000 });
+}
+
+/** The same office replaying what it missed, which is also not a live office. */
+function replaying(state: ClientState): ClientState {
+  return applyFrame(state, { kind: 'replay_start', at_ms: 2000 });
+}
+
+/** The server re-stating the whole office, which is what ends a recovery. */
+function recovery(statuses: Record<string, string>): Frame {
+  const store = new NamespaceStore({ namespace: 'live' });
+  Object.entries(statuses).forEach(([agent, status], index) => {
+    store.ingestObject(
+      makeEvent({
+        event_type: 'agent_start',
+        agent_id: agent,
+        status,
+        ts: `2026-01-01T00:00:0${index}.000Z`,
+      }),
+    );
+  });
+  return {
+    kind: 'snapshot',
+    payload: {
+      namespace: 'live',
+      halted: false,
+      halt_reason: null,
+      last_ingest_seq: store.stats.last_ingest_seq,
+      state: JSON.parse(JSON.stringify(store.state)) as unknown,
+    },
+    at_ms: 3000,
+  };
 }
 
 /** One colleague per status label, all in one session. */
@@ -209,6 +249,72 @@ test('Now never reports work while nothing is confirming it', () => {
   );
 });
 
+test('a gap in the stream stops Now reporting work it can no longer see', () => {
+  const now = selectNow(gapped(office({ ann: 'running', bob: 'awaiting_approval' })));
+
+  // The socket is still open, so the office's own `stale` rule does not fire -
+  // and that is exactly the case this console has to catch for itself. Frames
+  // are known to be missing, so nothing on screen is a current observation.
+  assert.equal(now.confirmed, false);
+  assert.equal(now.counts.EXECUTING, 0, 'a gap empties 実行中 like a disconnection does');
+  assert.equal(now.counts.UNKNOWN, 2);
+  for (const row of now.rows) {
+    assert.equal(row.runtime, 'UNKNOWN');
+    assert.equal(row.visual.state, 'unknown', 'and the row itself reads as 状態不明');
+    assert.equal(row.confirmed, false);
+  }
+  // Kept, and kept labelled as the last observation rather than dropped.
+  assert.deepEqual(
+    now.rows.map((row) => row.last_known_runtime).sort(),
+    ['EXECUTING', 'HUMAN_WAIT'],
+  );
+});
+
+test('a replay in progress is a recovery, never a live office', () => {
+  const now = selectNow(replaying(office({ ann: 'running' })));
+
+  assert.equal(now.confirmed, false);
+  assert.equal(now.counts.EXECUTING, 0);
+  assert.equal(now.rows[0]?.runtime, 'UNKNOWN');
+  assert.equal(now.rows[0]?.confirmed, false);
+  assert.equal(now.rows[0]?.last_known_runtime, 'EXECUTING', 'what was observed is still there');
+});
+
+test('nothing reads as confirmed in the same frame the console reports a recovery', () => {
+  for (const recovering of [gapped, replaying]) {
+    const state = recovering(office({ ann: 'running', bob: 'awaiting_approval', cy: 'planning' }));
+    const ark = selectArk(state);
+
+    assert.ok(
+      ARK_UNCONFIRMED_BANNER_CODES.includes(ark.banner.code),
+      `${ark.banner.code} is a recovery the banner is already showing`,
+    );
+    assert.equal(ark.now.confirmed, false);
+    // One item, saying why the rest of the screen cannot be trusted - not one
+    // per colleague, and not silence.
+    const connection = ark.attention.items.filter((item) => item.kind === 'connection');
+    assert.equal(connection.length, 1);
+    assert.equal(connection[0]?.reason_code, 'STREAM_UNCONFIRMED');
+    for (const item of ark.attention.items) {
+      assert.equal(item.confirmed, false, `${item.id} is not a live observation`);
+      assert.equal(item.visual === null || item.visual.state === 'unknown', true);
+    }
+    for (const row of ark.now.rows) assert.equal(row.confirmed, false);
+    for (const row of ark.next.rows) assert.equal(row.confirmed, false);
+    for (const row of ark.outcome.rows) assert.equal(row.confirmed, false);
+  }
+});
+
+test('the freeze lifts when the recovery snapshot actually lands, and not before', () => {
+  const gap = gapped(office({ ann: 'running' }));
+  assert.equal(selectNow(gap).confirmed, false, 'while the gap stands');
+
+  const now = selectNow(applyFrame(gap, recovery({ ann: 'running' })));
+  assert.equal(now.confirmed, true, 'the server has re-stated the whole office');
+  assert.equal(now.counts.EXECUTING, 1);
+  assert.equal(now.rows[0]?.runtime, 'EXECUTING');
+});
+
 test('Now reports the bucket the contract cannot fill instead of guessing it', () => {
   const now = selectNow(office({ ann: 'running' }));
   assert.equal(now.external_wait.available, false);
@@ -243,7 +349,15 @@ test('Next reports that the plan is not in the contract, and invents none', () =
 // -------------------------------------------------------------- Outcome ---
 
 test('Outcome puts a failure above a success, and leaves the unfinished out', () => {
-  const outcome = selectOutcome(office({ ann: 'completed', bob: 'failed', cy: 'running' }));
+  const outcome = selectOutcome(
+    stateOf([
+      { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+      // 完了 needs this: the desk's own stop report, not somebody else's.
+      { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+      { event_type: 'agent_start', agent_id: 'bob', status: 'failed' },
+      { event_type: 'agent_start', agent_id: 'cy', status: 'running' },
+    ]),
+  );
 
   assert.deepEqual(
     outcome.rows.map((row) => [row.display_name, row.result]),
@@ -273,12 +387,52 @@ test('a session that ended on somebody still waiting is 中断, never 完了', (
     rows.map((row) => [row.display_name, row.result]),
     [
       ['di', 'STOPPED'],
-      ['zz', 'COMPLETED'],
+      // zz's own last event is the session ending. That is the run stopping, not
+      // zz reporting that it finished anything.
+      ['zz', 'STOPPED'],
     ],
     'the run is over; di never got the approval it was waiting for',
   );
-  assert.ok((rows[0]?.follow_up ?? '').length > 0, 'and the loop it left open is named');
-  assert.equal(rows[1]?.follow_up, null, 'a completed one leaves nothing hanging');
+  for (const row of rows) {
+    assert.ok((row.follow_up ?? '').length > 0, `${row.display_name} names the loop left open`);
+  }
+});
+
+test('a generic session_end is never read as somebody having completed their work', () => {
+  // The whole failure in one state: ann did nothing but start, and the session
+  // then ended around it. The shared reducer rewrites every still-active actor
+  // to `ended`, and `hookAdapter.ts` drops the end reason - so nothing here says
+  // ann succeeded, and the console may not say so either.
+  const state = stateOf([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'active' },
+    { event_type: 'agent_start', agent_id: 'bob', status: 'running' },
+    { event_type: 'agent_stop', agent_id: 'bob', status: 'completed' },
+    { event_type: 'session_end', agent_id: 'zz', status: 'running' },
+  ]);
+  const byName = new Map(selectOutcome(state).rows.map((row) => [row.display_name, row]));
+
+  assert.equal(byName.get('ann')?.result, 'STOPPED', 'ended by the session, not by itself');
+  assert.ok((byName.get('ann')?.follow_up ?? '').length > 0, 'and the open loop is named');
+  assert.equal(byName.get('zz')?.result, 'STOPPED', 'and neither did the actor that ended it');
+  // The one desk that reported its own stop is the one - and the only one -
+  // that reads as 完了.
+  assert.equal(byName.get('bob')?.result, 'COMPLETED');
+  assert.equal(byName.get('bob')?.follow_up, null, 'a completed one leaves nothing hanging');
+  assert.equal(selectOutcome(state).counts.COMPLETED, 1);
+  assert.equal(selectOutcome(state).counts.STOPPED, 2);
+});
+
+test('a finished-sounding status on a non-terminal event is not a completion either', () => {
+  // `agent_status: done` is the producer describing a moment, not the desk
+  // reporting that it stopped. Conservative on purpose: 完了 is a claim about a
+  // finished run, and this is not evidence of one.
+  const state = stateOf([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    { event_type: 'agent_status', agent_id: 'ann', status: 'done' },
+  ]);
+  const row = selectOutcome(state).rows[0];
+  assert.equal(row?.result, 'STOPPED');
+  assert.equal(row?.last_known_visual.state, 'ended', 'the office still classifies it the same way');
 });
 
 test('Outcome evidence is reachable, and says what it does not have', () => {

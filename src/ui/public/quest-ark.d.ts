@@ -5,7 +5,7 @@
  * contract is declared here and exercised by `test/ui-ark.test.ts`.
  */
 
-import type { ActorVisual, Banner, ClientState, Header } from './quest-view.js';
+import type { ActorVisual, Banner, BannerCode, ClientState, Header } from './quest-view.js';
 
 /** How loudly an item asks for a person. `required` is an explicit request. */
 export type ArkAttentionLevel = 'required' | 'advised';
@@ -82,7 +82,10 @@ export type ArkNowRow = {
   seat: number;
   role: string | null;
   session_id: string;
-  /** What may be claimed now. `UNKNOWN` for the whole office while stale. */
+  /**
+   * What may be claimed now. `UNKNOWN` for the whole office whenever nothing is
+   * confirming it - a lost stream, a halt, or a recovery still in progress.
+   */
   runtime: ArkRuntimeCode;
   runtime_label: string;
   /** What the stream last said, kept through a freeze. */
@@ -205,6 +208,8 @@ export declare const ARK_ATTENTION_REASONS: readonly ArkAttentionReason[];
 export declare const ARK_RUNTIME_CODES: readonly ArkRuntimeCode[];
 export declare const ARK_OUTCOME_RESULTS: readonly ArkOutcomeResult[];
 export declare const ARK_SUMMARY_ROWS: number;
+/** Banner codes under which no row on this console is a live observation. */
+export declare const ARK_UNCONFIRMED_BANNER_CODES: readonly BannerCode[];
 export declare const ARK_EXTERNAL_WAIT_NOTE: string;
 export declare const ARK_NEXT_FIELDS: readonly ArkNextField[];
 export declare const ARK_NEXT_NOTE: string;

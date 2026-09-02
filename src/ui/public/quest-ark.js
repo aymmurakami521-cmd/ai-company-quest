@@ -13,6 +13,12 @@
  * value, and it never lets an unconfirmed state read as work in progress
  * (`docs/event-contract.md`, `docs/org-snapshot-design.md` §2.3).
  *
+ * That rule is stricter here than on the office floor in exactly two places, and
+ * both are about refusing to claim more than the stream supports rather than
+ * classifying anything anew: `ARK_UNCONFIRMED_BANNER_CODES` freezes the console
+ * through a recovery as well as a disconnection, and `ACTOR_COMPLETION_EVENTS`
+ * refuses to read a generic `session_end` as somebody having finished.
+ *
  * The command surface is a draft builder and nothing else. It structures what an
  * owner typed into a typed Task/Delegation payload and reports that there is no
  * authenticated boundary to hand it to. It performs no request, and this module
@@ -23,10 +29,10 @@ import {
   ACTOR_VISUAL_STATES,
   NOT_REPORTED,
   NO_EVIDENCE_IN_CONTRACT,
-  isStale,
   selectBanner,
   selectDesks,
   selectHeader,
+  visualForState,
 } from './quest-view.js';
 
 /** Stands in for a field a future contract will carry and this one does not. */
@@ -73,6 +79,33 @@ export const ARK_OUTCOME_RESULTS = Object.freeze(['FAILED', 'STOPPED', 'COMPLETE
 /** How many rows a compact panel shows before the rest moves into its drawer. */
 export const ARK_SUMMARY_ROWS = 5;
 
+/**
+ * The banner codes under which nothing on this screen is being confirmed.
+ *
+ * Read straight out of `selectBanner`'s own vocabulary rather than restated as a
+ * rule of its own, so the console cannot report 復旧中 in the banner and 実行中・
+ * 確認済み in the same frame - which is exactly what it did while it took
+ * `isStale` alone as the test.
+ *
+ * `isStale` covers three of these: a fail-closed namespace and a socket that is
+ * gone or retrying. `STREAM_GAP` and `REPLAYING` are the two it does not, and
+ * they matter here for a reason the office's desk cards can shrug off and a
+ * management console cannot. Both mean frames are known to be missing right now
+ * and the recovery `snapshot` has not landed yet, so what is on screen is an
+ * observation from before the gap - and a recovery that is delayed, or that
+ * never completes, would otherwise leave that observation reading as live work
+ * indefinitely. `LOADING` is deliberately absent: `offline` and `connecting`
+ * rebuild the office from empty, so there is no earlier observation to mistake
+ * for a current one.
+ */
+export const ARK_UNCONFIRMED_BANNER_CODES = Object.freeze([
+  'FAIL_CLOSED',
+  'DISCONNECTED',
+  'RECONNECTING',
+  'STREAM_GAP',
+  'REPLAYING',
+]);
+
 const RUNTIME_BY_STATE = Object.freeze({
   error: 'BLOCKED',
   awaiting_approval: 'HUMAN_WAIT',
@@ -113,7 +146,7 @@ const OUTCOME_LABELS = Object.freeze({
 
 const OUTCOME_FOLLOW_UP = Object.freeze({
   FAILED: '未解決: 失敗の原因確認と、再実行するか停止するかの判断',
-  STOPPED: '未解決: 完了報告のないままsessionが終了しています',
+  STOPPED: '未解決: この担当自身の完了報告がないまま作業が終わっています',
   COMPLETED: null,
 });
 
@@ -152,6 +185,31 @@ const ATTENTION_COPY = Object.freeze({
 function ownProp(map, key) {
   if (map === null || map === undefined || typeof key !== 'string') return undefined;
   return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+}
+
+/** The office's own 状態不明, reused rather than restated. */
+const UNKNOWN_VISUAL = visualForState('unknown');
+
+/** Whether the stream is currently confirming anything this screen shows. */
+function unconfirmedStream(banner) {
+  return ARK_UNCONFIRMED_BANNER_CODES.includes(banner.code);
+}
+
+/**
+ * What this screen may claim about one desk right now, and what it may not.
+ *
+ * `selectDesks` already freezes a desk to `UNKNOWN` when its own `stale` rule
+ * fires; this widens that freeze to the recovery states in
+ * `ARK_UNCONFIRMED_BANNER_CODES` without touching the office's rule. One
+ * decision for the whole console, so Need You, Now, Next and Outcome cannot
+ * disagree about whether a row is a live observation.
+ *
+ * `last_known_visual` is untouched either way: the observation is kept and
+ * labelled as one, never dropped and never presented as current.
+ */
+function claim(desk, frozen) {
+  const unconfirmed = frozen || desk.stale;
+  return { visual: unconfirmed ? UNKNOWN_VISUAL : desk.visual, confirmed: !unconfirmed };
 }
 
 /**
@@ -263,8 +321,7 @@ function packet(reasonCode, fields) {
  * Derived from `selectBanner`, so the vocabulary is the one the office already
  * shows and there is no second connection rule to keep in step.
  */
-function connectionAttention(header) {
-  const banner = selectBanner(header);
+function connectionAttention(header, banner) {
   if (banner.code === 'FAIL_CLOSED') {
     return packet('INGEST_HALTED', {
       id: 'connection:fail_closed',
@@ -280,11 +337,9 @@ function connectionAttention(header) {
       evidence: connectionEvidence(header),
     });
   }
-  if (
-    banner.code === 'DISCONNECTED' ||
-    banner.code === 'RECONNECTING' ||
-    banner.code === 'STREAM_GAP'
-  ) {
+  // Every remaining code that leaves the office unconfirmed, recovery included:
+  // if the rows are being frozen to 状態不明, Need You says why in the same frame.
+  if (unconfirmedStream(banner)) {
     return packet('STREAM_UNCONFIRMED', {
       id: 'connection:unconfirmed',
       kind: 'connection',
@@ -311,15 +366,18 @@ function connectionAttention(header) {
  */
 export function selectAttention(state) {
   const header = selectHeader(state);
+  const banner = selectBanner(header);
+  const frozen = unconfirmedStream(banner);
   const desks = selectDesks(state);
   const items = [];
 
-  const connection = connectionAttention(header);
+  const connection = connectionAttention(header, banner);
   if (connection !== null) items.push(connection);
 
   for (const desk of desks) {
     const reasonCode = deskReason(desk);
     if (reasonCode === null) continue;
+    const now = claim(desk, frozen);
     items.push(
       packet(reasonCode, {
         id: `actor:${desk.actor_key}`,
@@ -328,11 +386,12 @@ export function selectAttention(state) {
         display_name: desk.display_name,
         title: desk.display_name,
         detail: desk.status_label ?? NOT_REPORTED,
-        // What the screen may claim now (UNKNOWN while stale) and what was last
-        // observed, kept apart exactly as the desk cards keep them.
-        visual: desk.visual,
+        // What the screen may claim now (UNKNOWN while nothing is confirming
+        // it) and what was last observed, kept apart exactly as the desk cards
+        // keep them.
+        visual: now.visual,
         last_known_visual: desk.last_known_visual,
-        confirmed: !desk.stale,
+        confirmed: now.confirmed,
         last_update: desk.last_event_ts,
         evidence: evidenceFor(state, desk),
         seat: desk.seat,
@@ -373,19 +432,21 @@ export function runtimeLabel(code) {
 /**
  * Now: actual runtime state, and only that.
  *
- * The class of every row comes from `desk.visual`, which is `UNKNOWN` for the
- * whole office while the stream is not confirming anything - so a disconnection
- * empties `EXECUTING` instead of leaving a row that reads as still working.
- * `last_known_runtime` keeps the observation itself, marked as such.
+ * The class of every row comes from `claim`, which is `UNKNOWN` for the whole
+ * office while the stream is not confirming anything - a disconnection, a halt
+ * *or* a recovery in progress - so none of those leaves a row that reads as
+ * still working. `last_known_runtime` keeps the observation itself, marked as
+ * such.
  */
 export function selectNow(state) {
   const desks = selectDesks(state);
-  const stale = isStale(state.connection);
+  const frozen = unconfirmedStream(selectBanner(selectHeader(state)));
   const counts = {};
   for (const code of ARK_RUNTIME_CODES) counts[code] = 0;
 
   const rows = desks.map((desk) => {
-    const runtime = runtimeFor(desk.visual);
+    const now = claim(desk, frozen);
+    const runtime = runtimeFor(now.visual);
     counts[runtime] += 1;
     return {
       actor_key: desk.actor_key,
@@ -396,9 +457,9 @@ export function selectNow(state) {
       runtime,
       runtime_label: runtimeLabel(runtime),
       last_known_runtime: runtimeFor(desk.last_known_visual),
-      visual: desk.visual,
+      visual: now.visual,
       last_known_visual: desk.last_known_visual,
-      confirmed: !desk.stale,
+      confirmed: now.confirmed,
       // The producer's label for the latest event. Never promoted to a task.
       work: desk.status_label,
       last_tool: desk.last_tool,
@@ -417,7 +478,7 @@ export function selectNow(state) {
     rows,
     counts,
     /** False while nothing is confirming these states. Never inferred per row. */
-    confirmed: !stale,
+    confirmed: !frozen,
     as_of: state.last_event_ts,
     /** A bucket the contract cannot fill. Reported, not guessed. */
     external_wait: Object.freeze({ available: false, note: ARK_EXTERNAL_WAIT_NOTE }),
@@ -455,10 +516,12 @@ export const ARK_NEXT_NOTE =
  */
 export function selectNext(state) {
   const desks = selectDesks(state);
+  const frozen = unconfirmedStream(selectBanner(selectHeader(state)));
   const rows = desks
     .filter((desk) => desk.last_known_visual.state === 'planning')
     .map((desk) => {
       const actor = ownProp(state.actors, desk.actor_key) ?? null;
+      const now = claim(desk, frozen);
       return {
         actor_key: desk.actor_key,
         display_name: desk.display_name,
@@ -467,9 +530,9 @@ export function selectNext(state) {
         /** Only ever an explicitly reported next step. The screen predicts none. */
         next_action: null,
         latest_summary: actor === null ? null : (actor.last_summary ?? null),
-        visual: desk.visual,
+        visual: now.visual,
         last_known_visual: desk.last_known_visual,
-        confirmed: !desk.stale,
+        confirmed: now.confirmed,
         updated_at: desk.last_event_ts,
       };
     });
@@ -483,23 +546,45 @@ export function outcomeLabel(result) {
 }
 
 /**
+ * The event types that are a desk's own report about itself having finished.
+ *
+ * `session_end` is deliberately not one of them, and that is the whole point of
+ * this list. The shared reducer rewrites *every* actor still active in a session
+ * to `ended` when a `session_end` arrives - so a colleague whose only event was
+ * `agent_start` lands on `ended` because somebody else's run stopped, not
+ * because it finished anything. `hookAdapter.ts` drops `session.end_reason` and
+ * `outcome.is_interrupt` on the way in, so nothing on the wire afterwards says
+ * which of the two it was.
+ *
+ * Reading `ended` as 完了 there would be the screen inventing a success. So
+ * completion has to be attributable to the desk itself: its own last event is
+ * its own stop report.
+ */
+const ACTOR_COMPLETION_EVENTS = Object.freeze(['agent_stop']);
+
+/**
  * Which outcome a desk has reached, or null while it has not reached one.
  *
- * `STOPPED` is the case worth naming: the session ended while this desk was
- * still mid-work and never reported a completion. Calling that 完了 because the
- * run is over would be the screen closing a loop the stream left open.
+ * Only `FAILED` and `COMPLETED` are positive claims, and each needs the desk's
+ * own report behind it: a failure it classified as one, or a stop it announced
+ * itself. Everything that stopped without such a report is `STOPPED`, whose
+ * follow-up line says the one thing that is actually known about it - the work
+ * ended and this desk never reported finishing it. Three cases land there:
  *
- * It is narrow, and deliberately so. `session_end` already rewrites every actor
- * that is still active to `ended`, so the desks that reach here are the ones the
- * reducer did *not* touch: somebody stopped earlier in a non-terminal state - an
- * approval that never came, a plan nobody picked up - whose session then ended
- * around them. Those are exactly the ones an owner would otherwise never hear
- * about again.
+ * - a desk the session ended *around* while it was still mid-work or waiting;
+ * - a desk the `session_end` rewrite moved to `ended` without it ever saying so;
+ * - a desk whose latest event merely carried a finished-sounding status.
+ *
+ * Narrower than it looks from the outside: in the streams this reads, a
+ * completion is an `agent_stop`, and those still land on 完了.
  */
-function outcomeFor(desk, session) {
+function outcomeFor(desk, actor, session) {
   const observed = desk.last_known_visual.state;
   if (observed === 'error') return 'FAILED';
-  if (observed === 'ended') return 'COMPLETED';
+  if (observed === 'ended') {
+    const reported = actor !== null && ACTOR_COMPLETION_EVENTS.includes(actor.last_event_type);
+    return reported ? 'COMPLETED' : 'STOPPED';
+  }
   if (session !== null && session.ended_at !== null && session.ended_at !== undefined) {
     return 'STOPPED';
   }
@@ -514,11 +599,14 @@ function outcomeFor(desk, session) {
  */
 export function selectOutcome(state) {
   const desks = selectDesks(state);
+  const frozen = unconfirmedStream(selectBanner(selectHeader(state)));
   const rows = [];
   for (const desk of desks) {
     const session = ownProp(state.sessions, desk.session_id) ?? null;
-    const result = outcomeFor(desk, session);
+    const actor = desk.actor_key === null ? null : (ownProp(state.actors, desk.actor_key) ?? null);
+    const result = outcomeFor(desk, actor, session);
     if (result === null) continue;
+    const now = claim(desk, frozen);
     rows.push({
       actor_key: desk.actor_key,
       display_name: desk.display_name,
@@ -532,8 +620,8 @@ export function selectOutcome(state) {
       session_id: desk.session_id,
       session_ended_at: session === null ? null : (session.ended_at ?? null),
       ended_at: desk.last_event_ts,
-      confirmed: !desk.stale,
-      visual: desk.visual,
+      confirmed: now.confirmed,
+      visual: now.visual,
       last_known_visual: desk.last_known_visual,
       evidence: evidenceFor(state, desk),
     });

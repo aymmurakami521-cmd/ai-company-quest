@@ -45,15 +45,13 @@ const APP = assetText('/ui/quest-ark-app.js');
 const CSS = assetText('/ui/quest-ark.css');
 
 /** A snapshot from a real store, so the payload the app parses is the real one. */
-function snapshot(statuses: Record<string, string>): unknown {
+function snapshot(events: readonly Partial<SanitizedEvent>[]): unknown {
   const store = new NamespaceStore({ namespace: 'live' });
-  Object.entries(statuses).forEach(([agent, status], index) => {
+  events.forEach((overrides, index) => {
     store.ingestObject(
       makeEvent({
-        event_type: 'agent_start',
-        agent_id: agent,
-        status,
         ts: `2026-01-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+        ...overrides,
       } satisfies Partial<SanitizedEvent>),
     );
   });
@@ -66,12 +64,23 @@ function snapshot(statuses: Record<string, string>): unknown {
   };
 }
 
-/** Opens a fresh stream and puts one office on the screen. */
-function show(statuses: Record<string, string>): void {
+/** Opens a fresh stream and puts the office these events describe on the screen. */
+function showEvents(events: readonly Partial<SanitizedEvent>[]): void {
   fakeDocument.control('[data-action="reconnect"]').dispatch('click', {});
   const stream = currentStream();
   stream.emit('open', {});
-  stream.emit('snapshot', snapshot(statuses));
+  stream.emit('snapshot', snapshot(events));
+}
+
+/** The common case: one colleague per status label, all of them started. */
+function show(statuses: Record<string, string>): void {
+  showEvents(
+    Object.entries(statuses).map(([agent, status]) => ({
+      event_type: 'agent_start' as const,
+      agent_id: agent,
+      status,
+    })),
+  );
 }
 
 /** Stops the stream from confirming anything, without changing what it said. */
@@ -158,6 +167,43 @@ test('a disconnection empties 実行中 and never leaves a row reading as work',
   assert.ok(unconfirmed.textContent.includes('状態不明'));
 });
 
+test('a stream gap empties 実行中 too, while the screen reports the recovery', () => {
+  show({ ann: 'running', bob: 'running' });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '2');
+
+  // The socket stays open through this: the office's own `stale` rule does not
+  // fire, so without the console's own check these rows would keep reading as
+  // 実行中・確認済み underneath a banner that says frames are missing.
+  currentStream().emit('stream_gap', { reason: 'evicted' });
+
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'STREAM_GAP');
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  assert.equal(countFor('ark-now-counts', 'UNKNOWN'), '2');
+  assert.deepEqual(tags('ark-now-list'), ['UNKNOWN', 'UNKNOWN']);
+  for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'false');
+  assert.equal(fakeDocument.element('ark-now-unconfirmed').hidden, false);
+  // And Need You says why, so the frozen rows are not left unexplained.
+  assert.ok(
+    rowsIn('ark-need-list').some((item) => item.dataset.reason === 'STREAM_UNCONFIRMED'),
+  );
+
+  // The recovery snapshot is what hands the office back.
+  currentStream().emit('snapshot', snapshot([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    { event_type: 'agent_start', agent_id: 'bob', status: 'running' },
+  ]));
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '2', 'and only then');
+});
+
+test('a replay in progress is not rendered as a confirmed office either', () => {
+  show({ ann: 'running' });
+  currentStream().emit('replay_start', {});
+
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'REPLAYING');
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  assert.deepEqual(tags('ark-now-list'), ['UNKNOWN']);
+});
+
 test('a disconnection is one Need You item, and does not hide the approval wait', () => {
   show({ ann: 'awaiting_approval', bob: 'running' });
   disconnect();
@@ -216,7 +262,12 @@ test('the deep detail is in drawers, not stacked down the page', () => {
 // ------------------------------------------------------------- evidence ---
 
 test('an outcome carries evidence that can actually be reached', () => {
-  show({ ann: 'completed', bob: 'failed' });
+  showEvents([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    // Its own stop report, which is what 完了 takes.
+    { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+    { event_type: 'agent_start', agent_id: 'bob', status: 'failed' },
+  ]);
 
   const rows = rowsIn('ark-outcome-list');
   assert.deepEqual(tags('ark-outcome-list'), ['FAILED', 'COMPLETED']);
