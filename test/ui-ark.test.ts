@@ -928,6 +928,90 @@ test('no ordering of a run, across any recovery point, makes 完了 out of a ses
   assert.ok(checked > 90000, `the search actually ran: ${checked} cases`);
 });
 
+test('nobody is finished by a session end somebody else reported, in any interleaving', () => {
+  // The same property along the axis the search above structurally cannot reach.
+  // Every case there is one desk's own run, and the finding this rule exists for
+  // is about two: `session_end` rewrites *every* actor still active in the
+  // session to `ended`, so a colleague whose only event was its own `agent_start`
+  // is moved to 終了 by somebody else's run stopping. One desk cannot express
+  // that sequence at all, and the hand-written cases that do cover only the
+  // interleavings anybody thought to write down.
+  //
+  // Shorter than the single-desk search by one event, because two desks over the
+  // same alphabet is nine symbols to its three and the same depth would be a
+  // different order of magnitude. Three is enough for this shape: a start, a
+  // stranger's end, and one more event in any position around them.
+  const CLOCKS = ['2026-01-01T00:00:01.000Z', '2026-01-01T00:00:05.000Z', '2026-01-01T00:00:09.000Z'];
+  const TYPES = ['agent_start', 'agent_stop', 'session_end'] as const;
+  const DESKS = ['ann', 'bob'] as const;
+  const alphabet: { event_type: string; ts: string; agent_id: string }[] = [];
+  for (const event_type of TYPES) {
+    for (const ts of CLOCKS) for (const agent_id of DESKS) alphabet.push({ event_type, ts, agent_id });
+  }
+
+  /**
+   * One desk's latest applied lifecycle event, from the sequence alone.
+   *
+   * `applyEvent`'s out-of-order rule again, but per desk: the mark it compares
+   * against is the desk's own, so a late event from one colleague says nothing
+   * about what the other may report.
+   */
+  const latestApplied = (
+    steps: readonly { event_type: string; ts: string; agent_id: string }[],
+    desk: string,
+  ): string | null => {
+    const marks = new Map<string, number>();
+    let latest: string | null = null;
+    for (const step of steps) {
+      const ms = Date.parse(step.ts);
+      const mark = marks.get(step.agent_id);
+      if (mark !== undefined && ms < mark) continue;
+      marks.set(step.agent_id, ms);
+      if (step.agent_id !== desk) continue;
+      if (step.event_type === 'agent_start' || step.event_type === 'agent_stop') {
+        latest = step.event_type;
+      }
+    }
+    return latest;
+  };
+
+  let checked = 0;
+  // The case the finding actually names, counted rather than assumed: a desk the
+  // office classifies as 終了 whose own last word was a start. If the search ever
+  // stops reaching it, it has stopped testing the rule and says so.
+  let bystanders = 0;
+  const walk = (prefix: { event_type: string; ts: string; agent_id: string }[]): void => {
+    if (prefix.length === 3) {
+      for (let cut = 0; cut <= prefix.length; cut += 1) {
+        for (let live = cut; live <= prefix.length; live += 1) {
+          checked += 1;
+          const events = prefix.map((step) => ({ ...step, status: 'running' }));
+          const state = afterRecovery(events.slice(0, cut), events.slice(cut, live), events.slice(live));
+          const trail = prefix
+            .map((step) => `${step.agent_id}:${step.event_type}@${step.ts.slice(17, 19)}`)
+            .join(' ');
+          for (const row of selectOutcome(state).rows) {
+            const truth = latestApplied(prefix, row.display_name);
+            if (row.last_known_visual.state === 'ended' && truth === 'agent_start') bystanders += 1;
+            if (row.result !== 'COMPLETED') continue;
+            assert.equal(
+              truth,
+              'agent_stop',
+              `完了 for ${row.display_name} without its own applied stop: ${trail} (seen ${cut}, live from ${live})`,
+            );
+          }
+        }
+      }
+      return;
+    }
+    for (const step of alphabet) walk([...prefix, step]);
+  };
+  walk([]);
+
+  assert.ok(checked > 50000, `the search actually ran: ${checked} cases`);
+  assert.ok(bystanders > 0, 'and reached desks the office ended without their own report');
+});
+
 test('a finished-sounding status on a non-terminal event is not a completion either', () => {
   // `agent_status: done` is the producer describing a moment, not the desk
   // reporting that it stopped. Conservative on purpose: 完了 is a claim about a
