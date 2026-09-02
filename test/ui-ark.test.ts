@@ -1012,6 +1012,97 @@ test('nobody is finished by a session end somebody else reported, in any interle
   assert.ok(bystanders > 0, 'and reached desks the office ended without their own report');
 });
 
+test('a session end reaches only its own session, in any interleaving', () => {
+  // The two searches above are both one session, and the rewrite this rule
+  // exists for is scoped to one: `applyEvent` deactivates the still-active
+  // actors whose `session_id` matches the `session_end`, and leaves the rest of
+  // the office alone. Neither search can express a desk in a *different* run, so
+  // neither can tell a correctly scoped rewrite from one that reached too far -
+  // and reaching too far is the shape that turns a stranger's session ending
+  // into 終了, and then into 完了, for somebody who was never in it.
+  //
+  // Three desks over two sessions, so a session end has a colleague to end
+  // beside it and a bystander it must not touch at all - and two clocks rather
+  // than the three above, because the third desk is what this search is for and
+  // two is already enough for arrival order and event order to disagree, which
+  // is the only thing the extra clock was buying.
+  const CLOCKS = ['2026-01-01T00:00:01.000Z', '2026-01-01T00:00:09.000Z'];
+  const TYPES = ['agent_start', 'agent_stop', 'session_end'] as const;
+  const SEATS = [
+    { agent_id: 'ann', session_id: 'session-a' },
+    { agent_id: 'cid', session_id: 'session-a' },
+    { agent_id: 'bob', session_id: 'session-b' },
+  ] as const;
+  const alphabet: { event_type: string; ts: string; agent_id: string; session_id: string }[] = [];
+  for (const event_type of TYPES) {
+    for (const ts of CLOCKS) for (const seat of SEATS) alphabet.push({ event_type, ts, ...seat });
+  }
+  const sessionOf = new Map<string, string>(SEATS.map((seat) => [seat.agent_id, seat.session_id]));
+
+  /** The same per-desk out-of-order rule, and nothing about sessions in it. */
+  const latestApplied = (
+    steps: readonly { event_type: string; ts: string; agent_id: string }[],
+    desk: string,
+  ): string | null => {
+    const marks = new Map<string, number>();
+    let latest: string | null = null;
+    for (const step of steps) {
+      const ms = Date.parse(step.ts);
+      const mark = marks.get(step.agent_id);
+      if (mark !== undefined && ms < mark) continue;
+      marks.set(step.agent_id, ms);
+      if (step.agent_id !== desk) continue;
+      if (step.event_type === 'agent_start' || step.event_type === 'agent_stop') {
+        latest = step.event_type;
+      }
+    }
+    return latest;
+  };
+
+  let checked = 0;
+  // Counted rather than assumed, like the searches above: a desk the office
+  // ended without its own stop, while a session it does not belong to ended too.
+  // If the search stops reaching that, it has stopped testing the rule.
+  let crossSession = 0;
+  const walk = (prefix: { event_type: string; ts: string; agent_id: string; session_id: string }[]): void => {
+    if (prefix.length === 3) {
+      for (let cut = 0; cut <= prefix.length; cut += 1) {
+        for (let live = cut; live <= prefix.length; live += 1) {
+          checked += 1;
+          const events = prefix.map((step) => ({ ...step, status: 'running' }));
+          const state = afterRecovery(events.slice(0, cut), events.slice(cut, live), events.slice(live));
+          const trail = prefix
+            .map((step) => `${step.agent_id}/${step.session_id}:${step.event_type}@${step.ts.slice(17, 19)}`)
+            .join(' ');
+          for (const row of selectOutcome(state).rows) {
+            const truth = latestApplied(prefix, row.display_name);
+            const foreignEnd = prefix.some(
+              (step) =>
+                step.event_type === 'session_end' &&
+                step.session_id !== sessionOf.get(row.display_name),
+            );
+            if (row.last_known_visual.state === 'ended' && truth !== 'agent_stop' && foreignEnd) {
+              crossSession += 1;
+            }
+            if (row.result !== 'COMPLETED') continue;
+            assert.equal(
+              truth,
+              'agent_stop',
+              `完了 for ${row.display_name} without its own applied stop: ${trail} (seen ${cut}, live from ${live})`,
+            );
+          }
+        }
+      }
+      return;
+    }
+    for (const step of alphabet) walk([...prefix, step]);
+  };
+  walk([]);
+
+  assert.ok(checked > 30000, `the search actually ran: ${checked} cases`);
+  assert.ok(crossSession > 0, 'and reached desks ended alongside a session that was not theirs');
+});
+
 test('a finished-sounding status on a non-terminal event is not a completion either', () => {
   // `agent_status: done` is the producer describing a moment, not the desk
   // reporting that it stopped. Conservative on purpose: 完了 is a claim about a
