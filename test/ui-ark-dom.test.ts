@@ -1,0 +1,347 @@
+/**
+ * The shipped `quest-ark-app.js`, driven through a DOM.
+ *
+ * Four rules live here, all of them things an owner would be misled by if they
+ * broke:
+ *
+ * 1. **Need You is on the screen and is loud.** It renders first, it carries a
+ *    word for its level, and the count is repeated in the top bar.
+ * 2. **A disconnection empties 実行中.** No row may keep reading as work while
+ *    nothing is confirming it, and the last observation is shown as such.
+ * 3. **The console stays compact.** Only the first `ARK_SUMMARY_ROWS` rows are in
+ *    a panel's main list; the rest is behind a drawer, so a large office does
+ *    not turn the screen back into a long diagnostic page.
+ * 4. **The command surface cannot send.** It builds a payload, the button stays
+ *    disabled, and the app opens no request other than the one documented SSE
+ *    stream.
+ *
+ * `test/fakeArkDom.ts` supplies the document.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+import { NamespaceStore } from '../src/collector/store.ts';
+import type { SanitizedEvent } from '../src/domain/event.ts';
+import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
+import { makeEvent } from './helpers.ts';
+import type { FakeElement } from './fakeDom.ts';
+import { currentStream, installFakeArkDom } from './fakeArkDom.ts';
+import { ARK_SUMMARY_ROWS } from '../src/ui/public/quest-ark.js';
+
+const { document: fakeDocument } = installFakeArkDom();
+
+await import(new URL('../src/ui/public/quest-ark-app.js', import.meta.url).href);
+
+function assetText(pathname: string): string {
+  const asset = uiAsset(pathname);
+  assert.ok(asset !== null, `${pathname} is served`);
+  return asset.body.toString('utf8');
+}
+
+const HTML = assetText('/ark');
+const APP = assetText('/ui/quest-ark-app.js');
+const CSS = assetText('/ui/quest-ark.css');
+
+/** A snapshot from a real store, so the payload the app parses is the real one. */
+function snapshot(statuses: Record<string, string>): unknown {
+  const store = new NamespaceStore({ namespace: 'live' });
+  Object.entries(statuses).forEach(([agent, status], index) => {
+    store.ingestObject(
+      makeEvent({
+        event_type: 'agent_start',
+        agent_id: agent,
+        status,
+        ts: `2026-01-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+      } satisfies Partial<SanitizedEvent>),
+    );
+  });
+  return {
+    namespace: 'live',
+    halted: false,
+    halt_reason: null,
+    last_ingest_seq: store.stats.last_ingest_seq,
+    state: JSON.parse(JSON.stringify(store.state)) as unknown,
+  };
+}
+
+/** Opens a fresh stream and puts one office on the screen. */
+function show(statuses: Record<string, string>): void {
+  fakeDocument.control('[data-action="reconnect"]').dispatch('click', {});
+  const stream = currentStream();
+  stream.emit('open', {});
+  stream.emit('snapshot', snapshot(statuses));
+}
+
+/** Stops the stream from confirming anything, without changing what it said. */
+function disconnect(): void {
+  currentStream().emit('error', {});
+}
+
+function rowsIn(id: string): FakeElement[] {
+  return fakeDocument.element(id).children;
+}
+
+function textIn(node: FakeElement, selector: string): string {
+  return node.querySelector(selector)?.textContent ?? '';
+}
+
+function tags(id: string): string[] {
+  return rowsIn(id).map((row) => row.dataset.tag ?? '');
+}
+
+function countFor(id: string, code: string): string {
+  const row = fakeDocument.element(id).children.find((node) => node.dataset.code === code);
+  return row === undefined ? '' : textIn(row, '.ark-count__value');
+}
+
+// ------------------------------------------------------------- Need You ---
+
+test('Need You renders every packet, loudest first, in words', () => {
+  show({ ann: 'awaiting_approval', bob: 'failed', cy: 'running' });
+
+  const items = rowsIn('ark-need-list');
+  assert.equal(items.length, 2, 'the working colleague asks for nothing');
+  assert.deepEqual(
+    items.map((item) => item.dataset.reason),
+    ['AWAITING_APPROVAL', 'RUN_ERROR'],
+  );
+  // The level is a word, the state is a word, the symbol is a character. None
+  // of the three is a colour.
+  assert.equal(textIn(items[0] as FakeElement, '.ark-need-item__level'), '要対応');
+  assert.equal(textIn(items[1] as FakeElement, '.ark-need-item__level'), '要確認');
+  assert.ok(textIn(items[0] as FakeElement, '.ark-need-item__symbol').length > 0);
+  assert.ok(textIn(items[0] as FakeElement, '.ark-need-item__state').includes('承認待ち'));
+
+  // The decision itself, not just a request to approve.
+  assert.ok(textIn(items[0] as FakeElement, '.ark-need-item__recommended').length > 0);
+  assert.ok(textIn(items[0] as FakeElement, '.ark-need-item__options').includes('/'));
+  assert.ok(textIn(items[0] as FakeElement, '.ark-need-item__inaction').length > 0);
+
+  assert.equal(fakeDocument.element('ark-need-empty').hidden, true);
+  assert.equal(fakeDocument.element('ark-need-count').textContent, '2');
+  assert.equal(fakeDocument.element('ark-need-count').dataset.required, 'true');
+  // Repeated in the top bar, so it is readable before the panel is looked at.
+  assert.equal(fakeDocument.element('ark-attention-count').textContent, '2');
+});
+
+test('an office with nothing to decide says so instead of showing an empty list', () => {
+  show({ ann: 'running' });
+  assert.deepEqual(rowsIn('ark-need-list'), []);
+  assert.equal(fakeDocument.element('ark-need-empty').hidden, false);
+  assert.equal(fakeDocument.element('ark-need-count').textContent, '0');
+  assert.equal(fakeDocument.element('ark-need-count').dataset.required, 'false');
+});
+
+// -------------------------------------------------------- unknown state ---
+
+test('a disconnection empties 実行中 and never leaves a row reading as work', () => {
+  show({ ann: 'running', bob: 'running', cy: 'failed' });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '2', 'while the stream was confirming');
+
+  disconnect();
+
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  assert.equal(countFor('ark-now-counts', 'UNKNOWN'), '3');
+  assert.deepEqual(tags('ark-now-list'), ['UNKNOWN', 'UNKNOWN', 'UNKNOWN']);
+  for (const row of rowsIn('ark-now-list')) {
+    assert.equal(row.dataset.confirmed, 'false');
+    // The freeze is readable without the palette, and it names what was last
+    // observed rather than dropping it.
+    const frozen = row.querySelector('.ark-row__frozen');
+    assert.equal(frozen?.hidden, false);
+    assert.ok((frozen?.textContent ?? '').includes('停止時点'));
+  }
+  const unconfirmed = fakeDocument.element('ark-now-unconfirmed');
+  assert.equal(unconfirmed.hidden, false);
+  assert.ok(unconfirmed.textContent.includes('状態不明'));
+});
+
+test('a disconnection is one Need You item, and does not hide the approval wait', () => {
+  show({ ann: 'awaiting_approval', bob: 'running' });
+  disconnect();
+
+  const items = rowsIn('ark-need-list');
+  assert.deepEqual(
+    items.map((item) => item.dataset.reason),
+    ['AWAITING_APPROVAL', 'STREAM_UNCONFIRMED'],
+  );
+  const approval = items[0] as FakeElement;
+  assert.equal(approval.dataset.confirmed, 'false');
+  const unconfirmed = approval.querySelector('.ark-need-item__unconfirmed');
+  assert.equal(unconfirmed?.hidden, false);
+  assert.ok((unconfirmed?.textContent ?? '').includes('停止時点'));
+});
+
+// -------------------------------------------------------- compact layout ---
+
+test('a large office stays compact: the overflow goes into a drawer', () => {
+  const statuses: Record<string, string> = {};
+  for (let i = 0; i < ARK_SUMMARY_ROWS + 3; i += 1) statuses[`agent-${i}`] = 'running';
+  show(statuses);
+
+  assert.equal(rowsIn('ark-now-list').length, ARK_SUMMARY_ROWS, 'the panel shows a fixed few');
+  assert.equal(rowsIn('ark-now-more').length, 3, 'and the rest is still reachable');
+  assert.equal(fakeDocument.element('ark-now-drawer').hidden, false);
+
+  // A small office has no drawer at all: an empty control is noise.
+  show({ ann: 'running' });
+  assert.equal(rowsIn('ark-now-list').length, 1);
+  assert.equal(rowsIn('ark-now-more').length, 0);
+  assert.equal(fakeDocument.element('ark-now-drawer').hidden, true);
+});
+
+test('the deep detail is in drawers, not stacked down the page', () => {
+  // Every per-colleague and per-outcome detail surface is a <details>, so the
+  // default screen is the summary and the diagnostics are one click away.
+  assert.ok(HTML.includes('<details class="ark-drawer" id="ark-now-drawer"'), 'Now overflow');
+  assert.ok(HTML.includes('id="ark-outcome-drawer"'), 'Outcome overflow');
+  assert.ok(HTML.includes('class="ark-drawer ark-drawer--inline ark-row__evidence"'), 'row evidence');
+  assert.ok(HTML.includes('id="ark-next-fields"'), 'the contract fields');
+
+  // Need You is first in the document and first in the layout at both widths.
+  assert.ok(HTML.indexOf('id="ark-need"') < HTML.indexOf('id="ark-now"'));
+  assert.ok(HTML.indexOf('id="ark-now"') < HTML.indexOf('id="ark-command"'));
+  const areas = [...CSS.matchAll(/grid-template-areas:\s*([^;]+);/g)].map((match) => match[1] ?? '');
+  assert.ok(areas.length >= 2, 'a wide layout and a narrow one');
+  for (const area of areas) {
+    assert.ok(area.trimStart().startsWith("'need"), `Need You is the first row: ${area.trim()}`);
+  }
+  // The console owns the viewport at laptop width; the panels scroll inside it.
+  assert.ok(CSS.includes('height: 100vh'), 'the page itself does not grow');
+  assert.ok(CSS.includes('@media (max-width: 900px)'), 'and collapses to one column');
+});
+
+// ------------------------------------------------------------- evidence ---
+
+test('an outcome carries evidence that can actually be reached', () => {
+  show({ ann: 'completed', bob: 'failed' });
+
+  const rows = rowsIn('ark-outcome-list');
+  assert.deepEqual(tags('ark-outcome-list'), ['FAILED', 'COMPLETED']);
+  const failed = rows[0] as FakeElement;
+  assert.equal(textIn(failed, '.ark-row__tag'), '失敗', 'the result is a word');
+  assert.ok(textIn(failed, '.ark-row__note').includes('未解決'), 'and names what is still open');
+
+  const drawer = failed.querySelector('.ark-row__evidence');
+  assert.equal(drawer?.hidden, false, 'the evidence drawer is present');
+  const trace = failed.querySelector('.ark-evidence');
+  assert.ok((trace?.children.length ?? 0) >= 4, 'with rows off the stream');
+  assert.ok(
+    trace?.children.some((row) => row.querySelector('.ark-evidence__label')?.textContent === 'session'),
+    'including the run itself',
+  );
+  // And the kind of evidence the contract has none of is stated, not left blank.
+  assert.ok(textIn(failed, '.ark-row__artifacts').length > 0);
+  assert.ok(fakeDocument.element('ark-outcome-artifacts').textContent.length > 0);
+});
+
+test('Next shows no plan it was never told, and says why', () => {
+  show({ ann: 'planning', bob: 'running' });
+
+  const rows = rowsIn('ark-next-list');
+  assert.equal(rows.length, 1);
+  assert.equal(textIn(rows[0] as FakeElement, '.ark-row__tag'), '計画中');
+  assert.ok(textIn(rows[0] as FakeElement, '.ark-row__note').includes('報告されていません'));
+  assert.ok(fakeDocument.element('ark-next-note').textContent.includes('Delegation Contract'));
+  const fields = fakeDocument.element('ark-next-fields').children;
+  assert.ok(fields.length >= 5, 'the shape of what is missing is visible');
+  for (const field of fields) {
+    assert.ok(textIn(field, '.ark-field__value').includes('ありません'));
+  }
+});
+
+// ------------------------------------------------------ command surface ---
+
+test('the command field builds a payload and states that nothing sent it', () => {
+  show({ ann: 'running' });
+  const input = fakeDocument.element('ark-command-input') as unknown as { value: string };
+  input.value = 'ARKのNeed You画面をスマホで見やすくして';
+  fakeDocument.element('ark-command-input').dispatch('input', {});
+
+  const preview = fakeDocument.element('ark-command-preview').textContent;
+  const payload = JSON.parse(preview) as Record<string, unknown>;
+  assert.equal(payload.kind, 'owner_task_delegation');
+  assert.equal(payload.namespace, 'live');
+  assert.equal(payload.intent, 'ARKのNeed You画面をスマホで見やすくして');
+  // The payload says it itself, so it cannot be mistaken for a dispatched task
+  // if it is ever copied out of this screen.
+  assert.equal(payload.dispatch, 'none');
+
+  const notice = fakeDocument.element('ark-command-submission');
+  assert.ok(notice.textContent.startsWith('NOT_CONNECTED'));
+  assert.equal(notice.dataset.available, 'false');
+  const submit = fakeDocument.element('ark-command-submit') as unknown as { disabled: boolean };
+  assert.equal(submit.disabled, true, 'the send control never becomes available');
+  assert.equal(
+    fakeDocument.element('ark-command-submit').getAttribute('aria-disabled'),
+    'true',
+  );
+});
+
+test('a refused draft says so and builds nothing', () => {
+  const input = fakeDocument.element('ark-command-input') as unknown as { value: string };
+  input.value = '   ';
+  fakeDocument.element('ark-command-input').dispatch('input', {});
+  assert.equal(fakeDocument.element('ark-command-status').dataset.status, 'empty');
+  assert.equal(fakeDocument.element('ark-command-preview').textContent.includes('{'), false);
+
+  input.value = 'あ'.repeat(500);
+  fakeDocument.control('[data-action="build-command"]').dispatch('click', {});
+  assert.equal(fakeDocument.element('ark-command-status').dataset.status, 'rejected');
+  assert.equal(fakeDocument.element('ark-command-preview').textContent.includes('{'), false);
+});
+
+test('pressing 組み立てる opens no stream and no other request', () => {
+  const before = currentStream();
+  fakeDocument.control('[data-action="build-command"]').dispatch('click', {});
+  assert.equal(currentStream(), before, 'building a draft is a screen-local act');
+
+  // The whole file, held to the same rule the office screen is held to.
+  assert.equal(/fetch\(|XMLHttpRequest|sendBeacon|\.src\s*=/.test(APP), false, 'no request');
+  assert.equal(/innerHTML|insertAdjacentHTML|outerHTML/.test(APP), false, 'nothing becomes markup');
+  assert.equal(/new EventSource\(/.test(APP), true, 'the one stream it does open');
+  assert.equal((APP.match(/new EventSource\(/g) ?? []).length, 1, 'and only one place opens it');
+});
+
+// --------------------------------------------------------------- assets ---
+
+test('the console requests nothing the asset table does not serve', () => {
+  assert.ok(HTML.includes('rel="icon"'));
+  const refs = [...HTML.matchAll(/(?:href|src)="([^"]+)"/g)].map((match) => match[1] as string);
+  for (const ref of refs) {
+    if (ref.startsWith('data:') || ref.startsWith('#')) continue;
+    assert.ok(UI_ASSET_PATHS.includes(ref), `${ref} is served by the asset table`);
+  }
+});
+
+test('the console has exactly one live region, as the office screen does', () => {
+  // Need You changes on a busy stream. If the panel were a live region too, a
+  // screen reader would be interrupted mid-sentence by every frame.
+  assert.equal((HTML.match(/aria-live=/g) ?? []).length, 1);
+  assert.equal((HTML.match(/role="status"/g) ?? []).length, 1);
+  assert.ok(HTML.includes('id="ark-banner"'), 'and it is the banner');
+});
+
+test('every slot the console fills exists in the page and in the fake DOM', () => {
+  // Three copies of the same list have to agree: the <template> the browser
+  // clones, the selectors `quest-ark-app.js` fills, and the slots
+  // `test/fakeArkDom.ts` provides. A slot missing from the page makes
+  // `querySelector` return null and the panel stop rendering; one missing from
+  // the fake makes this suite blind.
+  const fake = readFileSync(new URL('./fakeArkDom.ts', import.meta.url), 'utf8');
+  const filled = new Set(
+    [...APP.matchAll(/'\.(ark-(?:row|need-item|evidence|count|field)__[a-z-]+)'/g)].map(
+      (match) => match[1] as string,
+    ),
+  );
+  assert.ok(filled.size >= 10, 'the selectors were actually found in the app');
+  for (const slot of filled) {
+    // A slot may share its element with layout classes, so the class list is
+    // matched rather than the whole attribute.
+    const inPage = new RegExp(`class="[^"]*\\b${slot}\\b[^"]*"`);
+    assert.ok(inPage.test(HTML), `ark.html has a .${slot} element`);
+    assert.ok(fake.includes(`'${slot}'`), `test/fakeArkDom.ts provides a .${slot} slot`);
+  }
+});

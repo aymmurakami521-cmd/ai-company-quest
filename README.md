@@ -274,6 +274,10 @@ bind hostは **設定できません**。常に `127.0.0.1` です。
 | `GET /ui/quest.css` | 画面のstyle |
 | `GET /ui/quest-app.js` | DOM + SSE glue |
 | `GET /ui/quest-view.js` | 純粋なview model（状態mapping・席割り・client fold） |
+| `GET /ark` | Owner ARK 管理画面（HTML） |
+| `GET /ui/quest-ark.css` | 管理画面のstyle |
+| `GET /ui/quest-ark.js` | 管理画面の純粋なprojection（Need You / Now / Next / Outcome / 依頼下書き） |
+| `GET /ui/quest-ark-app.js` | 管理画面のDOM + SSE glue |
 | `GET /health` | 稼働状況、LIVE/DEMOそれぞれのingest統計、fail-closed状態、`dropped_slow_subscribers`、`state_limits` |
 | `GET /events/live` | LIVE namespaceのSSE stream |
 | `GET /events/demo` | DEMO namespaceのSSE stream |
@@ -314,6 +318,31 @@ replay bufferは有界です。gapは黙って埋めず、必ず明示してか�
 replay経路だけは `snapshot` を送らないため、client切断中にhaltしていた場合は
 `replay_end` の**後**に `fail_closed` を1回追加します（同じpayload、`id:` なし）。
 これがないと、offline中のhaltを挟んだ再接続でclientが「接続済み」に戻ってしまいます。
+
+## Owner ARK 管理画面（`/ark`）
+
+同じread modelの**2つ目のprojection**です。レトロオフィス画面（`/`）とは独立した1画面で、
+canvas / world表現を一切使いません。設計は [`docs/owner-ark-console-design.md`](docs/owner-ark-console-design.md)。
+
+| 区画 | 内容 |
+|---|---|
+| **Need You** | 人間の判断が必要なものを最優先で表示。理由・推奨・選択肢・放置した場合の影響・Evidenceを持つDecision Packetです |
+| **Now** | いま実際に動いているものだけ。実行中 / 人間待ち / 停止（エラー）/ 終了 / 待機 / 状態不明を分離します |
+| **Next** | 計画中と報告された作業のみ。Delegation Contractは現在のevent契約にないため、fail-closedで「ありません」と表示します |
+| **Outcome** | 失敗 / 中断 / 完了と、そこへ到達できるEvidence |
+| **AIへの依頼** | 依頼文をtyped Task/Delegation payloadへ組み立てるだけの下書き面 |
+
+境界:
+
+- Questは **projectionのみ**。`next_action` / attention / run state machine を新設していません。
+  順位付けは既存の `ACTOR_VISUAL_STATES`、接続状態は既存の `selectBanner` をそのまま読みます。
+- 依頼は **送信されません**。認証済みControl boundaryが未接続のため、`NOT_CONNECTED` と明示し、
+  payload自身も `dispatch: "none"` を持ちます。mutating endpointは追加していません。
+- 未確認 / 切断 / stale を「作業中」として描画しません。切断時は全員が状態不明になり、
+  最後に観測した状態は「停止時点」として別に表示します。
+- 状態は色だけで表現しません（語・記号・data属性を必ず併記）。
+- 深い診断情報は `<details>` のdrawerに入れ、通常のlaptop幅で1画面に収まります。
+  900px以下では1カラムになり、Need Youが先頭に残ります。
 
 ## レトロオフィス画面
 

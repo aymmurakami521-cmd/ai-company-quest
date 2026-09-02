@@ -488,6 +488,13 @@ export function outcomeLabel(result) {
  * `STOPPED` is the case worth naming: the session ended while this desk was
  * still mid-work and never reported a completion. Calling that 完了 because the
  * run is over would be the screen closing a loop the stream left open.
+ *
+ * It is narrow, and deliberately so. `session_end` already rewrites every actor
+ * that is still active to `ended`, so the desks that reach here are the ones the
+ * reducer did *not* touch: somebody stopped earlier in a non-terminal state - an
+ * approval that never came, a plan nobody picked up - whose session then ended
+ * around them. Those are exactly the ones an owner would otherwise never hear
+ * about again.
  */
 function outcomeFor(desk, session) {
   const observed = desk.last_known_visual.state;
