@@ -607,6 +607,37 @@ test('a stop a later start superseded is not evidence about the run after it', (
   assert.ok((byName.get('ann')?.follow_up ?? '').length > 0);
 });
 
+test('a stop the reducer refused to act on stopped nothing, and proves nothing', () => {
+  // A late `agent_stop`: it arrives after ann's newer `agent_start`, so the fold
+  // counts it out-of-order and deliberately leaves ann running - the desk was
+  // never stopped by it. The log records what arrived rather than what was
+  // accepted, so the refused stop sits there all the same, newest-first ahead of
+  // the start, and reading the log as ingested rather than as applied credited
+  // ann with a finish the read model itself declined.
+  const at = (second: number): string => `2026-01-01T00:00:0${second}.000Z`;
+  const state = stateOf([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running', ts: at(5) },
+    { event_type: 'agent_stop', agent_id: 'ann', status: 'completed', ts: at(1) },
+    { event_type: 'agent_start', agent_id: 'bob', status: 'running', ts: at(6) },
+    { event_type: 'agent_stop', agent_id: 'bob', status: 'completed', ts: at(7) },
+    { event_type: 'session_end', agent_id: 'ann', status: 'running', ts: at(9) },
+  ]);
+  const byName = new Map(selectOutcome(state).rows.map((row) => [row.display_name, row]));
+
+  assert.equal(state.counters.out_of_order, 1, 'the fold declined exactly one event');
+  assert.equal(
+    state.log.filter((entry) => entry.event_type === 'agent_stop' && entry.actor === 'ann').length,
+    1,
+    'and the declined stop is in the client log regardless',
+  );
+  assert.equal(byName.get('ann')?.result, 'STOPPED', 'so it may not be read as ann finishing');
+  assert.ok((byName.get('ann')?.follow_up ?? '').length > 0, 'and the open loop is named');
+  // The same log, the same session end: what separates the two is whether the
+  // fold acted on the stop, which is the only thing this rule reads.
+  assert.equal(byName.get('bob')?.result, 'COMPLETED', 'a stop the fold applied still counts');
+  assert.equal(selectOutcome(state).counts.COMPLETED, 1);
+});
+
 test('a stop from before a recovery snapshot is not proof about the run after it', () => {
   // `applySnapshot` replaces the actors with the server's fold and leaves
   // `state.log` alone, so the log outlives the office it described. Here ann

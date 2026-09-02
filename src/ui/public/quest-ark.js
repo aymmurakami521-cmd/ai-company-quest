@@ -20,8 +20,9 @@
  * that freeze standing until a recovery frame has actually re-established what is
  * current, and `reportedOwnStop` refuses to read a generic `session_end` as
  * somebody having finished - out of the stretch of the log `trustedLog` can
- * still vouch for, so an observation a recovery superseded proves nothing about
- * what replaced it.
+ * still vouch for, and only the entries in it the fold actually acted on, so
+ * neither an observation a recovery superseded nor one the reducer declined can
+ * be cited as proof about the run that stands now.
  *
  * `arkPhaseOnOpen` / `arkRecovered` are the only two functions here that are not
  * selectors, and they still hold the boundary: both are pure, both speak only the
@@ -668,6 +669,66 @@ function trustedLog(state) {
 }
 
 /**
+ * The ts this desk's applied history had already reached before the trusted
+ * window opens, or null when nothing older is left to say.
+ *
+ * The rule below needs to know what the fold was comparing against when the
+ * window's first entry for a desk arrived, and that comparison happened before
+ * the window. The entries the window no longer covers still answer it: an entry
+ * the fold ignored is by definition older than the applied high-water mark of
+ * its moment, so the newest ts among *all* of a desk's older entries is exactly
+ * the newest ts among its applied ones.
+ *
+ * A floor, never a ceiling. Older entries the log has already dropped, and a
+ * fold a snapshot performed on this client's behalf, can only have carried the
+ * real mark further forward - so this can leave the mark too low and accept a
+ * stop the fold ignored, and can never push it too high and reject one the fold
+ * applied. Same direction as every other bound here.
+ */
+function orderFloor(log, trusted, actorKey) {
+  let floor = null;
+  for (let index = trusted.length; index < log.length; index += 1) {
+    const entry = log[index];
+    if (entry.actor_key !== actorKey) continue;
+    const ms = Date.parse(entry.ts);
+    if (floor === null || ms > floor) floor = ms;
+  }
+  return floor;
+}
+
+/**
+ * The desk's own entries the fold acted on, oldest first.
+ *
+ * The log records what arrived, not what was accepted: `applyEvent` writes every
+ * well-formed event to it, including the ones it then declines to act on. An
+ * event whose `ts` is older than the desk's latest applied event is one of those
+ * - the reducer counts it `out_of_order` and deliberately leaves the desk's
+ * status, activity and `last_event_type` where they were - so an `agent_stop`
+ * that arrived late stopped nothing, and reading it back out of the log as a
+ * completion report would be the console crediting the desk with a finish the
+ * read model itself refused.
+ *
+ * The rule applied here is `applyEvent`'s own, on the same field, in the same
+ * direction - a replay of the fold's decision over the desk's own entries rather
+ * than a second lifecycle of this screen's making. Nothing else about an event is
+ * re-decided: this says only which entries the read model let speak.
+ */
+function appliedOwnEntries(log, trusted, actorKey) {
+  const applied = [];
+  // `trusted` is newest-first; the fold saw these in the opposite order.
+  let previousMs = orderFloor(log, trusted, actorKey);
+  for (let index = trusted.length - 1; index >= 0; index -= 1) {
+    const entry = trusted[index];
+    if (entry.actor_key !== actorKey) continue;
+    const eventMs = Date.parse(entry.ts);
+    if (previousMs !== null && eventMs < previousMs) continue;
+    previousMs = eventMs;
+    applied.push(entry);
+  }
+  return applied;
+}
+
+/**
  * Whether this desk's own latest report about itself was a stop.
  *
  * `last_event_type` alone cannot answer this, and the ordinary main-agent
@@ -686,7 +747,10 @@ function trustedLog(state) {
  * Read out of `trustedLog` rather than the whole log, so it is also the desk's
  * latest report *about the office as it now stands*: an entry from before a
  * recovery describes a state the snapshot replaced, and may not be cited as
- * proof about what replaced it.
+ * proof about what replaced it. And read out of `appliedOwnEntries` rather than
+ * the window as it stands, so it is a report the read model actually accepted: a
+ * late `agent_stop` the fold declined to act on is in the log all the same, and
+ * it stopped nothing.
  *
  * Bounded, and honest about that: past the log window - and on a state rebuilt
  * from a `snapshot`, whose own log is all pre-recovery - there is no trusted
@@ -695,10 +759,11 @@ function trustedLog(state) {
  * under-claims a completion, which is the safe half; the other one, a generic
  * `session_end` manufacturing a success, is what may never happen.
  */
-function reportedOwnStop(trusted, actorKey, actor) {
+function reportedOwnStop(log, trusted, actorKey, actor) {
   if (typeof actorKey === 'string') {
-    for (const entry of trusted) {
-      if (entry.actor_key !== actorKey) continue;
+    const applied = appliedOwnEntries(log, trusted, actorKey);
+    for (let index = applied.length - 1; index >= 0; index -= 1) {
+      const entry = applied[index];
       if (!ACTOR_LIFECYCLE_EVENTS.includes(entry.event_type)) continue;
       return ACTOR_COMPLETION_EVENTS.includes(entry.event_type);
     }
@@ -724,11 +789,11 @@ function reportedOwnStop(trusted, actorKey, actor) {
  * main orchestrator whose own stop is followed by the `session_end` that closes
  * the run, which `reportedOwnStop` finds rather than losing to the newer frame.
  */
-function outcomeFor(trusted, desk, actor, session) {
+function outcomeFor(log, trusted, desk, actor, session) {
   const observed = desk.last_known_visual.state;
   if (observed === 'error') return 'FAILED';
   if (observed === 'ended') {
-    return reportedOwnStop(trusted, desk.actor_key, actor) ? 'COMPLETED' : 'STOPPED';
+    return reportedOwnStop(log, trusted, desk.actor_key, actor) ? 'COMPLETED' : 'STOPPED';
   }
   if (session !== null && session.ended_at !== null && session.ended_at !== undefined) {
     return 'STOPPED';
@@ -746,12 +811,13 @@ export function selectOutcome(state) {
   const desks = selectDesks(state);
   const frozen = unconfirmedStream(selectBanner(selectHeader(state)));
   // One window for the whole panel, so no two rows read the same log differently.
+  const log = Array.isArray(state.log) ? state.log : [];
   const trusted = trustedLog(state);
   const rows = [];
   for (const desk of desks) {
     const session = ownProp(state.sessions, desk.session_id) ?? null;
     const actor = desk.actor_key === null ? null : (ownProp(state.actors, desk.actor_key) ?? null);
-    const result = outcomeFor(trusted, desk, actor, session);
+    const result = outcomeFor(log, trusted, desk, actor, session);
     if (result === null) continue;
     const now = claim(desk, frozen);
     rows.push({
