@@ -177,14 +177,25 @@ export function arkRecovered(before, after, frameKind) {
  * questions the console has to answer after a drop - what the office looks like
  * *and* whether ingestion is still running - in the same frame.
  *
- * A `replay_end` settles only the first. `server.ts:332-337` writes a queued
- * `fail_closed` immediately *after* it, because a halt that happened while this
- * client was offline reaches nobody through the replay itself. Both frames leave
- * the server in one write, but the browser dispatches them as two events, so
- * declaring the recovery healthy on the first one renders every retained desk as
- * confirmed 実行中 for the frame before the halt lands. `arkRecoverySettles`
- * says which of the two a frame is, so `quest-ark-app.js` can hold the freeze
- * over the rest of the burst rather than claiming health it does not yet have.
+ * A `replay_end` settles only the first, and there is nothing in it that could
+ * settle the second. `server.ts:332-337` writes a queued `fail_closed`
+ * immediately *after* it, because a halt that happened while this client was
+ * offline reaches nobody through the replay itself. Both frames leave the server
+ * in one write, but the browser dispatches them as two events, so declaring the
+ * recovery healthy on the first one renders every retained desk as confirmed
+ * 実行中 for the frame before the halt lands.
+ *
+ * `arkRecoverySettles` says which of the two a frame is, and `quest-ark-app.js`
+ * holds an unsettled recovery until the wire itself answers the health question.
+ * What answers it is the *next frame of any kind*, and that is a fact about the
+ * wire rather than a guess about timing: the server writes the queued halt in
+ * the same synchronous block as the `replay_end` it follows, with no yield
+ * between them, so nothing it produces later can reach the page ahead of that
+ * halt. The first frame after the replay is therefore either the halt itself or
+ * proof that none was queued. Until one arrives the console stays 状態不明 and
+ * says so - including forever, on a quiet stream that never sends another frame,
+ * which is the halted case and the idle case at once and may not be told apart
+ * by waiting longer.
  */
 export const ARK_SETTLING_RECOVERY_FRAMES = Object.freeze(['snapshot']);
 

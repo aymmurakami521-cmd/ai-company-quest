@@ -27,7 +27,8 @@ import { readFileSync } from 'node:fs';
 import { NamespaceStore } from '../src/collector/store.ts';
 import type { SanitizedEvent } from '../src/domain/event.ts';
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
-import { makeEvent } from './helpers.ts';
+import { toWireEvent } from '../src/domain/wire.ts';
+import { makeEvent, makeIngested } from './helpers.ts';
 import type { FakeElement } from './fakeDom.ts';
 import { FakeEventSource, currentStream, installFakeArkDom } from './fakeArkDom.ts';
 import { ARK_SUMMARY_ROWS } from '../src/ui/public/quest-ark.js';
@@ -103,12 +104,36 @@ function reconnect(): void {
   stream.emit('open', {});
 }
 
+let pushed = 0;
+
 /**
- * Lets whatever the server queued behind the frame just delivered arrive first,
- * the way a browser does: both frames leave the server in one write, and the
- * page is handed them as two events with the console's own hold in between.
+ * One ordinary frame on the live stream, about a colleague already seated.
+ *
+ * The server can only have written this *after* the synchronous block that
+ * carries a replay and any halt queued behind it, so on the wire it is proof
+ * that no halt was queued - which is the only thing that may lift a recovery a
+ * `replay_end` could not settle.
  */
-function drain(): Promise<void> {
+function pushEvent(overrides: Partial<SanitizedEvent> = {}): void {
+  pushed += 1;
+  currentStream().emit(
+    'quest_event',
+    toWireEvent(
+      makeIngested(
+        makeEvent({ ts: `2026-01-01T01:00:${String(pushed % 60).padStart(2, '0')}.000Z`, ...overrides }),
+        10_000 + pushed,
+      ),
+    ),
+  );
+}
+
+/**
+ * Yields to the macrotask queue, so a test can show that nothing the console
+ * does on a timer hands the office back. Nothing here is waiting *for* the
+ * console: `quest-ark-app.js` has no clock that decides anything, and these
+ * assertions are what holds it to that.
+ */
+function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
@@ -258,7 +283,7 @@ test('a reconnected socket is not a live office until a recovery frame says so',
   for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'true');
 });
 
-test('a replay served over a reconnect confirms the office at its end, not its start', async () => {
+test('a replay served over a reconnect is confirmed by the stream, not by its end', async () => {
   show({ ann: 'running' });
   reconnect();
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
@@ -267,15 +292,49 @@ test('a replay served over a reconnect confirms the office at its end, not its s
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'a replay beginning establishes nothing');
   assert.deepEqual(tags('ark-now-list'), ['UNKNOWN']);
 
-  // Nor does its end, in the frame it arrives: the server can still have a
-  // `fail_closed` queued behind it, and the browser has not delivered it yet.
+  // Nor does its end: the server can still have a `fail_closed` queued behind it,
+  // in the same write, and the browser has not delivered it yet.
   currentStream().emit('replay_end', { count: 0 });
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'not while the burst may continue');
   assert.equal(fakeDocument.element('ark-banner').dataset.code, 'RECONNECTING');
 
-  await drain();
-  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '1', 'the served replay is the recovery');
+  // Time is not what settles it, and this is the assertion that says so: the
+  // console used to lift the freeze on a zero-delay timer, which is a guess that
+  // the halt is already in the browser's queue rather than in a later read.
+  await tick();
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'and waiting proves nothing');
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'RECONNECTING');
+
+  // A frame the server could only have written after that block is what proves
+  // no halt was queued - and it is the office being confirmed, not the clock.
+  pushEvent({ event_type: 'tool_use', agent_id: 'ann', status: 'running', tool_name: 'Read' });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '1', 'the live stream is the recovery');
   assert.equal(fakeDocument.element('ark-banner').dataset.code, 'CONNECTED');
+  for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'true');
+});
+
+test('a replay that is followed by nothing is not an office anybody is confirming', async () => {
+  // The halted namespace and the quiet one are the same silence, and no amount
+  // of waiting tells them apart. So the console holds 状態不明 and says why,
+  // rather than reading the retained desks back as work on the strength of a
+  // timer having fired.
+  show({ ann: 'running', bob: 'running' });
+  reconnect();
+
+  const stream = currentStream();
+  stream.emit('replay_start', { count: 0 });
+  stream.emit('replay_end', { count: 0 });
+
+  for (let turn = 0; turn < 3; turn += 1) await tick();
+
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'RECONNECTING');
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  assert.equal(countFor('ark-now-counts', 'UNKNOWN'), '2');
+  for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'false');
+  // And it is explained rather than left as a silent freeze: the item names the
+  // state and offers 再接続, which rebuilds from a snapshot and settles it.
+  assert.ok(rowsIn('ark-need-list').some((item) => item.dataset.reason === 'STREAM_UNCONFIRMED'));
+  assert.equal(fakeDocument.element('ark-now-unconfirmed').hidden, false);
 });
 
 test('a halt queued behind a replay is never one frame of confirmed work', async () => {
@@ -295,6 +354,12 @@ test('a halt queued behind a replay is never one frame of confirmed work', async
   assert.equal(countFor('ark-now-counts', 'UNKNOWN'), '2');
   for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'false');
 
+  // The halt in a later network read, which is the case a zero-delay timer got
+  // wrong: the timer would already have run, and the console would already have
+  // claimed the office was being confirmed.
+  await tick();
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'still nothing confirmed');
+
   stream.emit('fail_closed', {
     namespace: 'live',
     halted: true,
@@ -304,13 +369,40 @@ test('a halt queued behind a replay is never one frame of confirmed work', async
   assert.equal(fakeDocument.element('ark-banner').dataset.code, 'FAIL_CLOSED');
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
 
-  // The held lift runs after the halt has been applied, and a halt is sticky and
-  // outranks every phase - so it cannot hand the office back either.
-  await drain();
+  // A halt is sticky and outranks every phase, so nothing after it hands the
+  // office back either.
+  await tick();
+  pushEvent({ event_type: 'tool_use', agent_id: 'ann', status: 'running', tool_name: 'Read' });
   assert.equal(fakeDocument.element('ark-banner').dataset.code, 'FAIL_CLOSED');
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
   assert.deepEqual(tags('ark-now-list'), ['UNKNOWN', 'UNKNOWN']);
   assert.ok(rowsIn('ark-need-list').some((item) => item.dataset.reason === 'INGEST_HALTED'));
+});
+
+test('a replay left unsettled by one socket does not confirm the burst of the next', async () => {
+  // The bookkeeping holds a reconnect open across exactly one burst, so it may
+  // not be left standing into another: the first frame of the *next* reconnect
+  // is a `replay_start`, and a stale hold would have read that as the proof it
+  // was waiting for and handed the office back mid-recovery.
+  show({ ann: 'running', bob: 'running' });
+  reconnect();
+  currentStream().emit('replay_start', { count: 0 });
+  currentStream().emit('replay_end', { count: 0 });
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'RECONNECTING');
+
+  // The socket drops again before anything else arrived, and comes back.
+  reconnect();
+  currentStream().emit('replay_start', { count: 0 });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'a replay beginning is not an answer');
+  // Still the reconnect the console is holding, which outranks the replay it is
+  // being served; either way the code is one nothing may be confirmed under.
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'RECONNECTING');
+  for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'false');
+
+  currentStream().emit('replay_end', { count: 0 });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  pushEvent({ event_type: 'tool_use', agent_id: 'ann', status: 'running', tool_name: 'Read' });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '2', 'and only the stream itself is');
 });
 
 test('a disconnection is one Need You item, and does not hide the approval wait', () => {

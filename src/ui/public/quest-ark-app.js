@@ -9,14 +9,17 @@
  *   state, so LIVE and DEMO can never appear together;
  * - stream content reaches the DOM through `textContent` only, so a sanitized
  *   label is always rendered as text and never as markup;
- * - nothing is logged to the console.
+ * - nothing is logged to the console;
+ * - no clock decides anything. The one timer left redraws the 「◯秒前」 readout
+ *   and is read by nothing; no elapsed time can turn an office nobody is
+ *   confirming into live progress.
  *
  * Everything that decides *what* is shown lives in `quest-view.js` and
  * `quest-ark.js` and is unit tested. This file places the result into cloned
  * <template> nodes, and the only thing it decides for itself is when a recovery
  * the server has not finished describing may lift the reconnect freeze - see
- * `holdRecovery`, the one clock in this file, which decides nothing about any
- * desk.
+ * `unsettled` in `handleFrame`, which is read off the order of the frames
+ * themselves and decides nothing about any desk.
  *
  * Rows are reused by key rather than rebuilt per frame, for the same reason the
  * office screen reuses desk nodes: a node that leaves the document takes the
@@ -110,8 +113,14 @@ let state = createClientState(readNamespaceFromHash());
 /** The banner last written to the live region, so it is not re-announced. */
 let announced = null;
 
-/** A recovery held back until the rest of the server's burst has been applied. */
-let held = null;
+/**
+ * A recovery that re-established the office but not the stream's health.
+ *
+ * Set by a `replay_end`, cleared by the next frame the server writes - see
+ * `handleFrame`. One bit of transport bookkeeping, and the only thing it can do
+ * is keep the console frozen for longer: it decides nothing about any desk.
+ */
+let unsettled = false;
 
 function readNamespaceFromHash() {
   const requested = window.location.hash.replace('#', '');
@@ -124,10 +133,7 @@ function setState(next) {
 }
 
 function closeStream() {
-  if (held !== null) {
-    clearTimeout(held);
-    held = null;
-  }
+  unsettled = false;
   if (source !== null) {
     source.close();
     source = null;
@@ -144,6 +150,8 @@ function connect(namespace) {
 
   stream.addEventListener('open', () => {
     if (source !== stream) return;
+    // A new burst begins here, so nothing an older one left open still stands.
+    unsettled = false;
     // Not `open` unconditionally: on an automatic reconnect this fires before the
     // queued recovery frames, and taking it at face value would hand the desks
     // observed before the drop back as confirmed work. `arkPhaseOnOpen` holds an
@@ -154,6 +162,7 @@ function connect(namespace) {
 
   stream.addEventListener('error', () => {
     if (source !== stream) return;
+    unsettled = false;
     const phase = stream.readyState === EventSource.CONNECTING ? 'reconnecting' : 'error';
     setState(setConnectionPhase(state, phase, Date.now()));
   });
@@ -180,50 +189,45 @@ function handleFrame(kind, raw) {
     return;
   }
   const at = Date.now();
-  const stream = source;
   const applied = applyFrame(state, { kind, payload, at_ms: at });
   // The one place the reconnect freeze is lifted, and only by the frame that
   // re-established the office - after it has been applied, never before.
-  if (!arkRecovered(state, applied, kind)) {
+  if (arkRecovered(state, applied, kind)) {
+    if (arkRecoverySettles(kind)) {
+      unsettled = false;
+      setState(setConnectionPhase(applied, 'open', at));
+      return;
+    }
+    // `replay_end`: the office is re-established, the stream's health is not. A
+    // halt from while this client was offline is written immediately behind this
+    // frame (`server.ts:332-337`), so claiming health here renders every retained
+    // desk as confirmed 実行中 for the frame before it lands.
+    unsettled = true;
     setState(applied);
     return;
   }
-  if (arkRecoverySettles(kind)) {
-    setState(setConnectionPhase(applied, 'open', at));
+  if (unsettled) {
+    // The wire has answered, and answered by existing. The server writes that
+    // queued halt in the same synchronous block as the `replay_end`, with no
+    // yield in between, so nothing it produces afterwards can be delivered ahead
+    // of the halt: this frame is either the halt itself - already applied above,
+    // sticky, and outranking every phase - or proof that none was queued.
+    //
+    // Which is why there is no timer here. A zero-delay callback is a guess that
+    // the halt is already in the browser's queue; if the burst is split across
+    // two network reads it is a wrong guess, and the console reports live work
+    // on a namespace that has stopped. Nothing is worth reading a stale office as
+    // live progress, so the freeze stands until a frame arrives - forever, on a
+    // stream that sends no more, which is the halted case and the quiet case at
+    // once and cannot be told apart by waiting. The banner says exactly that, and
+    // 再接続 rebuilds from a `snapshot`, which settles it outright.
+    unsettled = false;
+    setState(
+      state.connection.phase === 'reconnecting' ? setConnectionPhase(applied, 'open', at) : applied,
+    );
     return;
   }
   setState(applied);
-  holdRecovery(stream);
-}
-
-/**
- * Lifts a recovery the frame itself could not settle, once the server has
- * finished saying what it had to say.
- *
- * Only `replay_end` reaches here, and only because a halt that happened while
- * this client was offline is written *behind* it in the same burst
- * (`server.ts:332-337`). Lifting the freeze on the `replay_end` event itself
- * rendered the retained desks as confirmed 実行中 for exactly one frame, until
- * the `fail_closed` arrived and froze them again. Yielding first lets anything
- * already queued behind the replay be applied before the console claims the
- * office is being confirmed - and a halt, once applied, is sticky and outranks
- * every phase, so the lift below cannot undo it.
- *
- * Fail-safe in both directions. The timer is the only clock in this file and it
- * decides nothing about any desk: if it never runs the console stays 状態不明,
- * which is the safe half, and if the halt is split across two network reads and
- * arrives after it, the result is no worse than lifting immediately. It is
- * dropped when the stream is replaced, and refuses to act on a stream that is no
- * longer the current one or on a console that has since moved on by itself.
- */
-function holdRecovery(stream) {
-  if (held !== null) return;
-  held = setTimeout(() => {
-    held = null;
-    if (source !== stream) return;
-    if (state.connection.phase !== 'reconnecting') return;
-    setState(setConnectionPhase(state, 'open', Date.now()));
-  }, 0);
 }
 
 function text(node, selector, value) {
