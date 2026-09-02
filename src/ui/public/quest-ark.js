@@ -20,9 +20,10 @@
  * that freeze standing until a recovery frame has actually re-established what is
  * current, and `reportedOwnStop` refuses to read a generic `session_end` as
  * somebody having finished - out of the stretch of the log `trustedLog` can
- * still vouch for, and only the entries in it the fold actually acted on, so
- * neither an observation a recovery superseded nor one the reducer declined can
- * be cited as proof about the run that stands now.
+ * still vouch for, and only the entries in it the fold actually acted on and can
+ * be shown to have acted on, so neither an observation a recovery superseded nor
+ * one the reducer declined nor one this client cannot place in the desk's own
+ * order can be cited as proof about the run that stands now.
  *
  * `arkPhaseOnOpen` / `arkRecovered` are the only two functions here that are not
  * selectors, and they still hold the boundary: both are pure, both speak only the
@@ -679,13 +680,20 @@ function trustedLog(state) {
  * its moment, so the newest ts among *all* of a desk's older entries is exactly
  * the newest ts among its applied ones.
  *
- * A floor, never a ceiling. Older entries the log has already dropped, and a
- * fold a snapshot performed on this client's behalf, can only have carried the
- * real mark further forward - so this can leave the mark too low and accept a
- * stop the fold ignored, and can never push it too high and reject one the fold
- * applied. Same direction as every other bound here.
+ * Finding nothing is two different situations, and they may not be conflated.
+ * Either the desk has no history before the window - it was born inside it,
+ * which is the ordinary case for a colleague who starts while somebody is
+ * watching - or it has one the log cannot show, because a snapshot folded that
+ * stretch in on this client's behalf or the log has moved past it. The first is
+ * a mark of "nothing yet"; the second is no mark at all, and reading it as
+ * "nothing yet" is what let a late `agent_stop` be accepted as the first thing
+ * the fold ever heard from a desk it had in fact already ended.
+ *
+ * The read model tells them apart: the fold counts every event it takes for a
+ * desk, applied or not, in the same `event_count` the window's own entries can
+ * be counted against. Equal means the window is the desk's whole history.
  */
-function orderFloor(log, trusted, actorKey) {
+function orderFloor(log, trusted, actorKey, actor) {
   let floor = null;
   for (let index = trusted.length; index < log.length; index += 1) {
     const entry = log[index];
@@ -693,7 +701,49 @@ function orderFloor(log, trusted, actorKey) {
     const ms = Date.parse(entry.ts);
     if (floor === null || ms > floor) floor = ms;
   }
-  return floor;
+  if (floor !== null) return { known: true, ms: floor };
+  let inWindow = 0;
+  for (const entry of trusted) if (entry.actor_key === actorKey) inWindow += 1;
+  const counted = actor === null ? null : actor.event_count;
+  return { known: typeof counted === 'number' && counted === inWindow, ms: null };
+}
+
+/**
+ * Where in the window the desk's latest applied event sits, or -1 when the
+ * window does not contain it.
+ *
+ * The fold publishes that event: `last_event_ts` moves only when an event is
+ * acted on, so the desk's newest applied entry is the one carrying that ts, and
+ * *everything the desk sent after it was declined*. That is the fact `orderFloor`
+ * cannot supply on its own. A floor reconstructed from the log runs out whenever
+ * the entries that would establish it are gone - a snapshot filled that stretch
+ * in on this client's behalf, or the log has simply moved past it - and a null
+ * floor accepts the window's first entry for a desk unconditionally. A late
+ * `agent_stop` landing there was then read as a completion report on a desk the
+ * fold had already ended, which is a generic `session_end` manufacturing a
+ * success by the back door.
+ *
+ * Anchoring on `last_event_ts` closes that without needing the floor at all:
+ * no event can follow the last applied one and have been applied itself, so
+ * every entry newer than this index is provably one the fold refused. The
+ * scan takes the newest match because an entry newer in arrival than the true
+ * anchor was declined, and a declined event is *strictly* older than the mark it
+ * was compared against - so it can never carry the mark's own ts.
+ *
+ * Fail-closed: a desk whose latest applied event is not in the window has no
+ * entry there that can be shown to have been applied, so the window says nothing
+ * about it and `reportedOwnStop` falls back to the fold's own `last_event_type`.
+ */
+function appliedAnchor(trusted, actorKey, actor) {
+  if (actor === null || typeof actor.last_event_ts !== 'string') return -1;
+  const mark = Date.parse(actor.last_event_ts);
+  if (!Number.isFinite(mark)) return -1;
+  for (let index = 0; index < trusted.length; index += 1) {
+    const entry = trusted[index];
+    if (entry.actor_key !== actorKey) continue;
+    if (Date.parse(entry.ts) === mark) return index;
+  }
+  return -1;
 }
 
 /**
@@ -712,12 +762,24 @@ function orderFloor(log, trusted, actorKey) {
  * direction - a replay of the fold's decision over the desk's own entries rather
  * than a second lifecycle of this screen's making. Nothing else about an event is
  * re-decided: this says only which entries the read model let speak.
+ *
+ * It is read between two bounds, and both come from the read model.
+ * `appliedAnchor` is where the desk's applied history ends, and everything the
+ * window holds past it was refused. `orderFloor` is where that history stood
+ * when the window opened, and without it the replay has nothing to compare the
+ * window's first entry against - so when the floor is unknown the window is
+ * allowed to show only the one entry that needs no comparison, the anchor
+ * itself, and the reading falls back to the fold's own `last_event_type`.
  */
-function appliedOwnEntries(log, trusted, actorKey) {
+function appliedOwnEntries(log, trusted, actorKey, actor) {
+  const anchor = appliedAnchor(trusted, actorKey, actor);
+  if (anchor === -1) return [];
+  const floor = orderFloor(log, trusted, actorKey, actor);
+  if (!floor.known) return [trusted[anchor]];
   const applied = [];
   // `trusted` is newest-first; the fold saw these in the opposite order.
-  let previousMs = orderFloor(log, trusted, actorKey);
-  for (let index = trusted.length - 1; index >= 0; index -= 1) {
+  let previousMs = floor.ms;
+  for (let index = trusted.length - 1; index >= anchor; index -= 1) {
     const entry = trusted[index];
     if (entry.actor_key !== actorKey) continue;
     const eventMs = Date.parse(entry.ts);
@@ -752,16 +814,20 @@ function appliedOwnEntries(log, trusted, actorKey) {
  * late `agent_stop` the fold declined to act on is in the log all the same, and
  * it stopped nothing.
  *
- * Bounded, and honest about that: past the log window - and on a state rebuilt
- * from a `snapshot`, whose own log is all pre-recovery - there is no trusted
- * entry left and the reading falls back to `last_event_type`, which the fold
- * always carries and which a snapshot always re-establishes. That direction
- * under-claims a completion, which is the safe half; the other one, a generic
- * `session_end` manufacturing a success, is what may never happen.
+ * Bounded, and honest about that: past the log window - on a state rebuilt from
+ * a `snapshot`, whose own log is all pre-recovery, and on any desk whose history
+ * began before this client's log and so cannot be ordered out of it - there is
+ * no entry left that can be shown to have been applied, and the reading falls
+ * back to `last_event_type`, which the fold always carries and which a snapshot
+ * always re-establishes. The cost is real and is paid deliberately: a browser
+ * opened mid-run reads a finished orchestrator as 中断, because a `session_end`
+ * has overwritten the only field left to read. That direction under-claims a
+ * completion, which is the safe half; the other one, a generic `session_end`
+ * manufacturing a success, is what may never happen.
  */
 function reportedOwnStop(log, trusted, actorKey, actor) {
   if (typeof actorKey === 'string') {
-    const applied = appliedOwnEntries(log, trusted, actorKey);
+    const applied = appliedOwnEntries(log, trusted, actorKey, actor);
     for (let index = applied.length - 1; index >= 0; index -= 1) {
       const entry = applied[index];
       if (!ACTOR_LIFECYCLE_EVENTS.includes(entry.event_type)) continue;

@@ -694,6 +694,166 @@ test('a stop reported after the recovery is the office as it now stands', () => 
   assert.ok((byName.get('bob')?.follow_up ?? '').length > 0);
 });
 
+test('a refused stop is not the first thing a recovered window claims the fold heard', () => {
+  // The two rules above meet here, and until now the gap between them was open.
+  // `trustedLog` refuses observations from before the recovery, and the
+  // out-of-order replay refuses events the fold declined - but that replay had
+  // nothing to order the window's *first* entry for a desk against, because the
+  // entries that would have said where ann's history stood are on the far side
+  // of the snapshot. A null mark accepted whatever arrived first, so this late
+  // `agent_stop` was read as ann reporting a finish on a run a generic
+  // `session_end` had already ended.
+  const at = (second: number): string => `2026-01-01T00:00:0${second}.000Z`;
+  const state = afterRecovery(
+    [],
+    [
+      { event_type: 'agent_start', agent_id: 'ann', status: 'running', ts: at(1) },
+      { event_type: 'session_end', agent_id: 'ann', status: 'running', ts: at(5) },
+    ],
+    [{ event_type: 'agent_stop', agent_id: 'ann', status: 'completed', ts: at(1) }],
+  );
+  const row = selectOutcome(state).rows[0];
+
+  assert.ok(row !== undefined);
+  // The defect's preconditions, pinned so the case cannot stop reproducing it.
+  assert.equal(state.counters.out_of_order, 1, 'the fold declined the late stop');
+  assert.equal(
+    state.log.filter((entry) => entry.event_type === 'agent_stop').length,
+    1,
+    'and it is in the client log regardless, alone in the trusted window',
+  );
+  assert.equal(
+    state.actors[row.actor_key ?? '']?.last_event_type,
+    'session_end',
+    'while the authoritative state says only that the session ended around ann',
+  );
+  assert.equal(row.result, 'STOPPED', 'so no completion may be built out of the refused stop');
+  assert.ok((row.follow_up ?? '').length > 0, 'and the open loop is named');
+});
+
+test('a stop the window cannot place in the desk own order proves nothing', () => {
+  // The same hole reached from the other side: here the window *does* hold ann's
+  // latest applied event, so there is an anchor - but the late stop sits before
+  // it, and where ann's history stood when the window opened is still unknowable
+  // from this log. Reading the stop as applied would again have turned a generic
+  // `session_end` into a success.
+  const at = (second: number): string => `2026-01-01T00:00:0${second}.000Z`;
+  const state = afterRecovery(
+    [],
+    [{ event_type: 'agent_start', agent_id: 'ann', status: 'running', ts: at(5) }],
+    [
+      { event_type: 'agent_stop', agent_id: 'ann', status: 'completed', ts: at(1) },
+      { event_type: 'session_end', agent_id: 'ann', status: 'running', ts: at(5) },
+    ],
+  );
+  const row = selectOutcome(state).rows[0];
+
+  assert.ok(row !== undefined);
+  assert.equal(state.counters.out_of_order, 1, 'the fold declined the late stop');
+  assert.equal(
+    state.log.filter((entry) => entry.event_type === 'agent_stop').length,
+    1,
+    'and the trusted window holds it, ahead of the session end it never preceded',
+  );
+  assert.equal(row.result, 'STOPPED');
+  assert.ok((row.follow_up ?? '').length > 0);
+});
+
+test('a desk whose history begins before this client may not be read out of the log', () => {
+  // The cost of the rule above, stated rather than left to be discovered. A
+  // browser that opens mid-run holds a snapshot and no observation before it, so
+  // nothing says where a desk's history stood when its window opened - and a
+  // stop watched afterwards cannot be shown to be one the fold acted on. It
+  // falls back to the fold's own `last_event_type`, which a later `session_end`
+  // has overwritten, so the run reads as 中断.
+  const opened = afterRecovery(
+    [],
+    [{ event_type: 'agent_start', agent_id: 'ann', status: 'running' }],
+    [
+      { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+      { event_type: 'session_end', agent_id: 'ann', status: 'running' },
+    ],
+  );
+  assert.equal(selectOutcome(opened).rows[0]?.result, 'STOPPED');
+
+  // One observation from before the gap is the whole difference: it says where
+  // ann's history stood, the stop can then be placed in it, and the identical
+  // run reads as 完了. Under-claiming is the half this screen is allowed to get
+  // wrong; a generic session end manufacturing a success is not.
+  const watched = afterRecovery(
+    [{ event_type: 'agent_start', agent_id: 'ann', status: 'running' }],
+    [{ event_type: 'agent_start', agent_id: 'bob', status: 'running' }],
+    [
+      { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+      { event_type: 'session_end', agent_id: 'ann', status: 'running' },
+    ],
+  );
+  const byName = new Map(selectOutcome(watched).rows.map((row) => [row.display_name, row]));
+  assert.equal(byName.get('ann')?.result, 'COMPLETED');
+});
+
+test('no ordering of a run, across any recovery point, makes 完了 out of a session end', () => {
+  // The rule as a property rather than as cases, because the ways to reach it
+  // outnumber the ones anybody would think to write down: every sequence of
+  // three lifecycle-or-session events, every arrival order including late ones,
+  // and a recovery snapshot inserted at every point in each - checked against an
+  // oracle that recomputes, independently of the console, which of a desk's
+  // events the fold actually acted on.
+  const CLOCKS = ['2026-01-01T00:00:01.000Z', '2026-01-01T00:00:05.000Z', '2026-01-01T00:00:09.000Z'];
+  const TYPES = ['agent_start', 'agent_stop', 'session_end'] as const;
+  const alphabet: { event_type: string; ts: string }[] = [];
+  for (const event_type of TYPES) for (const ts of CLOCKS) alphabet.push({ event_type, ts });
+
+  /** What the fold acted on, from the sequence alone: `applyEvent`'s own rule. */
+  const appliedLifecycle = (steps: readonly { event_type: string; ts: string }[]): string[] => {
+    const applied: string[] = [];
+    let mark: number | null = null;
+    for (const step of steps) {
+      const ms = Date.parse(step.ts);
+      if (mark !== null && ms < mark) continue;
+      mark = ms;
+      if (step.event_type === 'agent_start' || step.event_type === 'agent_stop') {
+        applied.push(step.event_type);
+      }
+    }
+    return applied;
+  };
+
+  let checked = 0;
+  const walk = (prefix: { event_type: string; ts: string }[]): void => {
+    if (prefix.length === 3) {
+      const truth = appliedLifecycle(prefix);
+      const latest = truth.length === 0 ? null : truth[truth.length - 1];
+      const events = prefix.map((step) => ({ ...step, agent_id: 'ann', status: 'running' }));
+      for (let cut = 0; cut <= events.length; cut += 1) {
+        for (let live = cut; live <= events.length; live += 1) {
+          checked += 1;
+          const state = afterRecovery(
+            events.slice(0, cut),
+            events.slice(cut, live),
+            events.slice(live),
+          );
+          for (const row of selectOutcome(state).rows) {
+            if (row.result !== 'COMPLETED') continue;
+            assert.equal(
+              latest,
+              'agent_stop',
+              `完了 without the desk's own applied stop: ${prefix
+                .map((step) => `${step.event_type}@${step.ts.slice(17, 19)}`)
+                .join(' ')} (seen ${cut}, live from ${live})`,
+            );
+          }
+        }
+      }
+      return;
+    }
+    for (const step of alphabet) walk([...prefix, step]);
+  };
+  walk([]);
+
+  assert.ok(checked > 5000, `the search actually ran: ${checked} cases`);
+});
+
 test('a finished-sounding status on a non-terminal event is not a completion either', () => {
   // `agent_status: done` is the producer describing a moment, not the desk
   // reporting that it stopped. Conservative on purpose: 完了 is a claim about a
