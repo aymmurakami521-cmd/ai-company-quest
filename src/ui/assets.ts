@@ -32,6 +32,18 @@ const ASSET_TABLE: readonly { pathname: string; file: string; contentType: strin
   { pathname: '/ui/quest-view.js', file: 'quest-view.js', contentType: 'text/javascript; charset=utf-8' },
   { pathname: '/ui/quest-world.js', file: 'quest-world.js', contentType: 'text/javascript; charset=utf-8' },
   { pathname: '/ui/quest-canvas.js', file: 'quest-canvas.js', contentType: 'text/javascript; charset=utf-8' },
+  // The Owner ARK management console. A second projection of the same read
+  // model on its own route, so a broken canvas, world or office layout cannot
+  // take the management surface down with it - and so the office screen keeps
+  // exactly the markup, tests and behaviour it already had.
+  { pathname: '/ark', file: 'ark.html', contentType: 'text/html; charset=utf-8' },
+  { pathname: '/ui/quest-ark.css', file: 'quest-ark.css', contentType: 'text/css; charset=utf-8' },
+  { pathname: '/ui/quest-ark.js', file: 'quest-ark.js', contentType: 'text/javascript; charset=utf-8' },
+  {
+    pathname: '/ui/quest-ark-app.js',
+    file: 'quest-ark-app.js',
+    contentType: 'text/javascript; charset=utf-8',
+  },
 ];
 
 /** Same-origin only, no inline code, no way to reach an external service. */

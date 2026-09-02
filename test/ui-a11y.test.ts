@@ -458,9 +458,23 @@ test('switching mode closes the stream and resets connection, state and banner',
 // --------------------------------------------------------------- assets ---
 
 test('the accessibility layer needs no new asset, dependency or request', () => {
+  // The office screen and the Owner ARK console. Both are static files in the
+  // same fixed table; neither adds a dependency, and the loop below holds every
+  // one of them to the same "no external anything" rule.
   assert.deepEqual(
     [...UI_ASSET_PATHS].sort(),
-    ['/', '/ui/quest-app.js', '/ui/quest-canvas.js', '/ui/quest-view.js', '/ui/quest-world.js', '/ui/quest.css'].sort(),
+    [
+      '/',
+      '/ui/quest-app.js',
+      '/ui/quest-canvas.js',
+      '/ui/quest-view.js',
+      '/ui/quest-world.js',
+      '/ui/quest.css',
+      '/ark',
+      '/ui/quest-ark.css',
+      '/ui/quest-ark.js',
+      '/ui/quest-ark-app.js',
+    ].sort(),
   );
   for (const pathname of UI_ASSET_PATHS) {
     const text = assetText(pathname);

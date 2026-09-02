@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Owner ARK — 管理画面</title>
+    <!-- No inline script and no inline style: the served CSP forbids both. -->
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/ui/quest-ark.css" />
+    <script type="module" src="/ui/quest-ark-app.js"></script>
+  </head>
+  <body class="ark">
+    <a class="skip-link" href="#ark-need">Need Youへ移動</a>
+
+    <!--
+      One compact bar. Everything that used to be a stacked diagnostic block is
+      either here as a short stat or inside a drawer further down, so the four
+      panels below fit on one laptop screen without scrolling.
+    -->
+    <header class="ark-bar">
+      <p class="ark-bar__title">
+        <span class="ark-bar__logo" aria-hidden="true">▚▞</span>
+        <span class="ark-bar__name">OWNER ARK</span>
+        <span class="ark-bar__mode" id="ark-mode">—</span>
+      </p>
+
+      <div class="ark-bar__modes" role="group" aria-label="接続モード">
+        <button type="button" class="ark-button" data-mode="live" aria-pressed="false">LIVE</button>
+        <button type="button" class="ark-button" data-mode="demo" aria-pressed="false">DEMO</button>
+        <button type="button" class="ark-button ark-button--ghost" data-action="reconnect">再接続</button>
+      </div>
+
+      <dl class="ark-bar__stats">
+        <div class="ark-stat"><dt>接続</dt><dd id="ark-connection">—</dd></div>
+        <div class="ark-stat"><dt>最終更新</dt><dd id="ark-freshness">未受信</dd></div>
+        <div class="ark-stat"><dt>ingest_seq</dt><dd id="ark-seq">0</dd></div>
+        <div class="ark-stat"><dt>在席</dt><dd id="ark-desks">0</dd></div>
+        <div class="ark-stat"><dt>Need You</dt><dd id="ark-attention-count">0</dd></div>
+      </dl>
+
+      <p class="ark-bar__links">
+        <a href="/">レトロオフィス表示</a>
+        <span class="ark-bar__readonly">read-only projection</span>
+      </p>
+    </header>
+
+    <!--
+      The single live region on the page, and the same banner vocabulary the
+      office screen uses. Code and symbol are written as text next to the
+      message, so the tone colour never carries meaning on its own.
+    -->
+    <p class="ark-banner" id="ark-banner" role="status" aria-live="polite">
+      <span class="ark-banner__symbol" aria-hidden="true"></span>
+      <span class="ark-banner__code"></span>
+      <span class="ark-banner__message"></span>
+    </p>
+
+    <main class="ark-grid">
+      <!--
+        Need You first in the document and first in the layout, at both widths.
+        It is the one panel that must never be pushed below the fold.
+      -->
+      <section class="ark-panel ark-panel--need" id="ark-need" aria-labelledby="ark-need-heading">
+        <h2 id="ark-need-heading" class="ark-panel__heading">
+          <span class="ark-panel__label">Need You</span>
+          <span class="ark-panel__note">あなたの判断が必要</span>
+          <span class="ark-panel__count" id="ark-need-count">0</span>
+        </h2>
+        <ul class="ark-need-list" id="ark-need-list" aria-labelledby="ark-need-heading"></ul>
+        <p class="ark-empty" id="ark-need-empty">
+          いま人間の判断を求めているAI社員はいません。ストリームの状態も正常です。
+        </p>
+      </section>
+
+      <section class="ark-panel" id="ark-now" aria-labelledby="ark-now-heading">
+        <h2 id="ark-now-heading" class="ark-panel__heading">
+          <span class="ark-panel__label">Now</span>
+          <span class="ark-panel__note">いま実際に動いているもの</span>
+        </h2>
+        <!--
+          Runtime classes as counted text, not as a colour bar: 実行中 / 人間待ち /
+          停止 / 終了 / 待機 / 状態不明. While the stream is not confirming
+          anything every desk counts as 状態不明, so a disconnection empties 実行中
+          instead of leaving a row that reads as still working.
+        -->
+        <dl class="ark-counts" id="ark-now-counts"></dl>
+        <p class="ark-unconfirmed" id="ark-now-unconfirmed" hidden></p>
+        <ul class="ark-rows" id="ark-now-list"></ul>
+        <p class="ark-empty" id="ark-now-empty">まだ在席しているAI社員はいません。</p>
+        <details class="ark-drawer" id="ark-now-drawer" hidden>
+          <summary class="ark-drawer__summary">残りのAI社員と詳細</summary>
+          <ul class="ark-rows" id="ark-now-more"></ul>
+        </details>
+        <p class="ark-note" id="ark-now-external"></p>
+      </section>
+
+      <section class="ark-panel" id="ark-next" aria-labelledby="ark-next-heading">
+        <h2 id="ark-next-heading" class="ark-panel__heading">
+          <span class="ark-panel__label">Next</span>
+          <span class="ark-panel__note">これからやる予定</span>
+        </h2>
+        <p class="ark-note" id="ark-next-note"></p>
+        <ul class="ark-rows" id="ark-next-list"></ul>
+        <p class="ark-empty" id="ark-next-empty">計画中と報告しているAI社員はいません。</p>
+        <details class="ark-drawer">
+          <summary class="ark-drawer__summary">Delegation Contractとして表示予定の項目</summary>
+          <dl class="ark-fields" id="ark-next-fields"></dl>
+        </details>
+      </section>
+
+      <section class="ark-panel" id="ark-outcome" aria-labelledby="ark-outcome-heading">
+        <h2 id="ark-outcome-heading" class="ark-panel__heading">
+          <span class="ark-panel__label">Outcome</span>
+          <span class="ark-panel__note">終わったものと証拠</span>
+        </h2>
+        <dl class="ark-counts" id="ark-outcome-counts"></dl>
+        <ul class="ark-rows" id="ark-outcome-list"></ul>
+        <p class="ark-empty" id="ark-outcome-empty">まだ終了・失敗・中断した作業はありません。</p>
+        <details class="ark-drawer" id="ark-outcome-drawer" hidden>
+          <summary class="ark-drawer__summary">残りのOutcome</summary>
+          <ul class="ark-rows" id="ark-outcome-more"></ul>
+        </details>
+        <p class="ark-note" id="ark-outcome-artifacts"></p>
+      </section>
+
+      <!--
+        The delegation surface. It builds the typed payload a trusted boundary
+        would accept and says, in text and in the payload itself, that nothing
+        sent it. There is no authenticated Control boundary to send it to, and
+        Quest is not allowed to become one.
+      -->
+      <section class="ark-panel" id="ark-command" aria-labelledby="ark-command-heading">
+        <h2 id="ark-command-heading" class="ark-panel__heading">
+          <span class="ark-panel__label">AIへの依頼</span>
+          <span class="ark-panel__note">下書きのみ・送信されません</span>
+        </h2>
+        <p class="ark-command__notice" id="ark-command-submission"></p>
+        <label class="ark-command__label" for="ark-command-input">次にやってほしいこと</label>
+        <textarea
+          class="ark-command__input"
+          id="ark-command-input"
+          rows="3"
+          spellcheck="false"
+          placeholder="例: ARKのNeed You画面をスマホで見やすくして"
+        ></textarea>
+        <p class="ark-command__meta">
+          <span id="ark-command-count"></span>
+          <span id="ark-command-status"></span>
+        </p>
+        <p class="ark-command__buttons">
+          <button type="button" class="ark-button" data-action="build-command">
+            下書きを組み立てる
+          </button>
+          <!--
+            Permanently disabled, and labelled with the reason rather than with a
+            verb it cannot perform. A button that looks like it sends and does
+            nothing is the exact failure this panel exists to avoid.
+          -->
+          <button
+            type="button"
+            class="ark-button ark-button--blocked"
+            data-action="submit-command"
+            id="ark-command-submit"
+            disabled
+            aria-disabled="true"
+          >
+            送信不可（未接続）
+          </button>
+        </p>
+        <details class="ark-drawer">
+          <summary class="ark-drawer__summary">組み立てたTask / Delegation payload</summary>
+          <pre class="ark-command__preview" id="ark-command-preview"></pre>
+        </details>
+      </section>
+    </main>
+
+    <footer class="ark-footer">
+      <p>
+        127.0.0.1限定・read-only。表示しているのはsanitized eventのwhitelist fieldだけです。
+        この画面はstateを射影するだけで、AIへの実行指示は行いません。
+      </p>
+    </footer>
+
+    <template id="ark-need-template">
+      <li class="ark-need-item">
+        <p class="ark-need-item__head">
+          <span class="ark-need-item__level"></span>
+          <span class="ark-need-item__symbol" aria-hidden="true"></span>
+          <span class="ark-need-item__title"></span>
+          <span class="ark-need-item__state"></span>
+        </p>
+        <p class="ark-need-item__unconfirmed" hidden></p>
+        <p class="ark-need-item__reason"></p>
+        <dl class="ark-need-item__grid">
+          <div><dt>推奨</dt><dd class="ark-need-item__recommended"></dd></div>
+          <div><dt>選択肢</dt><dd class="ark-need-item__options"></dd></div>
+          <div><dt>放置した場合</dt><dd class="ark-need-item__inaction"></dd></div>
+          <div><dt>最終更新</dt><dd class="ark-need-item__updated"></dd></div>
+        </dl>
+        <details class="ark-drawer ark-drawer--inline">
+          <summary class="ark-drawer__summary">Evidence</summary>
+          <dl class="ark-evidence"></dl>
+          <p class="ark-need-item__artifacts"></p>
+        </details>
+      </li>
+    </template>
+
+    <!-- One row shape for Now, Next and Outcome: same facts, same order. -->
+    <template id="ark-row-template">
+      <li class="ark-row">
+        <p class="ark-row__head">
+          <span class="ark-row__tag"></span>
+          <span class="ark-row__symbol" aria-hidden="true"></span>
+          <span class="ark-row__name"></span>
+          <span class="ark-row__updated"></span>
+        </p>
+        <p class="ark-row__work"></p>
+        <p class="ark-row__note"></p>
+        <p class="ark-row__frozen" hidden></p>
+        <details class="ark-drawer ark-drawer--inline ark-row__evidence" hidden>
+          <summary class="ark-drawer__summary">Evidence</summary>
+          <dl class="ark-evidence"></dl>
+          <p class="ark-row__artifacts"></p>
+        </details>
+      </li>
+    </template>
+
+    <template id="ark-evidence-template">
+      <div class="ark-evidence__row">
+        <dt class="ark-evidence__label"></dt>
+        <dd class="ark-evidence__value"></dd>
+      </div>
+    </template>
+
+    <template id="ark-count-template">
+      <div class="ark-count">
+        <dt class="ark-count__label"></dt>
+        <dd class="ark-count__value"></dd>
+      </div>
+    </template>
+
+    <template id="ark-field-template">
+      <div class="ark-field">
+        <dt class="ark-field__label"></dt>
+        <dd class="ark-field__value"></dd>
+      </div>
+    </template>
+  </body>
+</html>
