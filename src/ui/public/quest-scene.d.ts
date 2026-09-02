@@ -122,7 +122,14 @@ export type SceneNode = {
 };
 
 export type SceneAttention = {
-  /** Worst state among the characters actually on the stage, or null. */
+  /**
+   * Worst state among the characters actually on the stage, or null.
+   *
+   * Fail-safe about the unobserved: while any drawn character is `unknown`, this
+   * is never a state that reads as ordinary work, so an office-wide cue built on
+   * it cannot advertise progress nobody saw. Only `error` and `awaiting_approval`
+   * - the two states that ask for a person - still win over it.
+   */
   readonly worst: WorstHidden | null;
   /** Worst state the world could not draw. Carried through untouched. */
   readonly hidden: WorstHidden | null;

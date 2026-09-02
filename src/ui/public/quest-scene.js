@@ -142,18 +142,84 @@ function attentionRank(state) {
   return index === -1 ? ATTENTION_ORDER.length : index;
 }
 
-/** The worst state among these actors, in the closed vocabulary, or null. */
+/**
+ * True when the world's ranking has nothing to say about this state.
+ *
+ * `unknown` is the case that matters - a status the producer sent and this
+ * screen could not interpret - and any state outside the closed vocabulary is
+ * treated the same way, because an unrecognised state is a state nobody
+ * observed.
+ */
+function isUnobserved(state) {
+  return ATTENTION_ORDER.indexOf(state) === -1;
+}
+
+/**
+ * The attention overlay one state adds on top of its `state` overlay.
+ *
+ * One table rather than three branches, because the stage summary below needs
+ * the same answer: which of these three states asks for a human, and how loudly
+ * relative to the others, is already settled once by `OVERLAY_KINDS`.
+ */
+const ATTENTION_OVERLAY_BY_STATE = Object.freeze({
+  error: 'alert',
+  awaiting_approval: 'attention',
+  unknown: 'unknown',
+});
+
+function attentionOverlayKind(state) {
+  return Object.prototype.hasOwnProperty.call(ATTENTION_OVERLAY_BY_STATE, state)
+    ? ATTENTION_OVERLAY_BY_STATE[state]
+    : null;
+}
+
+/**
+ * True for the states that ask for a person: something failed, or somebody must
+ * approve. Read off `OVERLAY_KINDS`, where they are the two kinds already ranked
+ * louder than "nothing is being observed", so this is not a second ordering.
+ */
+function demandsHuman(state) {
+  const kind = attentionOverlayKind(state);
+  return kind !== null && OVERLAY_KINDS.indexOf(kind) < OVERLAY_KINDS.indexOf('unknown');
+}
+
+function summaryOf(actor) {
+  return { state: actor.state, code: actor.code, symbol: actor.symbol };
+}
+
+/**
+ * The worst state among these actors, in the closed vocabulary, or null.
+ *
+ * An unobserved colleague is not the bottom of the ranking, it is a hole in it:
+ * while one desk on the stage is `unknown`, "the worst thing here is WORKING" is
+ * a claim the stream never supported, and a renderer that turned this aggregate
+ * into an office-wide cue would be advertising progress nobody saw. So an
+ * unobserved actor wins over anything that reads as ordinary work, and loses
+ * only to the two states that ask for a person - reporting `unknown` over an
+ * `error` would hide the failure, which is the opposite mistake.
+ *
+ * Per-node `attention_rank` is left exactly as the world ranks it: a single node
+ * still carries its own `unknown` pose and overlay, so it cannot look busy. Only
+ * this stage-wide reduction, which the world does not make, needs the guard.
+ */
 function worstOf(actors) {
   let worst = null;
-  let rank = ATTENTION_ORDER.length + 1;
+  let rank = ATTENTION_ORDER.length;
+  let unobserved = null;
   for (const actor of actors) {
+    if (isUnobserved(actor.state)) {
+      if (unobserved === null) unobserved = actor;
+      continue;
+    }
     const candidate = attentionRank(actor.state);
     if (candidate < rank) {
       rank = candidate;
-      worst = { state: actor.state, code: actor.code, symbol: actor.symbol };
+      worst = summaryOf(actor);
     }
   }
-  return worst;
+  if (unobserved === null) return worst;
+  if (worst !== null && demandsHuman(worst.state)) return worst;
+  return summaryOf(unobserved);
 }
 
 function text(value) {
@@ -209,11 +275,10 @@ function sprite(id, pose, appearance) {
  * a failure means - and so the meaning cannot drift from `quest-view.js`.
  */
 function attentionOverlays(actor) {
+  const kind = attentionOverlayKind(actor.state);
+  if (kind === null) return [];
   const shared = { code: actor.code, symbol: actor.symbol, text: text(actor.state_label?.text), rect: actor.marker };
-  if (actor.state === 'error') return [overlay('alert', shared)];
-  if (actor.state === 'awaiting_approval') return [overlay('attention', shared)];
-  if (actor.state === 'unknown') return [overlay('unknown', shared)];
-  return [];
+  return [overlay(kind, shared)];
 }
 
 function actorNode(actor, index) {
@@ -452,7 +517,10 @@ export function buildScene(world) {
     hud: source.hud ?? null,
     overflow: source.overflow ?? null,
     attention: {
-      /** The worst state actually on the stage, or null when nothing is drawn. */
+      /**
+       * The worst state actually on the stage, or null when nothing is drawn.
+       * Fail-safe about `unknown`: see `worstOf`.
+       */
       worst: worstOf(drawn),
       /** The worst state the world had to leave out. Straight from the world. */
       hidden: source.overflow?.hidden_state ?? null,

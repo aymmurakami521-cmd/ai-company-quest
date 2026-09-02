@@ -75,9 +75,18 @@ const RUNTIME: Record<string, string> = {
  * Every agent starts for real and is then told what it is doing, which is the
  * order the stream actually reports - so the state under test is one the event
  * contract can produce rather than one the fixture asserted into place.
+ *
+ * `status` is either one status for everybody or one per agent, because a real
+ * office is rarely all in the same state - and the mixed case is where the plan
+ * has to decide what the office as a whole is doing.
  */
-function grouped(agents: readonly string[], status: string | null = null): ClientState {
+function grouped(
+  agents: readonly string[],
+  status: string | Readonly<Record<string, string>> | null = null,
+): ClientState {
   const store = new NamespaceStore({ namespace: 'live' });
+  const statusFor = (agent: string): string | null =>
+    status === null ? null : typeof status === 'string' ? status : (status[agent] ?? null);
   agents.forEach((agent, index) => {
     const base: Partial<SanitizedEvent> = {
       agent_id: agent,
@@ -85,12 +94,13 @@ function grouped(agents: readonly string[], status: string | null = null): Clien
       ts: new Date(Date.UTC(2026, 0, 1, 0, 0, 0, index)).toISOString(),
     };
     store.ingestObject(makeEvent({ ...base, event_type: 'agent_start', status: 'active' }));
-    if (status !== null) {
+    const declared = statusFor(agent);
+    if (declared !== null) {
       store.ingestObject(
         makeEvent({
           ...base,
           event_type: 'agent_status',
-          status,
+          status: declared,
           ts: new Date(Date.UTC(2026, 0, 1, 0, 1, 0, index)).toISOString(),
         }),
       );
@@ -415,6 +425,89 @@ test('the attention ranking is the world`s own, not a second one', () => {
   const worst = scene.attention.worst;
   assert.notEqual(worst, null, 'a failing office reports its worst state');
   assert.equal(worst!.state, 'error');
+});
+
+/** The office where one colleague is at work and one is not being observed. */
+function mixedOffice(): Scene {
+  return buildScene(
+    world(grouped(['orch-1', 'impl-1'], { 'orch-1': 'working', 'impl-1': 'frobnicating' })),
+  );
+}
+
+test('one unobserved colleague keeps the stage summary off `working`', () => {
+  const scene = mixedOffice();
+  const actors = nodesOfKind(scene, 'actor');
+  const working = actors.filter((node) => node.state === 'working');
+  const unobserved = actors.filter((node) => node.state === 'unknown');
+  assert.ok(working.length > 0, 'somebody really is at work');
+  assert.ok(unobserved.length > 0, 'and somebody really is unobserved');
+
+  // The node itself already tells the truth twice over: the pose it is drawn in
+  // and an overlay that says so in the screen`s own words.
+  for (const node of unobserved) {
+    assert.equal(node.sprite?.pose, 'unknown');
+    assert.ok(node.overlays.some((item) => item.kind === 'unknown'));
+  }
+
+  // And the stage-wide summary may not round that away. A renderer that turns
+  // `attention.worst` into one office-wide cue would otherwise advertise
+  // progress while a desk on the same stage is explicitly unobserved.
+  const worst = scene.attention.worst;
+  assert.notEqual(worst, null, 'the stage does report a worst state');
+  assert.equal(worst!.state, 'unknown', 'the unobserved desk wins over the working one');
+  assert.notEqual(worst!.state, 'working');
+  assert.equal(POSE_BY_STATE[worst!.state as keyof typeof POSE_BY_STATE], 'unknown');
+
+  // Carried from the desk, not invented here: the code and symbol are the ones
+  // `quest-view.js` already prints as text.
+  const source = unobserved[0]!.parts as { code: string; symbol: string };
+  assert.equal(worst!.code, source.code);
+  assert.equal(worst!.symbol, source.symbol);
+
+  assert.deepEqual(mixedOffice(), scene, 'and the guard is deterministic');
+});
+
+test('being unobserved never hides a failure or an approval behind it', () => {
+  // The opposite mistake to the one above: reporting 状態不明 over a failure
+  // would let a broken desk sit behind a calmer-looking summary.
+  const failing = buildScene(
+    world(
+      grouped(['orch-1', 'impl-1', 'ver-1'], {
+        'orch-1': 'working',
+        'impl-1': 'frobnicating',
+        'ver-1': 'error',
+      }),
+    ),
+  );
+  assert.equal(failing.attention.worst?.state, 'error');
+
+  const asking = buildScene(
+    world(
+      grouped(['orch-1', 'impl-1', 'ver-1'], {
+        'orch-1': 'working',
+        'impl-1': 'frobnicating',
+        'ver-1': 'approval',
+      }),
+    ),
+  );
+  assert.equal(asking.attention.worst?.state, 'awaiting_approval');
+
+  // With nobody unobserved the summary is exactly the world`s ranking again, so
+  // the guard cost the ordinary case nothing.
+  const observed = buildScene(
+    world(grouped(['orch-1', 'impl-1'], { 'orch-1': 'working', 'impl-1': 'idle' })),
+  );
+  assert.equal(observed.attention.worst?.state, 'working');
+});
+
+test('a stage whose desks are all unobserved says so, and says nothing else', () => {
+  // Every desk `unknown` - the disconnected office - must not fall back to the
+  // last ranked state it happened to see.
+  const scene = buildScene(world(setConnectionPhase(grouped(['orch-1', 'impl-1']), 'error')));
+  assert.equal(scene.attention.worst?.state, 'unknown');
+  for (const node of nodesOfKind(scene, 'actor')) {
+    assert.notEqual(node.sprite?.pose, 'desk_work');
+  }
 });
 
 // ------------------------------------------------------- layout policy ---
