@@ -31,6 +31,8 @@ import {
   ARK_OUTCOME_RESULTS,
   ARK_RUNTIME_CODES,
   ARK_SUMMARY_ROWS,
+  arkPhaseOnOpen,
+  arkRecovered,
   buildCommandDraft,
   outcomeLabel,
   runtimeLabel,
@@ -131,7 +133,12 @@ function connect(namespace) {
 
   stream.addEventListener('open', () => {
     if (source !== stream) return;
-    setState(setConnectionPhase(state, 'open', Date.now()));
+    // Not `open` unconditionally: on an automatic reconnect this fires before the
+    // queued recovery frames, and taking it at face value would hand the desks
+    // observed before the drop back as confirmed work. `arkPhaseOnOpen` holds an
+    // already-populated console at `reconnecting` until `handleFrame` below sees
+    // the frame that actually re-establishes what is current.
+    setState(setConnectionPhase(state, arkPhaseOnOpen(state), Date.now()));
   });
 
   stream.addEventListener('error', () => {
@@ -161,7 +168,13 @@ function handleFrame(kind, raw) {
     setState(applyFrame(state, { kind: 'unparseable', at_ms: Date.now() }));
     return;
   }
-  setState(applyFrame(state, { kind, payload, at_ms: Date.now() }));
+  const at = Date.now();
+  const applied = applyFrame(state, { kind, payload, at_ms: at });
+  // The one place the reconnect freeze is lifted, and only by the frame that
+  // re-established the office - after it has been applied, never before.
+  setState(
+    arkRecovered(state, applied, kind) ? setConnectionPhase(applied, 'open', at) : applied,
+  );
 }
 
 function text(node, selector, value) {

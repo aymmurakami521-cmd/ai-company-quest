@@ -11,7 +11,10 @@
  *    advisory, and neither disappears because the stream went quiet.
  * 2. **Unknown is never work.** While nothing is confirming the office, Now
  *    reports 状態不明 for everybody rather than leaving rows that read as still
- *    executing - and it still says what was last observed, separately.
+ *    executing - and it still says what was last observed, separately. A
+ *    reopened socket does not count as confirming it; a recovery frame does.
+ * 2b. **Completion is the desk's own claim.** A generic `session_end` never
+ *    manufactures one, and never erases one the desk already made.
  * 3. **A gap in the contract is reported, not filled.** Next carries no invented
  *    plan and Outcome carries no invented artifact.
  * 4. **The command surface cannot send.** It builds a payload, says there is
@@ -45,6 +48,8 @@ import {
   ARK_SUBMISSION,
   ARK_UNCONFIRMED_BANNER_CODES,
   NOT_IN_CONTRACT,
+  arkPhaseOnOpen,
+  arkRecovered,
   buildCommandDraft,
   outcomeLabel,
   runtimeLabel,
@@ -315,6 +320,85 @@ test('the freeze lifts when the recovery snapshot actually lands, and not before
   assert.equal(now.rows[0]?.runtime, 'EXECUTING');
 });
 
+test('a socket that reopens over a populated office has re-established nothing', () => {
+  // The reconnect the browser performs by itself: `error` drops the office to
+  // 状態不明, then `open` arrives *before* the queued replay/gap/snapshot frames.
+  // Taking that `open` at face value is what handed every desk back as confirmed
+  // 実行中 for the window in between.
+  const dropped = disconnected(office({ ann: 'running', bob: 'planning' }));
+  const reopened = setConnectionPhase(dropped, arkPhaseOnOpen(dropped), 3000);
+
+  assert.equal(arkPhaseOnOpen(dropped), 'reconnecting', 'the transport is up; the office is not');
+  const now = selectNow(reopened);
+  assert.equal(now.confirmed, false);
+  assert.equal(now.counts.EXECUTING, 0, 'a bare open does not refill 実行中');
+  assert.equal(now.counts.UNKNOWN, 2);
+  assert.equal(selectArk(reopened).banner.code, 'RECONNECTING', 'and the banner says so');
+});
+
+test('a stream that stalls after opening stays frozen instead of ageing into work', () => {
+  // The half of the failure a delayed recovery makes permanent: nothing at all
+  // follows the `open`. There is no clock in this projection, so "nothing since"
+  // is the same state however long it lasts - which is the point.
+  const dropped = disconnected(office({ ann: 'running' }));
+  const stalled = setConnectionPhase(dropped, arkPhaseOnOpen(dropped), 3000);
+
+  const ark = selectArk(stalled);
+  assert.equal(ark.now.confirmed, false);
+  assert.ok(ARK_UNCONFIRMED_BANNER_CODES.includes(ark.banner.code));
+  for (const row of ark.now.rows) assert.equal(row.runtime, 'UNKNOWN');
+  // And the reason is on screen rather than left to be inferred from a blank panel.
+  assert.deepEqual(
+    ark.attention.items.map((item) => item.reason_code),
+    ['STREAM_UNCONFIRMED'],
+  );
+});
+
+test('only a frame that re-establishes the office may lift the reconnect freeze', () => {
+  const dropped = disconnected(office({ ann: 'running' }));
+  const reopened = setConnectionPhase(dropped, arkPhaseOnOpen(dropped), 3000);
+
+  // Both frames a reconnect can actually end with, and nothing else.
+  const start = applyFrame(reopened, { kind: 'replay_start', at_ms: 3100 });
+  assert.equal(arkRecovered(reopened, start, 'replay_start'), false, 'a replay is not its end');
+  const gap = applyFrame(reopened, { kind: 'stream_gap', payload: { reason: 'evicted' }, at_ms: 3100 });
+  assert.equal(arkRecovered(reopened, gap, 'stream_gap'), false, 'a gap is the opposite of one');
+  const ordinary = applyFrame(reopened, { kind: 'replay_end', payload: { count: 0 }, at_ms: 3100 });
+  assert.equal(arkRecovered(reopened, ordinary, 'replay_end'), true, 'a served replay is');
+
+  const snapshot = applyFrame(reopened, recovery({ ann: 'running' }));
+  assert.equal(arkRecovered(reopened, snapshot, 'snapshot'), true, 'and so is a snapshot');
+  // A frame the fold refused established nothing, whatever it was called.
+  const foreign = applyFrame(reopened, {
+    kind: 'snapshot',
+    payload: { namespace: 'demo', halted: false, last_ingest_seq: 0, state: {} },
+    at_ms: 3100,
+  });
+  assert.equal(arkRecovered(reopened, foreign, 'snapshot'), false);
+  // Nothing to lift when the console was never frozen by a reconnect.
+  const live = office({ ann: 'running' });
+  assert.equal(arkRecovered(live, applyFrame(live, recovery({ ann: 'running' })), 'snapshot'), false);
+});
+
+test('the office comes back the moment the recovery snapshot re-states it', () => {
+  const dropped = disconnected(office({ ann: 'running' }));
+  const reopened = setConnectionPhase(dropped, arkPhaseOnOpen(dropped), 3000);
+  assert.equal(selectNow(reopened).confirmed, false, 'while the reconnect is unconfirmed');
+
+  const applied = applyFrame(reopened, recovery({ ann: 'running' }));
+  const recovered = setConnectionPhase(applied, 'open', 3200);
+  const now = selectNow(recovered);
+  assert.equal(now.confirmed, true, 'the server has re-stated the whole office');
+  assert.equal(now.counts.EXECUTING, 1);
+  assert.equal(now.rows[0]?.runtime, 'EXECUTING');
+});
+
+test('a first connection is not a recovery, and is not frozen as one', () => {
+  // `open` over an empty office has no earlier observation to misreport, so it
+  // is taken as it comes - the same reason `LOADING` is not a frozen state.
+  assert.equal(arkPhaseOnOpen(createClientState('live')), 'open');
+});
+
 test('Now reports the bucket the contract cannot fill instead of guessing it', () => {
   const now = selectNow(office({ ann: 'running' }));
   assert.equal(now.external_wait.available, false);
@@ -420,6 +504,64 @@ test('a generic session_end is never read as somebody having completed their wor
   assert.equal(byName.get('bob')?.follow_up, null, 'a completed one leaves nothing hanging');
   assert.equal(selectOutcome(state).counts.COMPLETED, 1);
   assert.equal(selectOutcome(state).counts.STOPPED, 2);
+});
+
+test('a desk that reported its own stop stays 完了 when the session then ends', () => {
+  // The ordinary main-agent lifecycle: `Stop`, then `SessionEnd`. Both fold into
+  // the same actor, so the generic session frame overwrites the explicit
+  // `agent_stop` - and reading only the newest event turned a genuinely finished
+  // orchestrator into 中断 with a follow-up line saying it never reported
+  // finishing. The stop is still in the log, and that is where it is found.
+  const state = stateOf([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+    { event_type: 'session_end', agent_id: 'ann', status: 'running' },
+  ]);
+  const row = selectOutcome(state).rows[0];
+
+  assert.ok(row !== undefined);
+  assert.equal(
+    state.actors[row.actor_key ?? '']?.last_event_type,
+    'session_end',
+    'the newest event on this actor is the generic one',
+  );
+  assert.equal(row.result, 'COMPLETED', 'and the desk still reported finishing, before it');
+  assert.equal(row.follow_up, null, 'so nothing is claimed to be left open');
+  assert.equal(selectOutcome(state).counts.STOPPED, 0);
+});
+
+test('a session_end after somebody else stopped confers nothing on the rest', () => {
+  // bob's stop is bob's. ann only ever started, and the session ending around it
+  // is not ann finishing anything - not even with a stop report sitting in the
+  // same log, from a different desk.
+  const state = stateOf([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    { event_type: 'agent_start', agent_id: 'bob', status: 'running' },
+    { event_type: 'agent_stop', agent_id: 'bob', status: 'completed' },
+    { event_type: 'session_end', agent_id: 'bob', status: 'running' },
+  ]);
+  const byName = new Map(selectOutcome(state).rows.map((row) => [row.display_name, row]));
+
+  assert.equal(byName.get('ann')?.result, 'STOPPED', 'ended by the session, not by itself');
+  assert.ok((byName.get('ann')?.follow_up ?? '').length > 0, 'and the open loop is named');
+  assert.equal(byName.get('bob')?.result, 'COMPLETED');
+  assert.equal(selectOutcome(state).counts.COMPLETED, 1);
+});
+
+test('a stop a later start superseded is not evidence about the run after it', () => {
+  // The desk finished one run and began another; the session then ended around
+  // the second. Its own latest report is the `agent_start`, so the earlier stop
+  // decides nothing here - completion evidence has to be about *this* work.
+  const state = stateOf([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    { event_type: 'session_end', agent_id: 'zz', status: 'running' },
+  ]);
+  const byName = new Map(selectOutcome(state).rows.map((row) => [row.display_name, row]));
+
+  assert.equal(byName.get('ann')?.result, 'STOPPED');
+  assert.ok((byName.get('ann')?.follow_up ?? '').length > 0);
 });
 
 test('a finished-sounding status on a non-terminal event is not a completion either', () => {

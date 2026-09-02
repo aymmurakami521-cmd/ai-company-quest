@@ -7,7 +7,9 @@
  * 1. **Need You is on the screen and is loud.** It renders first, it carries a
  *    word for its level, and the count is repeated in the top bar.
  * 2. **A disconnection empties 実行中.** No row may keep reading as work while
- *    nothing is confirming it, and the last observation is shown as such.
+ *    nothing is confirming it, and the last observation is shown as such. A
+ *    socket that merely reopens is not yet something confirming it: the freeze
+ *    stands until a recovery frame re-states the office.
  * 3. **The console stays compact.** Only the first `ARK_SUMMARY_ROWS` rows are in
  *    a panel's main list; the rest is behind a drawer, so a large office does
  *    not turn the screen back into a long diagnostic page.
@@ -27,7 +29,7 @@ import type { SanitizedEvent } from '../src/domain/event.ts';
 import { UI_ASSET_PATHS, uiAsset } from '../src/ui/assets.ts';
 import { makeEvent } from './helpers.ts';
 import type { FakeElement } from './fakeDom.ts';
-import { currentStream, installFakeArkDom } from './fakeArkDom.ts';
+import { FakeEventSource, currentStream, installFakeArkDom } from './fakeArkDom.ts';
 import { ARK_SUMMARY_ROWS } from '../src/ui/public/quest-ark.js';
 
 const { document: fakeDocument } = installFakeArkDom();
@@ -86,6 +88,19 @@ function show(statuses: Record<string, string>): void {
 /** Stops the stream from confirming anything, without changing what it said. */
 function disconnect(): void {
   currentStream().emit('error', {});
+}
+
+/**
+ * The reconnect `EventSource` performs on its own, in the order a browser
+ * delivers it: the socket drops while still retrying, and then reports `open` -
+ * before any of the replay, gap or snapshot frames the server queues behind it.
+ */
+function reconnect(): void {
+  const stream = currentStream();
+  stream.readyState = FakeEventSource.CONNECTING;
+  stream.emit('error', {});
+  stream.readyState = FakeEventSource.OPEN;
+  stream.emit('open', {});
 }
 
 function rowsIn(id: string): FakeElement[] {
@@ -202,6 +217,50 @@ test('a replay in progress is not rendered as a confirmed office either', () => 
   assert.equal(fakeDocument.element('ark-banner').dataset.code, 'REPLAYING');
   assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
   assert.deepEqual(tags('ark-now-list'), ['UNKNOWN']);
+});
+
+test('a reconnected socket is not a live office until a recovery frame says so', () => {
+  show({ ann: 'running', bob: 'running' });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '2');
+
+  // The browser's own reconnect, in the order it actually happens: `open` is
+  // delivered before the queued replay/gap/snapshot. Without the console's own
+  // gate, this one line handed both desks back as confirmed 実行中 - on nothing
+  // more than the transport being up.
+  reconnect();
+
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'RECONNECTING');
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+  assert.equal(countFor('ark-now-counts', 'UNKNOWN'), '2');
+  assert.deepEqual(tags('ark-now-list'), ['UNKNOWN', 'UNKNOWN']);
+  for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'false');
+  // Nothing follows the open - the stalled case, which is the one a freeze that
+  // lifts on `open` alone would leave reading as work indefinitely.
+  assert.equal(fakeDocument.element('ark-now-unconfirmed').hidden, false);
+  assert.ok(rowsIn('ark-need-list').some((item) => item.dataset.reason === 'STREAM_UNCONFIRMED'));
+
+  // The snapshot re-states the office, and that is what hands it back.
+  currentStream().emit('snapshot', snapshot([
+    { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+    { event_type: 'agent_start', agent_id: 'bob', status: 'running' },
+  ]));
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'CONNECTED');
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '2', 'and only then');
+  for (const row of rowsIn('ark-now-list')) assert.equal(row.dataset.confirmed, 'true');
+});
+
+test('a replay served over a reconnect confirms the office at its end, not its start', () => {
+  show({ ann: 'running' });
+  reconnect();
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0');
+
+  currentStream().emit('replay_start', { count: 0 });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '0', 'a replay beginning establishes nothing');
+  assert.deepEqual(tags('ark-now-list'), ['UNKNOWN']);
+
+  currentStream().emit('replay_end', { count: 0 });
+  assert.equal(countFor('ark-now-counts', 'EXECUTING'), '1', 'the served replay is the recovery');
+  assert.equal(fakeDocument.element('ark-banner').dataset.code, 'CONNECTED');
 });
 
 test('a disconnection is one Need You item, and does not hide the approval wait', () => {

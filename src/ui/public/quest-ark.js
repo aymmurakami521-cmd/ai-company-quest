@@ -13,11 +13,18 @@
  * value, and it never lets an unconfirmed state read as work in progress
  * (`docs/event-contract.md`, `docs/org-snapshot-design.md` §2.3).
  *
- * That rule is stricter here than on the office floor in exactly two places, and
- * both are about refusing to claim more than the stream supports rather than
- * classifying anything anew: `ARK_UNCONFIRMED_BANNER_CODES` freezes the console
- * through a recovery as well as a disconnection, and `ACTOR_COMPLETION_EVENTS`
- * refuses to read a generic `session_end` as somebody having finished.
+ * That rule is stricter here than on the office floor in three places, and every
+ * one of them is about refusing to claim more than the stream supports rather
+ * than classifying anything anew: `ARK_UNCONFIRMED_BANNER_CODES` freezes the
+ * console through a recovery as well as a disconnection, `arkPhaseOnOpen` keeps
+ * that freeze standing until a recovery frame has actually re-established what is
+ * current, and `reportedOwnStop` refuses to read a generic `session_end` as
+ * somebody having finished.
+ *
+ * `arkPhaseOnOpen` / `arkRecovered` are the only two functions here that are not
+ * selectors, and they still hold the boundary: both are pure, both speak only the
+ * connection vocabulary `quest-view.js` already defines, and neither is reachable
+ * from anything that could write.
  *
  * The command surface is a draft builder and nothing else. It structures what an
  * owner typed into a typed Task/Delegation payload and reports that there is no
@@ -105,6 +112,57 @@ export const ARK_UNCONFIRMED_BANNER_CODES = Object.freeze([
   'STREAM_GAP',
   'REPLAYING',
 ]);
+
+/**
+ * The control frames that re-establish what is current after a socket opens.
+ *
+ * Exactly the two the stream contract can finish an open with: `server.ts` writes
+ * a `snapshot` on a fresh connection and after every gap, and a `replay_end`
+ * once a valid `Last-Event-ID` replay has been served. Nothing else on the wire
+ * amounts to the server saying "what you are now holding is current", which is
+ * the only claim that may lift the freeze below.
+ */
+export const ARK_RECOVERY_FRAMES = Object.freeze(['snapshot', 'replay_end']);
+
+/**
+ * The connection phase the console may claim when the socket reports `open`.
+ *
+ * `open` is the transport saying the socket came up, which is a different claim
+ * from the office being current - and on an automatic `EventSource` reconnect the
+ * two are far apart: `open` is delivered before the queued `replay_start` /
+ * `stream_gap` / `snapshot`, so taking it at face value hands every desk observed
+ * before the drop straight back as confirmed 実行中 for the window in between,
+ * and indefinitely if the stream stalls after opening. Over an office that
+ * already holds desks the console therefore stays `reconnecting` until
+ * `arkRecovered` sees one of `ARK_RECOVERY_FRAMES`.
+ *
+ * Deliberately the existing phase vocabulary rather than a rule of its own:
+ * `RECONNECTING` is already an `ARK_UNCONFIRMED_BANNER_CODES` member, so the
+ * freeze this produces is the freeze the console already applies, the banner
+ * already has wording for it, and Need You already explains it. No second state
+ * machine, and nothing about any desk's own state is decided here.
+ *
+ * An office with no desks yet takes `open` as it comes, for the same reason
+ * `LOADING` is not a frozen state: it is rebuilding from empty, so there is no
+ * earlier observation to mistake for a current one.
+ */
+export function arkPhaseOnOpen(state) {
+  return Object.keys(state.actors).length === 0 ? 'open' : 'reconnecting';
+}
+
+/**
+ * Whether this frame is the authoritative recovery the console has been holding
+ * `reconnecting` for.
+ *
+ * Only ever lifts a freeze, never starts one, and only for a frame the fold
+ * actually accepted - a foreign-namespace payload is refused by `applyFrame` and
+ * counted, and a frame that established nothing may not end a recovery.
+ */
+export function arkRecovered(before, after, frameKind) {
+  if (before.connection.phase !== 'reconnecting') return false;
+  if (!ARK_RECOVERY_FRAMES.includes(frameKind)) return false;
+  return after.counters.foreign === before.counters.foreign;
+}
 
 const RUNTIME_BY_STATE = Object.freeze({
   error: 'BLOCKED',
@@ -557,10 +615,54 @@ export function outcomeLabel(result) {
  * which of the two it was.
  *
  * Reading `ended` as 完了 there would be the screen inventing a success. So
- * completion has to be attributable to the desk itself: its own last event is
- * its own stop report.
+ * completion has to be attributable to the desk itself, through a stop report it
+ * made about itself.
  */
 const ACTOR_COMPLETION_EVENTS = Object.freeze(['agent_stop']);
+
+/**
+ * The events that are a desk speaking about its own activity at all.
+ *
+ * Only these two decide the question below, and everything else is stepped over:
+ * a `tool_use` or an `agent_status` describes a moment inside the work rather
+ * than the start or the end of it, and a `session_end` is the run stopping
+ * rather than this desk reporting anything.
+ */
+const ACTOR_LIFECYCLE_EVENTS = Object.freeze(['agent_start', 'agent_stop']);
+
+/**
+ * Whether this desk's own latest report about itself was a stop.
+ *
+ * `last_event_type` alone cannot answer this, and the ordinary main-agent
+ * lifecycle is why: `Stop` then `SessionEnd` fold into the *same* actor, so the
+ * generic session frame overwrites the explicit `agent_stop` that came before it
+ * and a genuinely finished orchestrator would read as 中断 with a follow-up line
+ * claiming it never reported finishing. The fold keeps no per-actor history, but
+ * the client already retains the last `MAX_LOG_ENTRIES` events it applied with
+ * the `actor_key` each one belonged to - so the stop is still there to be found,
+ * in the read model this console already reads and nowhere else.
+ *
+ * Read newest-first and stopping at the first lifecycle entry, so it is the
+ * desk's *latest* report that decides: a stop that a later `agent_start`
+ * superseded is a finished earlier run, not evidence about this one.
+ *
+ * Bounded, and honest about that: past that window - and on a state rebuilt from
+ * a `snapshot`, which carries the server's fold but no log - only
+ * `last_event_type` is left and the reading falls back to it. That direction
+ * under-claims a completion, which is the safe half; the other one, a generic
+ * `session_end` manufacturing a success, is what may never happen.
+ */
+function reportedOwnStop(state, actorKey, actor) {
+  const log = Array.isArray(state.log) ? state.log : [];
+  if (typeof actorKey === 'string') {
+    for (const entry of log) {
+      if (entry.actor_key !== actorKey) continue;
+      if (!ACTOR_LIFECYCLE_EVENTS.includes(entry.event_type)) continue;
+      return ACTOR_COMPLETION_EVENTS.includes(entry.event_type);
+    }
+  }
+  return actor !== null && ACTOR_COMPLETION_EVENTS.includes(actor.last_event_type);
+}
 
 /**
  * Which outcome a desk has reached, or null while it has not reached one.
@@ -576,14 +678,15 @@ const ACTOR_COMPLETION_EVENTS = Object.freeze(['agent_stop']);
  * - a desk whose latest event merely carried a finished-sounding status.
  *
  * Narrower than it looks from the outside: in the streams this reads, a
- * completion is an `agent_stop`, and those still land on 完了.
+ * completion is an `agent_stop`, and those still land on 完了 - including the
+ * main orchestrator whose own stop is followed by the `session_end` that closes
+ * the run, which `reportedOwnStop` finds rather than losing to the newer frame.
  */
-function outcomeFor(desk, actor, session) {
+function outcomeFor(state, desk, actor, session) {
   const observed = desk.last_known_visual.state;
   if (observed === 'error') return 'FAILED';
   if (observed === 'ended') {
-    const reported = actor !== null && ACTOR_COMPLETION_EVENTS.includes(actor.last_event_type);
-    return reported ? 'COMPLETED' : 'STOPPED';
+    return reportedOwnStop(state, desk.actor_key, actor) ? 'COMPLETED' : 'STOPPED';
   }
   if (session !== null && session.ended_at !== null && session.ended_at !== undefined) {
     return 'STOPPED';
@@ -604,7 +707,7 @@ export function selectOutcome(state) {
   for (const desk of desks) {
     const session = ownProp(state.sessions, desk.session_id) ?? null;
     const actor = desk.actor_key === null ? null : (ownProp(state.actors, desk.actor_key) ?? null);
-    const result = outcomeFor(desk, actor, session);
+    const result = outcomeFor(state, desk, actor, session);
     if (result === null) continue;
     const now = claim(desk, frozen);
     rows.push({

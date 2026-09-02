@@ -5,7 +5,14 @@
  * contract is declared here and exercised by `test/ui-ark.test.ts`.
  */
 
-import type { ActorVisual, Banner, BannerCode, ClientState, Header } from './quest-view.js';
+import type {
+  ActorVisual,
+  Banner,
+  BannerCode,
+  ClientState,
+  ConnectionPhase,
+  Header,
+} from './quest-view.js';
 
 /** How loudly an item asks for a person. `required` is an explicit request. */
 export type ArkAttentionLevel = 'required' | 'advised';
@@ -210,6 +217,8 @@ export declare const ARK_OUTCOME_RESULTS: readonly ArkOutcomeResult[];
 export declare const ARK_SUMMARY_ROWS: number;
 /** Banner codes under which no row on this console is a live observation. */
 export declare const ARK_UNCONFIRMED_BANNER_CODES: readonly BannerCode[];
+/** The control frames that re-establish what is current after a socket opens. */
+export declare const ARK_RECOVERY_FRAMES: readonly string[];
 export declare const ARK_EXTERNAL_WAIT_NOTE: string;
 export declare const ARK_NEXT_FIELDS: readonly ArkNextField[];
 export declare const ARK_NEXT_NOTE: string;
@@ -222,6 +231,19 @@ export declare const ARK_SUBMISSION: {
   readonly code: 'NOT_CONNECTED';
   readonly message: string;
 };
+
+/**
+ * The phase the console may claim when the socket reports `open`: `reconnecting`
+ * over an office that already holds desks, so a reconnect stays unconfirmed
+ * until a recovery frame lands, and `open` when it is rebuilding from empty.
+ */
+export declare function arkPhaseOnOpen(state: ClientState): ConnectionPhase;
+/** Whether this applied frame is the recovery that may lift that freeze. */
+export declare function arkRecovered(
+  before: ClientState,
+  after: ClientState,
+  frameKind: string,
+): boolean;
 
 export declare function runtimeLabel(code: string): string;
 export declare function outcomeLabel(result: string): string;
