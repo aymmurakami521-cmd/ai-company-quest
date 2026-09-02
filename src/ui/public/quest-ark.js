@@ -19,7 +19,9 @@
  * console through a recovery as well as a disconnection, `arkPhaseOnOpen` keeps
  * that freeze standing until a recovery frame has actually re-established what is
  * current, and `reportedOwnStop` refuses to read a generic `session_end` as
- * somebody having finished.
+ * somebody having finished - out of the stretch of the log `trustedLog` can
+ * still vouch for, so an observation a recovery superseded proves nothing about
+ * what replaced it.
  *
  * `arkPhaseOnOpen` / `arkRecovered` are the only two functions here that are not
  * selectors, and they still hold the boundary: both are pure, both speak only the
@@ -631,6 +633,41 @@ const ACTOR_COMPLETION_EVENTS = Object.freeze(['agent_stop']);
 const ACTOR_LIFECYCLE_EVENTS = Object.freeze(['agent_start', 'agent_stop']);
 
 /**
+ * The stretch of the log that is still evidence about the office as it stands.
+ *
+ * The log outlives the state it described. `applySnapshot` replaces the actors
+ * wholesale with the server's fold and leaves `state.log` untouched, so after a
+ * recovery the client is holding entries from before the gap - observations of
+ * runs the server has since carried further, and in some cases finished, begun
+ * again and ended. Reading a stop out of that stretch would be the console
+ * manufacturing a completion out of a report the snapshot has already
+ * superseded: a desk that stopped, started again unseen and was then ended by a
+ * generic `session_end` would come back as 完了.
+ *
+ * The boundary is in the data rather than in any bookkeeping of this screen's
+ * own. `NamespaceStore.accept` spends exactly one `ingest_seq` per accepted
+ * event, so the frames a client actually applied are consecutive, and whatever a
+ * snapshot filled in on its behalf is a jump. The window is therefore the run of
+ * entries that reaches `last_ingest_seq` without a break - the events observed
+ * since the last snapshot, and the whole log when nothing was ever missed.
+ *
+ * Fail-closed at both ends: an office whose current position was established by
+ * a snapshot has no entry at `last_ingest_seq`, so the window is empty and
+ * nothing below may cite the log at all.
+ */
+function trustedLog(state) {
+  const log = Array.isArray(state.log) ? state.log : [];
+  const trusted = [];
+  let expected = state.last_ingest_seq;
+  for (const entry of log) {
+    if (entry.ingest_seq !== expected) break;
+    trusted.push(entry);
+    expected -= 1;
+  }
+  return trusted;
+}
+
+/**
  * Whether this desk's own latest report about itself was a stop.
  *
  * `last_event_type` alone cannot answer this, and the ordinary main-agent
@@ -646,16 +683,21 @@ const ACTOR_LIFECYCLE_EVENTS = Object.freeze(['agent_start', 'agent_stop']);
  * desk's *latest* report that decides: a stop that a later `agent_start`
  * superseded is a finished earlier run, not evidence about this one.
  *
- * Bounded, and honest about that: past that window - and on a state rebuilt from
- * a `snapshot`, which carries the server's fold but no log - only
- * `last_event_type` is left and the reading falls back to it. That direction
+ * Read out of `trustedLog` rather than the whole log, so it is also the desk's
+ * latest report *about the office as it now stands*: an entry from before a
+ * recovery describes a state the snapshot replaced, and may not be cited as
+ * proof about what replaced it.
+ *
+ * Bounded, and honest about that: past the log window - and on a state rebuilt
+ * from a `snapshot`, whose own log is all pre-recovery - there is no trusted
+ * entry left and the reading falls back to `last_event_type`, which the fold
+ * always carries and which a snapshot always re-establishes. That direction
  * under-claims a completion, which is the safe half; the other one, a generic
  * `session_end` manufacturing a success, is what may never happen.
  */
-function reportedOwnStop(state, actorKey, actor) {
-  const log = Array.isArray(state.log) ? state.log : [];
+function reportedOwnStop(trusted, actorKey, actor) {
   if (typeof actorKey === 'string') {
-    for (const entry of log) {
+    for (const entry of trusted) {
       if (entry.actor_key !== actorKey) continue;
       if (!ACTOR_LIFECYCLE_EVENTS.includes(entry.event_type)) continue;
       return ACTOR_COMPLETION_EVENTS.includes(entry.event_type);
@@ -682,11 +724,11 @@ function reportedOwnStop(state, actorKey, actor) {
  * main orchestrator whose own stop is followed by the `session_end` that closes
  * the run, which `reportedOwnStop` finds rather than losing to the newer frame.
  */
-function outcomeFor(state, desk, actor, session) {
+function outcomeFor(trusted, desk, actor, session) {
   const observed = desk.last_known_visual.state;
   if (observed === 'error') return 'FAILED';
   if (observed === 'ended') {
-    return reportedOwnStop(state, desk.actor_key, actor) ? 'COMPLETED' : 'STOPPED';
+    return reportedOwnStop(trusted, desk.actor_key, actor) ? 'COMPLETED' : 'STOPPED';
   }
   if (session !== null && session.ended_at !== null && session.ended_at !== undefined) {
     return 'STOPPED';
@@ -703,11 +745,13 @@ function outcomeFor(state, desk, actor, session) {
 export function selectOutcome(state) {
   const desks = selectDesks(state);
   const frozen = unconfirmedStream(selectBanner(selectHeader(state)));
+  // One window for the whole panel, so no two rows read the same log differently.
+  const trusted = trustedLog(state);
   const rows = [];
   for (const desk of desks) {
     const session = ownProp(state.sessions, desk.session_id) ?? null;
     const actor = desk.actor_key === null ? null : (ownProp(state.actors, desk.actor_key) ?? null);
-    const result = outcomeFor(state, desk, actor, session);
+    const result = outcomeFor(trusted, desk, actor, session);
     if (result === null) continue;
     const now = claim(desk, frozen);
     rows.push({

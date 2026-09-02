@@ -120,6 +120,49 @@ function recovery(statuses: Record<string, string>): Frame {
   };
 }
 
+/**
+ * An office this client watched, a stretch of it the client missed, and the
+ * server's snapshot in between - built from one store, so `ingest_seq` runs the
+ * way it does on the wire and the missed stretch is a real hole in what this
+ * client applied rather than a re-numbered second history.
+ */
+function afterRecovery(
+  seen: readonly Partial<SanitizedEvent>[],
+  missed: readonly Partial<SanitizedEvent>[],
+  after: readonly Partial<SanitizedEvent>[] = [],
+): ClientState {
+  const store = new NamespaceStore({ namespace: 'live' });
+  const pending: WireEvent[] = [];
+  store.subscribe((wire) => pending.push(wire));
+  let clock = 0;
+  const ingest = (events: readonly Partial<SanitizedEvent>[]): WireEvent[] => {
+    for (const overrides of events) {
+      const ts = `2026-01-01T00:00:${String(clock++).padStart(2, '0')}.000Z`;
+      store.ingestObject(makeEvent({ ts, ...overrides }));
+    }
+    return pending.splice(0, pending.length);
+  };
+
+  let state = setConnectionPhase(createClientState('live'), 'open', 1000);
+  for (const wire of ingest(seen)) state = applyEvent(state, wire, 1000);
+  // Ingested while this client was not listening: the server folds these, and
+  // the client only ever learns of them through the snapshot below.
+  ingest(missed);
+  state = applyFrame(state, {
+    kind: 'snapshot',
+    payload: {
+      namespace: 'live',
+      halted: false,
+      halt_reason: null,
+      last_ingest_seq: store.stats.last_ingest_seq,
+      state: JSON.parse(JSON.stringify(store.state)) as unknown,
+    },
+    at_ms: 3000,
+  });
+  for (const wire of ingest(after)) state = applyEvent(state, wire, 3100);
+  return state;
+}
+
 /** One colleague per status label, all in one session. */
 function office(statuses: Record<string, string>): ClientState {
   return stateOf(
@@ -562,6 +605,62 @@ test('a stop a later start superseded is not evidence about the run after it', (
 
   assert.equal(byName.get('ann')?.result, 'STOPPED');
   assert.ok((byName.get('ann')?.follow_up ?? '').length > 0);
+});
+
+test('a stop from before a recovery snapshot is not proof about the run after it', () => {
+  // `applySnapshot` replaces the actors with the server's fold and leaves
+  // `state.log` alone, so the log outlives the office it described. Here ann
+  // finished one run while this client was watching, the client then missed the
+  // restart, and the session ended around the second run - and that first stop
+  // is still sitting in the log, describing work the snapshot superseded.
+  const state = afterRecovery(
+    [
+      { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+      { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+    ],
+    [
+      { event_type: 'agent_start', agent_id: 'ann', status: 'running' },
+      { event_type: 'session_end', agent_id: 'ann', status: 'running' },
+    ],
+  );
+  const row = selectOutcome(state).rows[0];
+
+  assert.ok(row !== undefined);
+  assert.equal(
+    state.log.some((entry) => entry.event_type === 'agent_stop'),
+    true,
+    'the superseded stop is still in the client log',
+  );
+  assert.equal(
+    state.actors[row.actor_key ?? '']?.last_event_type,
+    'session_end',
+    'and the authoritative state the snapshot brought says only that the run ended',
+  );
+  assert.equal(row.result, 'STOPPED', 'so the stale stop may not be read as this run finishing');
+  assert.ok((row.follow_up ?? '').length > 0, 'and the open loop is named');
+});
+
+test('a stop reported after the recovery is the office as it now stands', () => {
+  // The other half of the same rule: what may not be cited is an observation the
+  // snapshot replaced. Everything applied *since* it is the authoritative
+  // lifecycle, and a stop reported there is still the desk reporting its own
+  // finish - `session_end` overwriting `last_event_type` afterwards included.
+  const state = afterRecovery(
+    [{ event_type: 'agent_start', agent_id: 'ann', status: 'running' }],
+    [{ event_type: 'agent_start', agent_id: 'bob', status: 'running' }],
+    [
+      { event_type: 'agent_stop', agent_id: 'ann', status: 'completed' },
+      { event_type: 'session_end', agent_id: 'ann', status: 'running' },
+    ],
+  );
+  const byName = new Map(selectOutcome(state).rows.map((row) => [row.display_name, row]));
+
+  assert.equal(byName.get('ann')?.result, 'COMPLETED');
+  assert.equal(byName.get('ann')?.follow_up, null, 'so nothing is claimed to be left open');
+  // bob is in this office because the snapshot named it, and it never reported
+  // anything about itself: the session ending around it is not bob finishing.
+  assert.equal(byName.get('bob')?.result, 'STOPPED');
+  assert.ok((byName.get('bob')?.follow_up ?? '').length > 0);
 });
 
 test('a finished-sounding status on a non-terminal event is not a completion either', () => {
